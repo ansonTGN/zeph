@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="asset/zeph-logo.png" alt="Zeph" width="480">
+  <img src="asset/zeph_tui.png" alt="Zeph" width="800">
 
   **The AI agent that respects your resources.**
 
@@ -309,6 +309,10 @@ Skills can declare **required secrets** via the `x-requires-secrets` frontmatter
 [MCP →](https://bug-ops.github.io/zeph/guides/mcp.html) · [A2A →](https://bug-ops.github.io/zeph/advanced/a2a.html) · [Channels →](https://bug-ops.github.io/zeph/advanced/channels.html) · [Gateway →](https://bug-ops.github.io/zeph/advanced/gateway.html)
 
 ## Built-In TUI Dashboard
+
+<div align="center">
+  <img src="asset/zeph.gif" alt="Zeph TUI Dashboard" width="800">
+</div>
 
 A full terminal UI powered by ratatui — not a separate monitoring tool, but an integrated experience:
 
