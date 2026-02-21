@@ -127,7 +127,7 @@ pub(super) struct RuntimeConfig {
 pub struct Agent<C: Channel> {
     provider: AnyProvider,
     channel: C,
-    pub(crate) tool_executor: Box<dyn ErasedToolExecutor>,
+    pub(crate) tool_executor: Arc<dyn ErasedToolExecutor>,
     messages: Vec<Message>,
     pub(super) memory_state: MemoryState,
     pub(super) skill_state: SkillState,
@@ -183,7 +183,7 @@ impl<C: Channel> Agent<C> {
         Self {
             provider,
             channel,
-            tool_executor: Box::new(tool_executor),
+            tool_executor: Arc::new(tool_executor),
             messages: vec![Message {
                 role: Role::System,
                 content: system_prompt,
@@ -259,8 +259,50 @@ impl<C: Channel> Agent<C> {
         }
     }
 
+    /// Poll all active sub-agents for completed/failed/canceled results.
+    ///
+    /// Non-blocking: returns immediately with a list of `(task_id, result)` pairs
+    /// for agents that have finished. Each completed agent is removed from the manager.
+    pub async fn poll_subagents(&mut self) -> Vec<(String, String)> {
+        let Some(mgr) = &mut self.subagent_manager else {
+            return vec![];
+        };
+
+        let finished: Vec<String> = mgr
+            .statuses()
+            .into_iter()
+            .filter_map(|(id, status)| {
+                if matches!(
+                    status.state,
+                    zeph_a2a::types::TaskState::Completed
+                        | zeph_a2a::types::TaskState::Failed
+                        | zeph_a2a::types::TaskState::Canceled
+                ) {
+                    Some(id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let mut results = vec![];
+        for task_id in finished {
+            match mgr.collect(&task_id).await {
+                Ok(result) => results.push((task_id, result)),
+                Err(e) => {
+                    tracing::warn!(task_id, error = %e, "failed to collect sub-agent result");
+                }
+            }
+        }
+        results
+    }
+
     pub async fn shutdown(&mut self) {
         self.channel.send("Shutting down...").await.ok();
+
+        if let Some(ref mut mgr) = self.subagent_manager {
+            mgr.shutdown_all();
+        }
 
         if let Some(ref manager) = self.mcp.manager {
             manager.shutdown_all_shared().await;
@@ -303,6 +345,43 @@ impl<C: Channel> Agent<C> {
         }
 
         loop {
+            // Refresh sub-agent status in metrics before polling.
+            if let Some(ref mgr) = self.subagent_manager {
+                let sub_agent_metrics: Vec<crate::metrics::SubAgentMetrics> = mgr
+                    .statuses()
+                    .into_iter()
+                    .map(|(id, s)| {
+                        let def = mgr.agents_def(&id);
+                        crate::metrics::SubAgentMetrics {
+                            name: def.map_or_else(
+                                || id[..8.min(id.len())].to_owned(),
+                                |d| d.name.clone(),
+                            ),
+                            id: id.clone(),
+                            state: format!("{:?}", s.state).to_lowercase(),
+                            turns_used: s.turns_used,
+                            max_turns: def.map_or(20, |d| d.permissions.max_turns),
+                            background: def.is_some_and(|d| d.permissions.background),
+                            elapsed_secs: s.started_at.elapsed().as_secs(),
+                        }
+                    })
+                    .collect();
+                self.update_metrics(|m| m.sub_agents = sub_agent_metrics);
+            }
+
+            // Non-blocking poll: notify user when background sub-agents complete.
+            let completed = self.poll_subagents().await;
+            for (task_id, result) in completed {
+                let notice = if result.is_empty() {
+                    format!("[sub-agent {id}] completed (no output)", id = &task_id[..8])
+                } else {
+                    format!("[sub-agent {id}] completed:\n{result}", id = &task_id[..8])
+                };
+                if let Err(e) = self.channel.send(&notice).await {
+                    tracing::warn!(error = %e, "failed to send sub-agent completion notice");
+                }
+            }
+
             self.drain_channel();
 
             let (text, image_parts) = if let Some(queued) = self.message_queue.pop_front() {
@@ -491,6 +570,30 @@ impl<C: Channel> Agent<C> {
                 .await;
         }
 
+        if trimmed.starts_with("/agent") || trimmed.starts_with('@') {
+            let known: Vec<String> = self
+                .subagent_manager
+                .as_ref()
+                .map(|m| m.definitions().iter().map(|d| d.name.clone()).collect())
+                .unwrap_or_default();
+            match crate::subagent::AgentCommand::parse(trimmed, &known) {
+                Ok(cmd) => {
+                    if let Some(msg) = self.handle_agent_command(cmd) {
+                        self.channel.send(&msg).await?;
+                    }
+                    return Ok(());
+                }
+                Err(e) if trimmed.starts_with('@') => {
+                    // Unknown @token — fall through to normal LLM processing
+                    tracing::debug!("@mention not matched as agent: {e}");
+                }
+                Err(e) => {
+                    self.channel.send(&e.to_string()).await?;
+                    return Ok(());
+                }
+            }
+        }
+
         self.rebuild_system_prompt(&text).await;
 
         if let Err(e) = self.maybe_compact().await {
@@ -662,6 +765,98 @@ impl<C: Channel> Agent<C> {
             .send(&format!("Feedback recorded for \"{skill_name}\"."))
             .await?;
         Ok(())
+    }
+
+    fn handle_agent_command(&mut self, cmd: crate::subagent::AgentCommand) -> Option<String> {
+        use crate::subagent::AgentCommand;
+        use std::fmt::Write as _;
+
+        match cmd {
+            AgentCommand::List => {
+                let mgr = self.subagent_manager.as_ref()?;
+                let defs = mgr.definitions();
+                if defs.is_empty() {
+                    return Some("No sub-agent definitions found.".into());
+                }
+                let mut out = String::from("Available sub-agents:\n");
+                for d in defs {
+                    let _ = writeln!(out, "  {} — {}", d.name, d.description);
+                }
+                Some(out)
+            }
+            AgentCommand::Spawn { name, prompt } | AgentCommand::Background { name, prompt } => {
+                let provider = self.provider.clone();
+                let tool_executor = Arc::clone(&self.tool_executor);
+                let mgr = self.subagent_manager.as_mut()?;
+                match mgr.spawn(&name, &prompt, provider, tool_executor) {
+                    Ok(id) => Some(format!(
+                        "Sub-agent '{name}' started (id: {short})",
+                        short = &id[..8.min(id.len())]
+                    )),
+                    Err(e) => Some(format!("Failed to spawn sub-agent: {e}")),
+                }
+            }
+            AgentCommand::Status => {
+                let mgr = self.subagent_manager.as_ref()?;
+                let statuses = mgr.statuses();
+                if statuses.is_empty() {
+                    return Some("No active sub-agents.".into());
+                }
+                let mut out = String::from("Active sub-agents:\n");
+                for (id, s) in &statuses {
+                    let state = format!("{:?}", s.state).to_lowercase();
+                    let elapsed = s.started_at.elapsed().as_secs();
+                    let _ = writeln!(
+                        out,
+                        "  [{short}] {state}  turns={t}  elapsed={elapsed}s  {msg}",
+                        short = &id[..8.min(id.len())],
+                        t = s.turns_used,
+                        msg = s.last_message.as_deref().unwrap_or(""),
+                    );
+                }
+                Some(out)
+            }
+            AgentCommand::Cancel { id } => {
+                let mgr = self.subagent_manager.as_mut()?;
+                // Accept prefix match on task_id.
+                let ids: Vec<String> = mgr
+                    .statuses()
+                    .into_iter()
+                    .map(|(task_id, _)| task_id)
+                    .filter(|task_id| task_id.starts_with(&id))
+                    .collect();
+                match ids.as_slice() {
+                    [] => Some(format!("No sub-agent with id prefix '{id}'")),
+                    [full_id] => {
+                        let full_id = full_id.clone();
+                        match mgr.cancel(&full_id) {
+                            Ok(()) => Some(format!("Cancelled sub-agent {full_id}.")),
+                            Err(e) => Some(format!("Cancel failed: {e}")),
+                        }
+                    }
+                    _ => Some(format!(
+                        "Ambiguous id prefix '{id}': matches {} agents",
+                        ids.len()
+                    )),
+                }
+            }
+            AgentCommand::Approve { id } | AgentCommand::Deny { id } => Some(format!(
+                "Permission approval for '{id}' is not yet implemented"
+            )),
+            AgentCommand::Mention { agent, prompt } => {
+                // Foreground spawn: same as Spawn but triggered by @agent_name syntax.
+                let provider = self.provider.clone();
+                let tool_executor = Arc::clone(&self.tool_executor);
+                let mgr = self.subagent_manager.as_mut()?;
+                match mgr.spawn(&agent, &prompt, provider, tool_executor) {
+                    Ok(id) => Some(format!(
+                        "Sub-agent '{agent}' started (id: {short})",
+                        short = &id[..8.min(id.len())]
+                    )),
+                    Err(e) => Some(format!("Failed to spawn sub-agent: {e}")),
+                }
+            }
+        }
     }
 
     async fn reload_skills(&mut self) {
@@ -2084,5 +2279,136 @@ pub(super) mod agent_tests {
         }
         let sent = agent.channel.sent_messages();
         assert!(sent.iter().any(|m| m.contains("Image loaded")));
+    }
+
+    // ── handle_agent_command tests ────────────────────────────────────────────
+
+    use crate::subagent::AgentCommand;
+
+    fn make_agent_with_manager() -> Agent<MockChannel> {
+        use crate::subagent::def::{SkillFilter, SubAgentPermissions, ToolPolicy};
+        use crate::subagent::{SubAgentDef, SubAgentManager};
+
+        let provider = mock_provider(vec![]);
+        let channel = MockChannel::new(vec![]);
+        let registry = create_test_registry();
+        let executor = MockToolExecutor::no_tools();
+        let mut agent = Agent::new(provider, channel, registry, None, 5, executor);
+
+        let mut mgr = SubAgentManager::new(4);
+        mgr.definitions_mut().push(SubAgentDef {
+            name: "helper".into(),
+            description: "A helper bot".into(),
+            model: None,
+            tools: ToolPolicy::InheritAll,
+            permissions: SubAgentPermissions::default(),
+            skills: SkillFilter::default(),
+            system_prompt: "You are helpful.".into(),
+        });
+        agent.subagent_manager = Some(mgr);
+        agent
+    }
+
+    #[test]
+    fn agent_command_no_manager_returns_none() {
+        let provider = mock_provider(vec![]);
+        let channel = MockChannel::new(vec![]);
+        let registry = create_test_registry();
+        let executor = MockToolExecutor::no_tools();
+        let mut agent = Agent::new(provider, channel, registry, None, 5, executor);
+        // no subagent_manager set — List needs manager to return Some
+        assert!(agent.handle_agent_command(AgentCommand::List).is_none());
+    }
+
+    #[test]
+    fn agent_command_list_returns_definitions() {
+        let mut agent = make_agent_with_manager();
+        let resp = agent.handle_agent_command(AgentCommand::List).unwrap();
+        assert!(resp.contains("helper"));
+        assert!(resp.contains("A helper bot"));
+    }
+
+    #[test]
+    fn agent_command_spawn_unknown_name_returns_error() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut agent = make_agent_with_manager();
+        let resp = agent
+            .handle_agent_command(AgentCommand::Spawn {
+                name: "unknown-bot".into(),
+                prompt: "do something".into(),
+            })
+            .unwrap();
+        assert!(resp.contains("Failed to spawn"));
+    }
+
+    #[test]
+    fn agent_command_spawn_known_name_returns_started() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut agent = make_agent_with_manager();
+        let resp = agent
+            .handle_agent_command(AgentCommand::Spawn {
+                name: "helper".into(),
+                prompt: "do some work".into(),
+            })
+            .unwrap();
+        assert!(resp.contains("helper"));
+        assert!(resp.contains("started"));
+    }
+
+    #[test]
+    fn agent_command_status_no_agents_returns_empty_message() {
+        let mut agent = make_agent_with_manager();
+        let resp = agent.handle_agent_command(AgentCommand::Status).unwrap();
+        assert!(resp.contains("No active sub-agents"));
+    }
+
+    #[test]
+    fn agent_command_cancel_unknown_id_returns_not_found() {
+        let mut agent = make_agent_with_manager();
+        let resp = agent
+            .handle_agent_command(AgentCommand::Cancel {
+                id: "deadbeef".into(),
+            })
+            .unwrap();
+        assert!(resp.contains("No sub-agent"));
+    }
+
+    #[test]
+    fn agent_command_cancel_valid_id_succeeds() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut agent = make_agent_with_manager();
+        // spawn first so we have a task to cancel
+        let spawn_resp = agent
+            .handle_agent_command(AgentCommand::Spawn {
+                name: "helper".into(),
+                prompt: "cancel this".into(),
+            })
+            .unwrap();
+        // extract short id from "started (id: XXXXXXXX)"
+        let short_id = spawn_resp
+            .split("id: ")
+            .nth(1)
+            .unwrap()
+            .trim_end_matches(')')
+            .trim()
+            .to_string();
+        let resp = agent
+            .handle_agent_command(AgentCommand::Cancel { id: short_id })
+            .unwrap();
+        assert!(resp.contains("Cancelled"));
+    }
+
+    #[test]
+    fn agent_command_approve_returns_not_implemented() {
+        let mut agent = make_agent_with_manager();
+        let resp = agent
+            .handle_agent_command(AgentCommand::Approve {
+                id: "abc123".into(),
+            })
+            .unwrap();
+        assert!(resp.contains("not yet implemented"));
     }
 }

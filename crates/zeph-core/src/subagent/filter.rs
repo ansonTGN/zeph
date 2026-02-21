@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use zeph_skills::loader::Skill;
 use zeph_skills::registry::SkillRegistry;
@@ -17,14 +18,14 @@ use super::error::SubAgentError;
 /// All calls are checked against the policy before being forwarded to the inner
 /// executor. Rejected calls return a descriptive [`ToolError`].
 pub struct FilteredToolExecutor {
-    inner: Box<dyn ErasedToolExecutor>,
+    inner: Arc<dyn ErasedToolExecutor>,
     policy: ToolPolicy,
 }
 
 impl FilteredToolExecutor {
     /// Create a new filtered executor.
     #[must_use]
-    pub fn new(inner: Box<dyn ErasedToolExecutor>, policy: ToolPolicy) -> Self {
+    pub fn new(inner: Arc<dyn ErasedToolExecutor>, policy: ToolPolicy) -> Self {
         Self { inner, policy }
     }
 
@@ -254,8 +255,8 @@ mod tests {
         }
     }
 
-    fn stub_box(tools: &[&'static str]) -> Box<dyn ErasedToolExecutor> {
-        Box::new(StubExecutor {
+    fn stub_box(tools: &[&'static str]) -> Arc<dyn ErasedToolExecutor> {
+        Arc::new(StubExecutor {
             tools: tools.to_vec(),
         })
     }
@@ -450,5 +451,50 @@ mod tests {
         };
         let err = filter_skills(&registry, &filter).unwrap_err();
         assert!(matches!(err, SubAgentError::Invalid(_)));
+    }
+
+    mod proptest_glob {
+        use proptest::prelude::*;
+
+        use super::{compile_glob, glob_match};
+
+        proptest! {
+            #![proptest_config(proptest::test_runner::Config::with_cases(500))]
+
+            /// glob_match must never panic for any valid (non-**) pattern and any name string.
+            #[test]
+            fn glob_match_never_panics(
+                pattern in "[a-z*-]{1,10}",
+                name in "[a-z-]{0,15}",
+            ) {
+                // Skip patterns with ** (those are compile errors by design).
+                if !pattern.contains("**") {
+                    if let Ok(p) = compile_glob(&pattern) {
+                        let _ = glob_match(&p, &name);
+                    }
+                }
+            }
+
+            /// A literal pattern (no `*`) must match only exact strings.
+            #[test]
+            fn glob_literal_matches_only_exact(
+                name in "[a-z-]{1,10}",
+            ) {
+                // A literal pattern equal to `name` must match.
+                let p = compile_glob(&name).unwrap();
+                prop_assert!(glob_match(&p, &name));
+
+                // A different name must not match.
+                let other = format!("{name}-x");
+                prop_assert!(!glob_match(&p, &other));
+            }
+
+            /// The `*` pattern must match every input.
+            #[test]
+            fn glob_star_matches_everything(name in ".*") {
+                let p = compile_glob("*").unwrap();
+                prop_assert!(glob_match(&p, &name));
+            }
+        }
     }
 }
