@@ -1,24 +1,13 @@
 //! Command-aware output filtering pipeline.
 
-pub(crate) mod cargo_build;
-mod clippy;
-mod dir_listing;
-mod git;
-mod log_dedup;
+pub(crate) mod declarative;
 pub mod security;
-mod test_output;
 
+use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex};
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-
-pub use self::cargo_build::CargoBuildFilter;
-pub use self::clippy::ClippyFilter;
-pub use self::dir_listing::DirListingFilter;
-pub use self::git::GitFilter;
-pub use self::log_dedup::LogDedupFilter;
-pub use self::test_output::TestOutputFilter;
 
 // ---------------------------------------------------------------------------
 // FilterConfidence (#440)
@@ -64,6 +53,7 @@ pub enum CommandMatcher {
     Exact(&'static str),
     Prefix(&'static str),
     Regex(regex::Regex),
+    #[cfg(test)]
     Custom(Box<dyn Fn(&str) -> bool + Send + Sync>),
 }
 
@@ -79,6 +69,7 @@ impl CommandMatcher {
             Self::Exact(s) => command == *s,
             Self::Prefix(s) => command.starts_with(s),
             Self::Regex(re) => re.is_match(command),
+            #[cfg(test)]
             Self::Custom(f) => f(command),
         }
     }
@@ -113,6 +104,7 @@ impl std::fmt::Debug for CommandMatcher {
             Self::Exact(s) => write!(f, "Exact({s:?})"),
             Self::Prefix(s) => write!(f, "Prefix({s:?})"),
             Self::Regex(re) => write!(f, "Regex({:?})", re.as_str()),
+            #[cfg(test)]
             Self::Custom(_) => write!(f, "Custom(...)"),
         }
     }
@@ -248,24 +240,8 @@ impl Default for FilterMetrics {
 // FilterConfig (#444)
 // ---------------------------------------------------------------------------
 
-fn default_true() -> bool {
+pub(crate) fn default_true() -> bool {
     true
-}
-
-fn default_max_failures() -> usize {
-    10
-}
-
-fn default_stack_trace_lines() -> usize {
-    50
-}
-
-fn default_max_log_entries() -> usize {
-    20
-}
-
-fn default_max_diff_lines() -> usize {
-    500
 }
 
 /// Configuration for output filters.
@@ -275,127 +251,21 @@ pub struct FilterConfig {
     pub enabled: bool,
 
     #[serde(default)]
-    pub test: TestFilterConfig,
-
-    #[serde(default)]
-    pub git: GitFilterConfig,
-
-    #[serde(default)]
-    pub clippy: ClippyFilterConfig,
-
-    #[serde(default)]
-    pub cargo_build: CargoBuildFilterConfig,
-
-    #[serde(default)]
-    pub dir_listing: DirListingFilterConfig,
-
-    #[serde(default)]
-    pub log_dedup: LogDedupFilterConfig,
-
-    #[serde(default)]
     pub security: SecurityFilterConfig,
+
+    /// Directory containing a `filters.toml` override file.
+    /// Falls back to embedded defaults when `None` or when the file is absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filters_path: Option<PathBuf>,
 }
 
 impl Default for FilterConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            test: TestFilterConfig::default(),
-            git: GitFilterConfig::default(),
-            clippy: ClippyFilterConfig::default(),
-            cargo_build: CargoBuildFilterConfig::default(),
-            dir_listing: DirListingFilterConfig::default(),
-            log_dedup: LogDedupFilterConfig::default(),
             security: SecurityFilterConfig::default(),
+            filters_path: None,
         }
-    }
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct TestFilterConfig {
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-    #[serde(default = "default_max_failures")]
-    pub max_failures: usize,
-    #[serde(default = "default_stack_trace_lines")]
-    pub truncate_stack_trace: usize,
-}
-
-impl Default for TestFilterConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            max_failures: default_max_failures(),
-            truncate_stack_trace: default_stack_trace_lines(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct GitFilterConfig {
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-    #[serde(default = "default_max_log_entries")]
-    pub max_log_entries: usize,
-    #[serde(default = "default_max_diff_lines")]
-    pub max_diff_lines: usize,
-}
-
-impl Default for GitFilterConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            max_log_entries: default_max_log_entries(),
-            max_diff_lines: default_max_diff_lines(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ClippyFilterConfig {
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-}
-
-impl Default for ClippyFilterConfig {
-    fn default() -> Self {
-        Self { enabled: true }
-    }
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct CargoBuildFilterConfig {
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-}
-
-impl Default for CargoBuildFilterConfig {
-    fn default() -> Self {
-        Self { enabled: true }
-    }
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct DirListingFilterConfig {
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-}
-
-impl Default for DirListingFilterConfig {
-    fn default() -> Self {
-        Self { enabled: true }
-    }
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct LogDedupFilterConfig {
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-}
-
-impl Default for LogDedupFilterConfig {
-    fn default() -> Self {
-        Self { enabled: true }
     }
 }
 
@@ -465,23 +335,8 @@ impl OutputFilterRegistry {
             ),
             metrics: Mutex::new(FilterMetrics::new()),
         };
-        if config.test.enabled {
-            r.register(Box::new(TestOutputFilter::new(config.test.clone())));
-        }
-        if config.clippy.enabled {
-            r.register(Box::new(ClippyFilter::new(config.clippy.clone())));
-        }
-        if config.cargo_build.enabled {
-            r.register(Box::new(CargoBuildFilter::new(config.cargo_build.clone())));
-        }
-        if config.git.enabled {
-            r.register(Box::new(GitFilter::new(config.git.clone())));
-        }
-        if config.dir_listing.enabled {
-            r.register(Box::new(DirListingFilter::new(config.dir_listing.clone())));
-        }
-        if config.log_dedup.enabled {
-            r.register(Box::new(LogDedupFilter::new(config.log_dedup.clone())));
+        for f in declarative::load_declarative_filters(config.filters_path.as_deref()) {
+            r.register(f);
         }
         r
     }
@@ -722,28 +577,12 @@ mod tests {
         let toml_str = "enabled = true";
         let c: FilterConfig = toml::from_str(toml_str).unwrap();
         assert!(c.enabled);
-        assert!(c.test.enabled);
-        assert!(c.git.enabled);
-        assert!(c.clippy.enabled);
         assert!(c.security.enabled);
     }
 
     #[test]
-    fn filter_config_deserialize_full() {
+    fn filter_config_deserialize_security() {
         let toml_str = r#"
-enabled = true
-
-[test]
-enabled = true
-max_failures = 5
-truncate_stack_trace = 30
-
-[git]
-enabled = true
-max_log_entries = 10
-max_diff_lines = 200
-
-[clippy]
 enabled = true
 
 [security]
@@ -751,32 +590,8 @@ enabled = true
 extra_patterns = ["TODO: security review"]
 "#;
         let c: FilterConfig = toml::from_str(toml_str).unwrap();
-        assert_eq!(c.test.max_failures, 5);
-        assert_eq!(c.test.truncate_stack_trace, 30);
-        assert_eq!(c.git.max_log_entries, 10);
-        assert_eq!(c.git.max_diff_lines, 200);
-        assert!(c.clippy.enabled);
+        assert!(c.enabled);
         assert_eq!(c.security.extra_patterns, vec!["TODO: security review"]);
-    }
-
-    #[test]
-    fn disabled_filter_excluded_from_registry() {
-        let config = FilterConfig {
-            test: TestFilterConfig {
-                enabled: false,
-                ..TestFilterConfig::default()
-            },
-            ..FilterConfig::default()
-        };
-        let r = OutputFilterRegistry::default_filters(&config);
-        assert!(
-            r.apply(
-                "cargo test",
-                "test result: ok. 5 passed; 0 failed; 0 ignored; 0 filtered out",
-                0
-            )
-            .is_none()
-        );
     }
 
     // CommandMatcher tests
@@ -901,20 +716,6 @@ extra_patterns = ["TODO: security review"]
     }
 
     // Pipeline tests
-    #[test]
-    fn pipeline_single_stage() {
-        let config = FilterConfig::default();
-        let filter = TestOutputFilter::new(config.test.clone());
-        let mut pipeline = FilterPipeline::new();
-        pipeline.push(&filter);
-        let result = pipeline.run(
-            "cargo test",
-            "test result: ok. 5 passed; 0 failed; 0 ignored; 0 filtered out",
-            0,
-        );
-        assert!(result.output.contains("5 passed"));
-    }
-
     #[test]
     fn confidence_aggregation() {
         assert_eq!(
