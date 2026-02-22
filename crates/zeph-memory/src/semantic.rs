@@ -49,6 +49,95 @@ pub fn estimate_tokens(text: &str) -> usize {
     text.chars().count() / 4
 }
 
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm_a == 0.0 || norm_b == 0.0 {
+        return 0.0;
+    }
+    dot / (norm_a * norm_b)
+}
+
+fn apply_temporal_decay(
+    ranked: &mut [(MessageId, f64)],
+    timestamps: &std::collections::HashMap<MessageId, i64>,
+    half_life_days: u32,
+) {
+    if half_life_days == 0 {
+        return;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .cast_signed();
+    let lambda = std::f64::consts::LN_2 / f64::from(half_life_days);
+
+    for (msg_id, score) in ranked.iter_mut() {
+        if let Some(&ts) = timestamps.get(msg_id) {
+            #[allow(clippy::cast_precision_loss)]
+            let age_days = (now - ts).max(0) as f64 / 86400.0;
+            *score *= (-lambda * age_days).exp();
+        }
+    }
+}
+
+fn apply_mmr(
+    ranked: &[(MessageId, f64)],
+    vectors: &std::collections::HashMap<MessageId, Vec<f32>>,
+    lambda: f32,
+    limit: usize,
+) -> Vec<(MessageId, f64)> {
+    if ranked.is_empty() || limit == 0 {
+        return Vec::new();
+    }
+
+    let lambda = f64::from(lambda);
+    let mut selected: Vec<(MessageId, f64)> = Vec::with_capacity(limit);
+    let mut remaining: Vec<(MessageId, f64)> = ranked.to_vec();
+
+    while selected.len() < limit && !remaining.is_empty() {
+        let best_idx = if selected.is_empty() {
+            // Pick highest relevance first
+            0
+        } else {
+            let mut best = 0usize;
+            let mut best_score = f64::NEG_INFINITY;
+
+            for (i, &(cand_id, relevance)) in remaining.iter().enumerate() {
+                let max_sim = if let Some(cand_vec) = vectors.get(&cand_id) {
+                    selected
+                        .iter()
+                        .filter_map(|(sel_id, _)| vectors.get(sel_id))
+                        .map(|sel_vec| f64::from(cosine_similarity(cand_vec, sel_vec)))
+                        .fold(f64::NEG_INFINITY, f64::max)
+                } else {
+                    0.0
+                };
+                let max_sim = if max_sim == f64::NEG_INFINITY {
+                    0.0
+                } else {
+                    max_sim
+                };
+                let mmr_score = lambda * relevance - (1.0 - lambda) * max_sim;
+                if mmr_score > best_score {
+                    best_score = mmr_score;
+                    best = i;
+                }
+            }
+            best
+        };
+
+        selected.push(remaining.remove(best_idx));
+    }
+
+    selected
+}
+
 fn build_summarization_prompt(messages: &[(MessageId, String, String)]) -> String {
     let mut prompt = String::from(
         "Summarize the following conversation. Extract key facts, decisions, entities, \
@@ -74,6 +163,10 @@ pub struct SemanticMemory {
     embedding_model: String,
     vector_weight: f64,
     keyword_weight: f64,
+    temporal_decay_enabled: bool,
+    temporal_decay_half_life_days: u32,
+    mmr_enabled: bool,
+    mmr_lambda: f32,
 }
 
 impl SemanticMemory {
@@ -124,7 +217,27 @@ impl SemanticMemory {
             embedding_model: embedding_model.into(),
             vector_weight,
             keyword_weight,
+            temporal_decay_enabled: false,
+            temporal_decay_half_life_days: 30,
+            mmr_enabled: false,
+            mmr_lambda: 0.7,
         })
+    }
+
+    /// Configure temporal decay and MMR re-ranking options.
+    #[must_use]
+    pub fn with_ranking_options(
+        mut self,
+        temporal_decay_enabled: bool,
+        temporal_decay_half_life_days: u32,
+        mmr_enabled: bool,
+        mmr_lambda: f32,
+    ) -> Self {
+        self.temporal_decay_enabled = temporal_decay_enabled;
+        self.temporal_decay_half_life_days = temporal_decay_half_life_days;
+        self.mmr_enabled = mmr_enabled;
+        self.mmr_lambda = mmr_lambda;
+        self
     }
 
     /// Create a `SemanticMemory` using the `SQLite`-embedded vector backend.
@@ -150,6 +263,10 @@ impl SemanticMemory {
             embedding_model: embedding_model.into(),
             vector_weight,
             keyword_weight,
+            temporal_decay_enabled: false,
+            temporal_decay_half_life_days: 30,
+            mmr_enabled: false,
+            mmr_lambda: 0.7,
         })
     }
 
@@ -268,6 +385,7 @@ impl SemanticMemory {
     /// # Errors
     ///
     /// Returns an error if embedding generation, Qdrant search, or FTS5 query fails.
+    #[allow(clippy::too_many_lines)]
     pub async fn recall(
         &self,
         query: &str,
@@ -333,10 +451,51 @@ impl SemanticMemory {
             return Ok(Vec::new());
         }
 
-        // Sort by combined score descending, take top `limit`
+        // Sort by combined score descending
         let mut ranked: Vec<(MessageId, f64)> = scores.into_iter().collect();
         ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        ranked.truncate(limit);
+
+        // Apply temporal decay (before MMR)
+        if self.temporal_decay_enabled && self.temporal_decay_half_life_days > 0 {
+            let ids: Vec<MessageId> = ranked.iter().map(|r| r.0).collect();
+            match self.sqlite.message_timestamps(&ids).await {
+                Ok(timestamps) => {
+                    apply_temporal_decay(
+                        &mut ranked,
+                        &timestamps,
+                        self.temporal_decay_half_life_days,
+                    );
+                    ranked
+                        .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                }
+                Err(e) => {
+                    tracing::warn!("temporal decay: failed to fetch timestamps: {e:#}");
+                }
+            }
+        }
+
+        // Apply MMR re-ranking (after decay, before truncation)
+        if self.mmr_enabled && !vector_results.is_empty() {
+            if let Some(qdrant) = &self.qdrant {
+                let ids: Vec<MessageId> = ranked.iter().map(|r| r.0).collect();
+                match qdrant.get_vectors(&ids).await {
+                    Ok(vec_map) if !vec_map.is_empty() => {
+                        ranked = apply_mmr(&ranked, &vec_map, self.mmr_lambda, limit);
+                    }
+                    Ok(_) => {
+                        ranked.truncate(limit);
+                    }
+                    Err(e) => {
+                        tracing::warn!("MMR: failed to fetch vectors: {e:#}");
+                        ranked.truncate(limit);
+                    }
+                }
+            } else {
+                ranked.truncate(limit);
+            }
+        } else {
+            ranked.truncate(limit);
+        }
 
         let ids: Vec<MessageId> = ranked.iter().map(|r| r.0).collect();
         let messages = self.sqlite.messages_by_ids(&ids).await?;
@@ -839,6 +998,10 @@ mod tests {
             embedding_model: "test-model".into(),
             vector_weight: 0.7,
             keyword_weight: 0.3,
+            temporal_decay_enabled: false,
+            temporal_decay_half_life_days: 30,
+            mmr_enabled: false,
+            mmr_lambda: 0.7,
         }
     }
 
@@ -1323,6 +1486,10 @@ mod tests {
             embedding_model: "test-model".into(),
             vector_weight: 0.7,
             keyword_weight: 0.3,
+            temporal_decay_enabled: false,
+            temporal_decay_half_life_days: 30,
+            mmr_enabled: false,
+            mmr_lambda: 0.7,
         };
 
         let cid = memory.sqlite().create_conversation().await.unwrap();
@@ -1452,6 +1619,10 @@ mod tests {
             embedding_model: "test".into(),
             vector_weight: 0.7,
             keyword_weight: 0.3,
+            temporal_decay_enabled: false,
+            temporal_decay_half_life_days: 30,
+            mmr_enabled: false,
+            mmr_lambda: 0.7,
         };
         let cid = memory.sqlite().create_conversation().await.unwrap();
 
@@ -1717,6 +1888,10 @@ mod tests {
             embedding_model: "test".into(),
             vector_weight: 0.7,
             keyword_weight: 0.3,
+            temporal_decay_enabled: false,
+            temporal_decay_half_life_days: 30,
+            mmr_enabled: false,
+            mmr_lambda: 0.7,
         };
 
         let cid = memory.sqlite().create_conversation().await.unwrap();
@@ -1737,6 +1912,229 @@ mod tests {
         let summaries = memory.load_summaries(cid).await.unwrap();
         assert_eq!(summaries.len(), 1);
         assert!(!summaries[0].content.is_empty());
+    }
+
+    // Temporal decay tests
+
+    #[test]
+    fn temporal_decay_disabled_leaves_scores_unchanged() {
+        let mut ranked = vec![(MessageId(1), 1.0f64), (MessageId(2), 0.5f64)];
+        let timestamps = std::collections::HashMap::new();
+        apply_temporal_decay(&mut ranked, &timestamps, 30);
+        assert!((ranked[0].1 - 1.0).abs() < f64::EPSILON);
+        assert!((ranked[1].1 - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn temporal_decay_zero_age_preserves_score() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            .cast_signed();
+        let mut ranked = vec![(MessageId(1), 1.0f64)];
+        let mut timestamps = std::collections::HashMap::new();
+        timestamps.insert(MessageId(1), now);
+        apply_temporal_decay(&mut ranked, &timestamps, 30);
+        // age = 0 days, exp(0) = 1.0 → no change
+        assert!((ranked[0].1 - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn temporal_decay_half_life_halves_score() {
+        // Age exactly half_life_days → score should be halved
+        let half_life = 30u32;
+        let age_secs = i64::from(half_life) * 86400;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            .cast_signed();
+        let ts = now - age_secs;
+        let mut ranked = vec![(MessageId(1), 1.0f64)];
+        let mut timestamps = std::collections::HashMap::new();
+        timestamps.insert(MessageId(1), ts);
+        apply_temporal_decay(&mut ranked, &timestamps, half_life);
+        // exp(-ln2) = 0.5
+        assert!(
+            (ranked[0].1 - 0.5).abs() < 0.01,
+            "score was {}",
+            ranked[0].1
+        );
+    }
+
+    // MMR tests
+
+    #[test]
+    fn mmr_empty_input_returns_empty() {
+        let ranked = vec![];
+        let vectors = std::collections::HashMap::new();
+        let result = apply_mmr(&ranked, &vectors, 0.7, 5);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn mmr_returns_up_to_limit() {
+        let ranked = vec![
+            (MessageId(1), 1.0f64),
+            (MessageId(2), 0.9f64),
+            (MessageId(3), 0.8f64),
+        ];
+        let mut vectors = std::collections::HashMap::new();
+        vectors.insert(MessageId(1), vec![1.0f32, 0.0]);
+        vectors.insert(MessageId(2), vec![0.0f32, 1.0]);
+        vectors.insert(MessageId(3), vec![1.0f32, 0.0]);
+        let result = apply_mmr(&ranked, &vectors, 0.7, 2);
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn mmr_without_vectors_picks_by_relevance() {
+        let ranked = vec![(MessageId(1), 1.0f64), (MessageId(2), 0.5f64)];
+        let vectors = std::collections::HashMap::new();
+        let result = apply_mmr(&ranked, &vectors, 0.7, 2);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].0, MessageId(1));
+    }
+
+    #[test]
+    fn mmr_prefers_diverse_over_redundant() {
+        // Two candidates with same relevance but msg 2 is orthogonal (more diverse)
+        let ranked = vec![
+            (MessageId(1), 1.0f64), // selected first
+            (MessageId(2), 0.9f64), // orthogonal to 1
+            (MessageId(3), 0.9f64), // parallel to 1 (redundant)
+        ];
+        let mut vectors = std::collections::HashMap::new();
+        vectors.insert(MessageId(1), vec![1.0f32, 0.0]);
+        vectors.insert(MessageId(2), vec![0.0f32, 1.0]); // orthogonal
+        vectors.insert(MessageId(3), vec![1.0f32, 0.0]); // same as 1
+        let result = apply_mmr(&ranked, &vectors, 0.5, 2);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].0, MessageId(1));
+        // msg 2 should be preferred over msg 3 (diverse)
+        assert_eq!(result[1].0, MessageId(2));
+    }
+
+    #[test]
+    fn temporal_decay_half_life_zero_is_noop() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            .cast_signed();
+        let age_secs = 30i64 * 86400;
+        let ts = now - age_secs;
+        let mut ranked = vec![(MessageId(1), 1.0f64)];
+        let mut timestamps = std::collections::HashMap::new();
+        timestamps.insert(MessageId(1), ts);
+        // half_life=0 → guard returns early, score must remain 1.0
+        apply_temporal_decay(&mut ranked, &timestamps, 0);
+        assert!(
+            (ranked[0].1 - 1.0).abs() < f64::EPSILON,
+            "score was {}",
+            ranked[0].1
+        );
+    }
+
+    #[test]
+    fn temporal_decay_huge_age_near_zero() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            .cast_signed();
+        // 10 years = ~3650 days
+        let age_secs = 3650i64 * 86400;
+        let ts = now - age_secs;
+        let mut ranked = vec![(MessageId(1), 1.0f64)];
+        let mut timestamps = std::collections::HashMap::new();
+        timestamps.insert(MessageId(1), ts);
+        apply_temporal_decay(&mut ranked, &timestamps, 30);
+        // After 3650 days with half_life=30, score should be essentially 0
+        assert!(ranked[0].1 < 0.001, "score was {}", ranked[0].1);
+    }
+
+    #[test]
+    fn temporal_decay_small_half_life() {
+        // Very small half_life (1 day), age = 7 days → 2^(-7) ≈ 0.0078
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            .cast_signed();
+        let ts = now - 7 * 86400i64;
+        let mut ranked = vec![(MessageId(1), 1.0f64)];
+        let mut timestamps = std::collections::HashMap::new();
+        timestamps.insert(MessageId(1), ts);
+        apply_temporal_decay(&mut ranked, &timestamps, 1);
+        assert!(ranked[0].1 < 0.01, "score was {}", ranked[0].1);
+    }
+
+    #[test]
+    fn mmr_lambda_zero_max_diversity() {
+        // lambda=0 → pure diversity: second item should be most dissimilar
+        let ranked = vec![
+            (MessageId(1), 1.0f64),  // selected first (always highest relevance)
+            (MessageId(2), 0.9f64),  // orthogonal to 1
+            (MessageId(3), 0.85f64), // parallel to 1 (max_sim=1.0)
+        ];
+        let mut vectors = std::collections::HashMap::new();
+        vectors.insert(MessageId(1), vec![1.0f32, 0.0]);
+        vectors.insert(MessageId(2), vec![0.0f32, 1.0]); // orthogonal
+        vectors.insert(MessageId(3), vec![1.0f32, 0.0]); // same direction
+        let result = apply_mmr(&ranked, &vectors, 0.0, 3);
+        assert_eq!(result.len(), 3);
+        // After 1 is selected: mmr(2) = 0 - (1-0)*0 = 0, mmr(3) = 0 - 1*1 = -1 → 2 wins
+        assert_eq!(result[1].0, MessageId(2));
+    }
+
+    #[test]
+    fn mmr_lambda_one_pure_relevance() {
+        // lambda=1 → pure relevance, should pick in relevance order
+        let ranked = vec![
+            (MessageId(1), 1.0f64),
+            (MessageId(2), 0.8f64),
+            (MessageId(3), 0.6f64),
+        ];
+        let mut vectors = std::collections::HashMap::new();
+        vectors.insert(MessageId(1), vec![1.0f32, 0.0]);
+        vectors.insert(MessageId(2), vec![0.0f32, 1.0]);
+        vectors.insert(MessageId(3), vec![0.5f32, 0.5]);
+        let result = apply_mmr(&ranked, &vectors, 1.0, 3);
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].0, MessageId(1));
+        assert_eq!(result[1].0, MessageId(2));
+        assert_eq!(result[2].0, MessageId(3));
+    }
+
+    #[test]
+    fn mmr_limit_zero_returns_empty() {
+        let ranked = vec![(MessageId(1), 1.0f64), (MessageId(2), 0.8f64)];
+        let mut vectors = std::collections::HashMap::new();
+        vectors.insert(MessageId(1), vec![1.0f32, 0.0]);
+        vectors.insert(MessageId(2), vec![0.0f32, 1.0]);
+        let result = apply_mmr(&ranked, &vectors, 0.7, 0);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn mmr_duplicate_vectors_penalizes_second() {
+        // Two items with identical embeddings: second should be heavily penalized
+        let ranked = vec![
+            (MessageId(1), 1.0f64),
+            (MessageId(2), 1.0f64), // same relevance, same direction
+            (MessageId(3), 0.9f64), // orthogonal, lower relevance
+        ];
+        let mut vectors = std::collections::HashMap::new();
+        vectors.insert(MessageId(1), vec![1.0f32, 0.0]);
+        vectors.insert(MessageId(2), vec![1.0f32, 0.0]); // duplicate
+        vectors.insert(MessageId(3), vec![0.0f32, 1.0]); // orthogonal
+        let result = apply_mmr(&ranked, &vectors, 0.5, 3);
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].0, MessageId(1));
+        // msg3 (orthogonal) should be preferred over msg2 (duplicate) with lambda=0.5
+        assert_eq!(result[1].0, MessageId(3));
     }
 
     // Priority 3: proptest
