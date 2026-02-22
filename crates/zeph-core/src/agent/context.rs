@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::fmt::Write;
 
 use zeph_llm::provider::MessagePart;
@@ -5,6 +6,8 @@ use zeph_memory::semantic::estimate_tokens;
 use zeph_skills::ScoredMatch;
 use zeph_skills::loader::SkillMeta;
 use zeph_skills::prompt::format_skills_catalog;
+
+use crate::redact::scrub_content;
 
 use super::{
     Agent, CODE_CONTEXT_PREFIX, CROSS_SESSION_PREFIX, Channel, ContextBudget, EnvironmentContext,
@@ -22,10 +25,11 @@ impl<C: Channel> Agent<C> {
         let Some(ref budget) = self.context_state.budget else {
             return false;
         };
+        let margin = self.runtime.token_safety_margin;
         let total_tokens: usize = self
             .messages
             .iter()
-            .map(|m| estimate_tokens(&m.content))
+            .map(|m| (estimate_tokens(&m.content) as f64 * f64::from(margin)) as usize)
             .sum();
         let threshold =
             (budget.max_tokens() as f32 * self.context_state.compaction_threshold) as usize;
@@ -644,6 +648,15 @@ impl<C: Channel> Agent<C> {
         }
 
         self.trim_messages_to_budget(alloc.recent_history);
+
+        if self.runtime.redact_credentials {
+            for msg in &mut self.messages {
+                if let Cow::Owned(s) = scrub_content(&msg.content) {
+                    msg.content = s;
+                }
+            }
+        }
+
         self.recompute_prompt_tokens();
         let _ = self.channel.send_status("").await;
 
@@ -1787,6 +1800,131 @@ mod tests {
         } else {
             panic!("expected ToolResult");
         }
+    }
+
+    #[tokio::test]
+    async fn test_prepare_context_scrubs_secrets_when_redact_enabled() {
+        let provider = mock_provider(vec![]);
+        let channel = MockChannel::new(vec![]);
+        let registry = create_test_registry();
+        let executor = MockToolExecutor::no_tools();
+
+        let mut agent = Agent::new(provider, channel, registry, None, 5, executor)
+            .with_context_budget(4096, 0.20, 0.80, 4, 0)
+            .with_redact_credentials(true);
+
+        // Push a user message containing a secret and a path
+        agent.messages.push(Message {
+            role: Role::User,
+            content: "my key is sk-abc123xyz and lives at /Users/dev/config.toml".into(),
+            parts: vec![],
+        });
+
+        agent.prepare_context("test").await.unwrap();
+
+        let user_msg = agent
+            .messages
+            .iter()
+            .find(|m| m.role == Role::User)
+            .unwrap();
+        assert!(
+            !user_msg.content.contains("sk-abc123xyz"),
+            "secret must be redacted"
+        );
+        assert!(
+            !user_msg.content.contains("/Users/dev/"),
+            "path must be redacted"
+        );
+        assert!(
+            user_msg.content.contains("[REDACTED]"),
+            "secret replaced with [REDACTED]"
+        );
+        assert!(
+            user_msg.content.contains("[PATH]"),
+            "path replaced with [PATH]"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_prepare_context_no_scrub_when_redact_disabled() {
+        let provider = mock_provider(vec![]);
+        let channel = MockChannel::new(vec![]);
+        let registry = create_test_registry();
+        let executor = MockToolExecutor::no_tools();
+
+        let mut agent = Agent::new(provider, channel, registry, None, 5, executor)
+            .with_context_budget(4096, 0.20, 0.80, 4, 0)
+            .with_redact_credentials(false);
+
+        let original = "key sk-abc123xyz at /Users/dev/file.rs".to_string();
+        agent.messages.push(Message {
+            role: Role::User,
+            content: original.clone(),
+            parts: vec![],
+        });
+
+        agent.prepare_context("test").await.unwrap();
+
+        let user_msg = agent
+            .messages
+            .iter()
+            .find(|m| m.role == Role::User)
+            .unwrap();
+        assert_eq!(
+            user_msg.content, original,
+            "content must be unchanged when redact disabled"
+        );
+    }
+
+    #[test]
+    fn token_safety_margin_above_one_inflates_token_count() {
+        let provider = mock_provider(vec![]);
+        let channel = MockChannel::new(vec![]);
+        let registry = create_test_registry();
+        let executor = MockToolExecutor::no_tools();
+
+        // With a very large margin, token count is inflated and compaction triggers earlier
+        let mut agent = Agent::new(provider, channel, registry, None, 5, executor)
+            .with_context_budget(1000, 0.20, 0.75, 4, 0)
+            .with_token_safety_margin(100.0);
+        for i in 0..5 {
+            agent.messages.push(Message {
+                role: Role::User,
+                content: format!("message {i} with content"),
+                parts: vec![],
+            });
+        }
+
+        assert!(
+            agent.should_compact(),
+            "large margin must trigger compaction even with few messages"
+        );
+    }
+
+    #[test]
+    fn token_safety_margin_zero_never_compacts() {
+        let provider = mock_provider(vec![]);
+        let channel = MockChannel::new(vec![]);
+        let registry = create_test_registry();
+        let executor = MockToolExecutor::no_tools();
+
+        // margin=0.0 makes all token counts 0, so compaction never triggers
+        let mut agent = Agent::new(provider, channel, registry, None, 5, executor)
+            .with_context_budget(10, 0.20, 0.75, 4, 0)
+            .with_token_safety_margin(0.0);
+        for i in 0..50 {
+            agent.messages.push(Message {
+                role: Role::User,
+                content: format!(
+                    "very long message content {i} repeated many times to fill context"
+                ),
+                parts: vec![],
+            });
+        }
+        assert!(
+            !agent.should_compact(),
+            "margin=0.0 means zero token counts, must never compact"
+        );
     }
 
     #[tokio::test]

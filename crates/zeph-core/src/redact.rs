@@ -1,6 +1,29 @@
 use std::borrow::Cow;
 use std::sync::LazyLock;
 
+/// Apply both secret redaction and path sanitization in a single pass.
+///
+/// Returns `Cow::Borrowed` when no changes are needed (zero-allocation fast path).
+#[must_use]
+pub fn scrub_content(text: &str) -> Cow<'_, str> {
+    let after_secrets = match redact_secrets(text) {
+        Cow::Borrowed(_) => {
+            // No secrets found: only run path scan on original text
+            return match sanitize_paths(text) {
+                Cow::Owned(s) => Cow::Owned(s),
+                Cow::Borrowed(_) => Cow::Borrowed(text),
+            };
+        }
+        Cow::Owned(s) => s,
+    };
+
+    // Second pass: path sanitization on already-modified string
+    match sanitize_paths(&after_secrets) {
+        Cow::Owned(s) => Cow::Owned(s),
+        Cow::Borrowed(_) => Cow::Owned(after_secrets),
+    }
+}
+
 use regex::Regex;
 
 const SECRET_PREFIXES: &[&str] = &[
@@ -329,6 +352,71 @@ mod tests {
 
     use proptest::prelude::*;
 
+    #[test]
+    fn scrub_no_match_passthrough() {
+        let text = "hello world, nothing sensitive here";
+        let result = scrub_content(text);
+        assert!(matches!(result, Cow::Borrowed(_)));
+        assert_eq!(result.as_ref(), text);
+    }
+
+    #[test]
+    fn scrub_only_secrets() {
+        let text = "key: sk-abc123def";
+        let result = scrub_content(text);
+        assert!(result.contains("[REDACTED]"));
+        assert!(!result.contains("sk-abc123"));
+        assert!(!result.contains("/home/"));
+    }
+
+    #[test]
+    fn scrub_only_paths() {
+        let text = "error at /Users/dev/project/src/main.rs:42";
+        let result = scrub_content(text);
+        assert!(result.contains("[PATH]"));
+        assert!(!result.contains("/Users/dev/"));
+    }
+
+    #[test]
+    fn scrub_secrets_and_paths_combined() {
+        let text = "token sk-abc123 found at /home/user/config.toml";
+        let result = scrub_content(text);
+        assert!(result.contains("[REDACTED]"));
+        assert!(result.contains("[PATH]"));
+        assert!(!result.contains("sk-abc123"));
+        assert!(!result.contains("/home/user/"));
+    }
+
+    #[test]
+    fn scrub_secrets_no_paths() {
+        // Secret found but no path → function returns Cow::Owned (modified string)
+        let text = "use sk-abc123 for auth";
+        let result = scrub_content(text);
+        assert!(
+            matches!(result, Cow::Owned(_)),
+            "must return Cow::Owned when secret was found"
+        );
+        assert!(result.contains("[REDACTED]"));
+        assert!(!result.contains("[PATH]"));
+    }
+
+    #[test]
+    fn sanitize_paths_all_prefixes() {
+        let cases = [
+            ("/root/secrets.toml", "/root/"),
+            ("/tmp/tmpfile.lock", "/tmp/"),
+            ("/var/log/app.log", "/var/"),
+        ];
+        for (text, prefix) in cases {
+            let result = sanitize_paths(text);
+            assert!(result.contains("[PATH]"), "{prefix} must be sanitized");
+            assert!(
+                !result.contains(prefix),
+                "{prefix} must be removed from output"
+            );
+        }
+    }
+
     proptest! {
         #[test]
         fn redact_secrets_never_panics(s in ".*") {
@@ -351,6 +439,26 @@ mod tests {
             if !secret_prefixes.iter().any(|p| s.contains(p)) {
                 let result = redact_secrets(&s);
                 assert_eq!(result.as_ref(), s.as_str());
+            }
+        }
+
+        #[test]
+        fn scrub_content_never_panics(s in ".*") {
+            let _ = scrub_content(&s);
+        }
+
+        #[test]
+        fn scrub_content_result_never_contains_raw_secret(s in ".*") {
+            let result = scrub_content(&s);
+            let secret_prefixes = [
+                "sk-", "sk_live_", "sk_test_", "AKIA", "ghp_", "gho_",
+                "xoxb-", "xoxp-", "AIza", "glpat-", "dckr_pat_",
+            ];
+            for prefix in secret_prefixes {
+                assert!(
+                    !result.contains(prefix),
+                    "scrub_content must redact prefix: {prefix}"
+                );
             }
         }
     }

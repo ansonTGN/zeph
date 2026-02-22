@@ -43,14 +43,13 @@ impl<C: Channel> Agent<C> {
         recall_limit: usize,
         summarization_threshold: usize,
     ) -> Self {
-        let has_qdrant = memory.has_qdrant();
         self.memory_state.memory = Some(memory);
         self.memory_state.conversation_id = Some(conversation_id);
         self.memory_state.history_limit = history_limit;
         self.memory_state.recall_limit = recall_limit;
         self.memory_state.summarization_threshold = summarization_threshold;
         self.update_metrics(|m| {
-            m.qdrant_available = has_qdrant;
+            m.qdrant_available = false;
             m.sqlite_conversation_id = Some(conversation_id);
         });
         self
@@ -139,6 +138,18 @@ impl<C: Channel> Agent<C> {
     }
 
     #[must_use]
+    pub fn with_redact_credentials(mut self, enabled: bool) -> Self {
+        self.runtime.redact_credentials = enabled;
+        self
+    }
+
+    #[must_use]
+    pub fn with_token_safety_margin(mut self, margin: f32) -> Self {
+        self.runtime.token_safety_margin = margin;
+        self
+    }
+
+    #[must_use]
     pub fn with_tool_summarization(mut self, enabled: bool) -> Self {
         self.runtime.summarize_tool_output_enabled = enabled;
         self
@@ -215,11 +226,7 @@ impl<C: Channel> Agent<C> {
         let provider_name = self.provider.name().to_string();
         let model_name = self.runtime.model_name.clone();
         let total_skills = self.skill_state.registry.all_meta().len();
-        let qdrant_available = self
-            .memory_state
-            .memory
-            .as_ref()
-            .is_some_and(zeph_memory::semantic::SemanticMemory::has_qdrant);
+        let qdrant_available = false;
         let conversation_id = self.memory_state.conversation_id;
         let prompt_estimate = self
             .messages

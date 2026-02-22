@@ -40,10 +40,13 @@ pub struct SessionSummaryResult {
     pub conversation_id: ConversationId,
 }
 
-/// Estimate token count using bytes/3 heuristic.
+/// Estimate token count using chars/4 heuristic.
+///
+/// Aligns better with `cl100k_base` tokenizer behavior for both ASCII and multi-byte
+/// UTF-8 text (CJK, Cyrillic) compared to the previous byte-length approach.
 #[must_use]
 pub fn estimate_tokens(text: &str) -> usize {
-    text.len() / 3
+    text.chars().count() / 4
 }
 
 fn build_summarization_prompt(messages: &[(MessageId, String, String)]) -> String {
@@ -117,6 +120,32 @@ impl SemanticMemory {
         Ok(Self {
             sqlite,
             qdrant,
+            provider,
+            embedding_model: embedding_model.into(),
+            vector_weight,
+            keyword_weight,
+        })
+    }
+
+    /// Create a `SemanticMemory` using the `SQLite`-embedded vector backend.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `SQLite` cannot be initialized.
+    pub async fn with_sqlite_backend(
+        sqlite_path: &str,
+        provider: AnyProvider,
+        embedding_model: &str,
+        vector_weight: f64,
+        keyword_weight: f64,
+    ) -> Result<Self, MemoryError> {
+        let sqlite = SqliteStore::new(sqlite_path).await?;
+        let pool = sqlite.pool().clone();
+        let store = EmbeddingStore::new_sqlite(pool);
+
+        Ok(Self {
+            sqlite,
+            qdrant: Some(store),
             provider,
             embedding_model: embedding_model.into(),
             vector_weight,
@@ -493,9 +522,20 @@ impl SemanticMemory {
         &self.sqlite
     }
 
-    /// Check if Qdrant is available for semantic search.
+    /// Check if the vector store backend is reachable.
+    ///
+    /// Performs a real health check (Qdrant gRPC ping or `SQLite` query)
+    /// instead of just checking whether the client was created.
+    pub async fn is_vector_store_connected(&self) -> bool {
+        match self.qdrant.as_ref() {
+            Some(store) => store.health_check().await,
+            None => false,
+        }
+    }
+
+    /// Check if a vector store client is configured (may not be connected).
     #[must_use]
-    pub fn has_qdrant(&self) -> bool {
+    pub fn has_vector_store(&self) -> bool {
         self.qdrant.is_some()
     }
 
@@ -877,9 +917,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn has_qdrant_returns_false_when_unavailable() {
+    async fn has_vector_store_returns_false_when_unavailable() {
         let memory = test_semantic_memory(false).await;
-        assert!(!memory.has_qdrant());
+        assert!(!memory.has_vector_store());
+    }
+
+    #[tokio::test]
+    async fn is_vector_store_connected_returns_false_when_unavailable() {
+        let memory = test_semantic_memory(false).await;
+        assert!(!memory.is_vector_store_connected().await);
     }
 
     #[tokio::test]
@@ -907,19 +953,28 @@ mod tests {
 
     #[test]
     fn estimate_tokens_ascii() {
+        // "Hello, world!" = 13 chars / 4 = 3
         let text = "Hello, world!";
-        assert_eq!(estimate_tokens(text), 4);
+        assert_eq!(estimate_tokens(text), 3);
     }
 
     #[test]
     fn estimate_tokens_unicode() {
+        // "Привет мир" = 10 chars / 4 = 2
         let text = "Привет мир";
-        assert_eq!(estimate_tokens(text), 6);
+        assert_eq!(estimate_tokens(text), 2);
     }
 
     #[test]
     fn estimate_tokens_empty() {
         assert_eq!(estimate_tokens(""), 0);
+    }
+
+    #[test]
+    fn estimate_tokens_cjk() {
+        // 8 CJK chars / 4 = 2
+        let text = "你好世界テスト日";
+        assert_eq!(estimate_tokens(text), 2);
     }
 
     #[tokio::test]
@@ -1211,13 +1266,15 @@ mod tests {
 
     #[test]
     fn estimate_tokens_short_text() {
+        // "ab" = 2 chars / 4 = 0
         assert_eq!(estimate_tokens("ab"), 0);
     }
 
     #[test]
     fn estimate_tokens_longer_text() {
+        // 100 chars / 4 = 25
         let text = "a".repeat(100);
-        assert_eq!(estimate_tokens(&text), 33);
+        assert_eq!(estimate_tokens(&text), 25);
     }
 
     #[tokio::test]
@@ -1244,6 +1301,54 @@ mod tests {
         let result =
             SemanticMemory::new(":memory:", "http://127.0.0.1:1", provider, "test-model").await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_semantic_memory_sqlite_remember_recall_roundtrip() {
+        // Build SemanticMemory with EmbeddingStore backed by SQLite instead of Qdrant
+        let mut mock = MockProvider::default();
+        mock.supports_embeddings = true;
+        // Provide deterministic embedding vectors: embed returns a fixed 4-element vector
+        // MockProvider.embed always returns the same vector, so cosine similarity = 1.0
+        let provider = AnyProvider::Mock(mock);
+
+        let sqlite = SqliteStore::new(":memory:").await.unwrap();
+        let pool = sqlite.pool().clone();
+        let qdrant = Some(crate::embedding_store::EmbeddingStore::new_sqlite(pool));
+
+        let memory = SemanticMemory {
+            sqlite,
+            qdrant,
+            provider,
+            embedding_model: "test-model".into(),
+            vector_weight: 0.7,
+            keyword_weight: 0.3,
+        };
+
+        let cid = memory.sqlite().create_conversation().await.unwrap();
+
+        // remember → stores in SQLite + SQLite vector store
+        let id1 = memory
+            .remember(cid, "user", "rust async programming")
+            .await
+            .unwrap();
+        let id2 = memory
+            .remember(cid, "assistant", "use tokio for async")
+            .await
+            .unwrap();
+        assert!(id1 < id2);
+
+        // recall → should return results via FTS5 keyword search
+        let recalled = memory.recall("rust", 5, None).await.unwrap();
+        assert!(
+            !recalled.is_empty(),
+            "recall must return at least one result"
+        );
+
+        // Verify history is accessible
+        let history = memory.sqlite().load_history(cid, 50).await.unwrap();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].content, "rust async programming");
     }
 
     #[tokio::test]
