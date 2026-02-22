@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="asset/zeph_tui.png" alt="Zeph" width="800">
+  <img src="asset/zeph_v8_github.png" alt="Zeph" width="800">
 
   **The AI agent that respects your resources.**
 
