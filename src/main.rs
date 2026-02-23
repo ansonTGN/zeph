@@ -128,6 +128,11 @@ struct Cli {
     #[arg(long)]
     daemon: bool,
 
+    /// Run as ACP server over stdio for IDE embedding (requires acp feature)
+    #[cfg(feature = "acp")]
+    #[arg(long)]
+    acp: bool,
+
     /// Connect TUI to a remote daemon via A2A SSE (requires tui + a2a features)
     #[cfg(all(feature = "tui", feature = "a2a"))]
     #[arg(long, value_name = "URL")]
@@ -286,6 +291,29 @@ async fn main() -> anyhow::Result<()> {
     if cli.daemon {
         tracing_subscriber::fmt::init();
         return run_daemon(
+            cli.config.as_deref(),
+            cli.vault.as_deref(),
+            cli.vault_key.as_deref(),
+            cli.vault_path.as_deref(),
+        )
+        .await;
+    }
+
+    #[cfg(feature = "acp")]
+    if cli.acp {
+        let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+        let file = std::fs::File::create("zeph.log").ok();
+        if let Some(file) = file {
+            tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .with_writer(file)
+                .with_line_number(true)
+                .init();
+        } else {
+            tracing_subscriber::fmt().with_env_filter(filter).init();
+        }
+        return run_acp_server(
             cli.config.as_deref(),
             cli.vault.as_deref(),
             cli.vault_key.as_deref(),
@@ -1995,6 +2023,260 @@ fn setup_otel_tracer(endpoint: &str) -> anyhow::Result<opentelemetry_sdk::trace:
     opentelemetry::global::set_tracer_provider(provider);
 
     Ok(tracer)
+}
+
+/// Run Zeph as an ACP server over stdio.
+///
+/// All dependencies needed to construct an Agent inside the ACP spawner.
+/// Consumed once on first `session/new` (Phase 1 MVP: single session).
+#[cfg(feature = "acp")]
+struct AgentDeps {
+    provider: zeph_llm::any::AnyProvider,
+    registry: zeph_skills::registry::SkillRegistry,
+    matcher: Option<zeph_skills::matcher::SkillMatcherBackend>,
+    max_active_skills: usize,
+    tool_executor: zeph_tools::CompositeExecutor<
+        zeph_tools::CompositeExecutor<
+            zeph_tools::FileExecutor,
+            zeph_tools::CompositeExecutor<zeph_tools::ShellExecutor, zeph_tools::WebScrapeExecutor>,
+        >,
+        zeph_mcp::McpToolExecutor,
+    >,
+    max_tool_iterations: usize,
+    model_name: String,
+    embed_model: String,
+    skill_paths: Vec<PathBuf>,
+    reload_rx: tokio::sync::mpsc::Receiver<zeph_skills::watcher::SkillEvent>,
+    memory: zeph_memory::semantic::SemanticMemory,
+    conversation_id: zeph_memory::ConversationId,
+    history_limit: u32,
+    recall_limit: usize,
+    summarization_threshold: usize,
+    budget_tokens: usize,
+    compaction_threshold: f32,
+    compaction_preserve_tail: usize,
+    prune_protect_tokens: usize,
+    shutdown_rx: tokio::sync::watch::Receiver<bool>,
+    security: zeph_core::config::SecurityConfig,
+    timeouts: zeph_core::config::TimeoutConfig,
+    redact_credentials: bool,
+    tool_summarization: bool,
+    permission_policy: zeph_tools::PermissionPolicy,
+    config_path: PathBuf,
+    config_reload_rx: tokio::sync::mpsc::Receiver<zeph_core::config_watcher::ConfigEvent>,
+    mcp_tools: Vec<zeph_mcp::McpTool>,
+    mcp_registry: Option<zeph_mcp::McpToolRegistry>,
+    mcp_manager: std::sync::Arc<zeph_mcp::McpManager>,
+    mcp_config: zeph_core::config::McpConfig,
+    learning: zeph_core::config::LearningConfig,
+    secrets: std::collections::HashMap<String, zeph_core::vault::Secret>,
+    summary_provider: Option<zeph_llm::any::AnyProvider>,
+}
+
+/// Build all agent dependencies from config for the ACP server.
+#[cfg(feature = "acp")]
+async fn build_acp_deps(
+    config_path: Option<&std::path::Path>,
+    vault_backend: Option<&str>,
+    vault_key: Option<&std::path::Path>,
+    vault_path: Option<&std::path::Path>,
+) -> anyhow::Result<(AgentDeps, Box<dyn std::any::Any>)> {
+    let app = AppBuilder::new(config_path, vault_backend, vault_key, vault_path).await?;
+    let (provider, _status_rx) = app.build_provider().await?;
+    let embed_model = app.embedding_model();
+    let budget_tokens = app.auto_budget_tokens(&provider);
+    let registry = app.build_registry();
+    let memory = app.build_memory(&provider).await?;
+    let all_meta = registry.all_meta();
+    let matcher = app.build_skill_matcher(&provider, &all_meta, &memory).await;
+    let config = app.config();
+
+    let conversation_id = match memory.sqlite().latest_conversation_id().await? {
+        Some(id) => id,
+        None => memory.sqlite().create_conversation().await?,
+    };
+
+    let filter_registry = if config.tools.filters.enabled {
+        zeph_tools::OutputFilterRegistry::default_filters(&config.tools.filters)
+    } else {
+        zeph_tools::OutputFilterRegistry::new(false)
+    };
+    let shell_executor = zeph_tools::ShellExecutor::new(&config.tools.shell)
+        .with_permissions(
+            config
+                .tools
+                .permission_policy(config.security.autonomy_level),
+        )
+        .with_output_filters(filter_registry);
+    let scrape_executor = zeph_tools::WebScrapeExecutor::new(&config.tools.scrape);
+    let file_executor = zeph_tools::FileExecutor::new(
+        config
+            .tools
+            .shell
+            .allowed_paths
+            .iter()
+            .map(PathBuf::from)
+            .collect(),
+    );
+    let mcp_manager = std::sync::Arc::new(zeph_core::bootstrap::create_mcp_manager(config));
+    let mcp_tools = mcp_manager.connect_all().await;
+    let mcp_executor = zeph_mcp::McpToolExecutor::new(mcp_manager.clone());
+    let base_executor = zeph_tools::CompositeExecutor::new(
+        file_executor,
+        zeph_tools::CompositeExecutor::new(shell_executor, scrape_executor),
+    );
+    let tool_executor = zeph_tools::CompositeExecutor::new(base_executor, mcp_executor);
+
+    let mcp_registry = create_mcp_registry(config, &provider, &mcp_tools, &embed_model).await;
+    let summary_provider = app.build_summary_provider();
+    let skill_paths = app.skill_paths();
+    let zeph_core::bootstrap::WatcherBundle {
+        skill_watcher,
+        skill_reload_rx: reload_rx,
+        config_watcher,
+        config_reload_rx,
+    } = app.build_watchers();
+    let config_path_owned = app.config_path().to_owned();
+    let (_, shutdown_rx) = AppBuilder::build_shutdown();
+
+    let deps = AgentDeps {
+        provider,
+        registry,
+        matcher,
+        max_active_skills: config.skills.max_active_skills,
+        tool_executor,
+        max_tool_iterations: config.agent.max_tool_iterations,
+        model_name: config.llm.model.clone(),
+        embed_model,
+        skill_paths,
+        reload_rx,
+        memory,
+        conversation_id,
+        history_limit: config.memory.history_limit,
+        recall_limit: config.memory.semantic.recall_limit,
+        summarization_threshold: config.memory.summarization_threshold,
+        budget_tokens,
+        compaction_threshold: config.memory.compaction_threshold,
+        compaction_preserve_tail: config.memory.compaction_preserve_tail,
+        prune_protect_tokens: config.memory.prune_protect_tokens,
+        shutdown_rx,
+        security: config.security,
+        timeouts: config.timeouts,
+        redact_credentials: config.memory.redact_credentials,
+        tool_summarization: config.tools.summarize_output,
+        permission_policy: config
+            .tools
+            .permission_policy(config.security.autonomy_level),
+        config_path: config_path_owned,
+        config_reload_rx,
+        mcp_tools,
+        mcp_registry,
+        mcp_manager,
+        mcp_config: config.mcp.clone(),
+        learning: config.skills.learning.clone(),
+        secrets: config.secrets.custom.clone(),
+        summary_provider,
+    };
+
+    let keepalive: Box<dyn std::any::Any> = Box::new((skill_watcher, config_watcher));
+    Ok((deps, keepalive))
+}
+
+/// Spawn an `Agent` from pre-built deps and run its loop on the given channel.
+#[cfg(feature = "acp")]
+async fn spawn_acp_agent(d: AgentDeps, channel: zeph_core::channel::LoopbackChannel) {
+    let mut agent = Agent::new(
+        d.provider,
+        channel,
+        d.registry,
+        d.matcher,
+        d.max_active_skills,
+        d.tool_executor,
+    )
+    .with_max_tool_iterations(d.max_tool_iterations)
+    .with_model_name(d.model_name)
+    .with_embedding_model(d.embed_model)
+    .with_skill_reload(d.skill_paths, d.reload_rx)
+    .with_managed_skills_dir(zeph_core::bootstrap::managed_skills_dir())
+    .with_memory(
+        d.memory,
+        d.conversation_id,
+        d.history_limit,
+        d.recall_limit,
+        d.summarization_threshold,
+    )
+    .with_context_budget(
+        d.budget_tokens,
+        0.20,
+        d.compaction_threshold,
+        d.compaction_preserve_tail,
+        d.prune_protect_tokens,
+    )
+    .with_shutdown(d.shutdown_rx)
+    .with_security(d.security, d.timeouts)
+    .with_redact_credentials(d.redact_credentials)
+    .with_tool_summarization(d.tool_summarization)
+    .with_permission_policy(d.permission_policy)
+    .with_config_reload(d.config_path, d.config_reload_rx)
+    .with_mcp(
+        d.mcp_tools,
+        d.mcp_registry,
+        Some(d.mcp_manager),
+        &d.mcp_config,
+    )
+    .with_learning(d.learning)
+    .with_available_secrets(d.secrets.iter().map(|(k, v)| (k.clone(), v.clone())));
+
+    if let Some(sp) = d.summary_provider {
+        agent = agent.with_summary_provider(sp);
+    }
+
+    if let Err(e) = agent.load_history().await {
+        tracing::error!("failed to load agent history: {e:#}");
+    }
+
+    if let Err(e) = agent.run().await {
+        tracing::error!("ACP agent loop error: {e:#}");
+    }
+}
+
+/// Run the ACP server over stdin/stdout.
+///
+/// Phase 1 MVP: supports a single concurrent session (the first `session/new` request).
+///
+/// # Errors
+///
+/// Returns an error if the agent stack cannot be built or the transport fails.
+#[cfg(feature = "acp")]
+async fn run_acp_server(
+    config_path: Option<&std::path::Path>,
+    vault_backend: Option<&str>,
+    vault_key: Option<&std::path::Path>,
+    vault_path: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    let (deps, _keepalive) =
+        build_acp_deps(config_path, vault_backend, vault_key, vault_path).await?;
+    let deps = Arc::new(Mutex::new(Some(deps)));
+
+    let spawner: zeph_acp::AgentSpawner = Arc::new(move |channel| {
+        let deps = Arc::clone(&deps);
+        Box::pin(async move {
+            let Some(d) = deps.lock().await.take() else {
+                tracing::warn!(
+                    "ACP spawner called more than once — Phase 1 supports single session"
+                );
+                return;
+            };
+            Box::pin(spawn_acp_agent(d, channel)).await;
+        })
+    });
+
+    zeph_acp::serve_stdio(spawner).await?;
+
+    Ok(())
 }
 
 #[cfg(test)]
