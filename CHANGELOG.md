@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-02-24
+
 ### Added
 - ACP custom methods framework via `ext_method` dispatch — `_session/list`, `_session/get`, `_session/delete`, `_session/export`, `_session/import`, `_agent/tools`, `_agent/working_dir/update` (#787)
 - Session export/import with SQLite transaction-backed atomic event replay (#787)
@@ -89,6 +91,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 - Permission cache key collision on anonymous tools — uses `tool_call_id` as fallback when title is absent (#779)
+
+### Changed
+- CI: add CLA check for external contributors via `contributor-assistant/github-action`
 
 ## [0.11.6] - 2026-02-23
 
@@ -1234,7 +1239,8 @@ let agent = Agent::new(provider, channel, &skills_prompt, executor);
 - Agent calls channel.send_typing() before each LLM request
 - Agent::run() uses tokio::select! to race channel messages against shutdown signal
 
-[Unreleased]: https://github.com/bug-ops/zeph/compare/v0.11.6...HEAD
+[Unreleased]: https://github.com/bug-ops/zeph/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/bug-ops/zeph/compare/v0.11.6...v0.12.0
 [0.11.6]: https://github.com/bug-ops/zeph/compare/v0.11.5...v0.11.6
 [0.11.5]: https://github.com/bug-ops/zeph/compare/v0.11.4...v0.11.5
 [0.11.4]: https://github.com/bug-ops/zeph/compare/v0.11.3...v0.11.4
