@@ -24,6 +24,8 @@ pub struct AcpContext {
     pub file_executor: Option<AcpFileExecutor>,
     pub shell_executor: Option<AcpShellExecutor>,
     pub permission_gate: Option<AcpPermissionGate>,
+    /// Shared cancellation signal: notify to interrupt the running agent operation.
+    pub cancel_signal: std::sync::Arc<tokio::sync::Notify>,
 }
 
 /// Factory: receives a [`LoopbackChannel`] and optional [`AcpContext`], runs the agent loop.
@@ -44,6 +46,7 @@ struct SessionEntry {
     // Receiver is owned solely by the prompt() handler; RefCell avoids Arc<Mutex> overhead
     // since MAX_SESSIONS=1 and prompt() is never called concurrently for the same session.
     output_rx: RefCell<Option<mpsc::Receiver<LoopbackEvent>>>,
+    cancel_signal: std::sync::Arc<tokio::sync::Notify>,
 }
 
 pub struct ZephAcpAgent {
@@ -77,7 +80,11 @@ impl ZephAcpAgent {
         self
     }
 
-    fn build_acp_context(&self, session_id: &acp::SessionId) -> Option<AcpContext> {
+    fn build_acp_context(
+        &self,
+        session_id: &acp::SessionId,
+        cancel_signal: std::sync::Arc<tokio::sync::Notify>,
+    ) -> Option<AcpContext> {
         let conn_guard = self.conn_slot.borrow();
         let conn = conn_guard.as_ref()?;
 
@@ -102,6 +109,7 @@ impl ZephAcpAgent {
             file_executor: Some(fs_exec),
             shell_executor: Some(shell_exec),
             permission_gate: Some(perm_gate),
+            cancel_signal,
         })
     }
 
@@ -151,14 +159,17 @@ impl acp::Agent for ZephAcpAgent {
         tracing::debug!(%session_id, "new ACP session");
 
         let (channel, handle) = LoopbackChannel::pair(LOOPBACK_CHANNEL_CAPACITY);
+        // Clone once for build_acp_context; ownership of the original moves into SessionEntry.
+        let cancel_signal = std::sync::Arc::clone(&handle.cancel_signal);
 
         let entry = SessionEntry {
             input_tx: handle.input_tx,
             output_rx: RefCell::new(Some(handle.output_rx)),
+            cancel_signal: handle.cancel_signal,
         };
         self.sessions.borrow_mut().insert(session_id.clone(), entry);
 
-        let acp_ctx = self.build_acp_context(&session_id);
+        let acp_ctx = self.build_acp_context(&session_id, cancel_signal);
         let spawner = Arc::clone(&self.spawner);
         tokio::task::spawn_local(async move {
             (spawner)(channel, acp_ctx).await;
@@ -204,9 +215,27 @@ impl acp::Agent for ZephAcpAgent {
             .await
             .map_err(|_| acp::Error::internal_error().data("agent channel closed"))?;
 
+        // Grab the cancel_signal so we can detect cancellation during the drain loop.
+        let cancel_signal = self
+            .sessions
+            .borrow()
+            .get(&args.session_id)
+            .map(|e| std::sync::Arc::clone(&e.cancel_signal));
+
         // Block until the agent finishes this turn (signals via Flush or channel close).
         let mut rx = output_rx;
-        while let Some(event) = rx.recv().await {
+        let mut cancelled = false;
+        loop {
+            let event = if let Some(ref signal) = cancel_signal {
+                tokio::select! {
+                    biased;
+                    () = signal.notified() => { cancelled = true; break; }
+                    ev = rx.recv() => ev,
+                }
+            } else {
+                rx.recv().await
+            };
+            let Some(event) = event else { break };
             let is_flush = matches!(event, LoopbackEvent::Flush);
             if let Some(update) = loopback_event_to_update(event) {
                 let notification = acp::SessionNotification::new(args.session_id.clone(), update);
@@ -225,13 +254,21 @@ impl acp::Agent for ZephAcpAgent {
             *entry.output_rx.borrow_mut() = Some(rx);
         }
 
-        Ok(acp::PromptResponse::new(acp::StopReason::EndTurn))
+        let stop_reason = if cancelled {
+            acp::StopReason::Cancelled
+        } else {
+            acp::StopReason::EndTurn
+        };
+        Ok(acp::PromptResponse::new(stop_reason))
     }
 
     async fn cancel(&self, args: acp::CancelNotification) -> acp::Result<()> {
         tracing::debug!(session_id = %args.session_id, "ACP cancel");
-        // Keep the session alive — the IDE may send another prompt on the same session_id.
-        // The current prompt() drain loop will finish naturally when the agent completes its turn.
+        // Signal the agent loop to stop, but keep the session alive — the IDE may
+        // send another prompt on the same session_id after cancellation.
+        if let Some(entry) = self.sessions.borrow().get(&args.session_id) {
+            entry.cancel_signal.notify_one();
+        }
         Ok(())
     }
 
@@ -254,6 +291,17 @@ fn is_tool_use_marker(text: &str) -> bool {
     trimmed.starts_with("[tool_use:") && trimmed.ends_with(']')
 }
 
+fn tool_kind_from_name(name: &str) -> acp::ToolKind {
+    match name {
+        "bash" | "shell" => acp::ToolKind::Execute,
+        "read_file" => acp::ToolKind::Read,
+        "write_file" => acp::ToolKind::Edit,
+        "search" | "grep" | "find" => acp::ToolKind::Search,
+        "web_scrape" | "fetch" => acp::ToolKind::Fetch,
+        _ => acp::ToolKind::Other,
+    }
+}
+
 fn loopback_event_to_update(event: LoopbackEvent) -> Option<acp::SessionUpdate> {
     match event {
         LoopbackEvent::Chunk(text) | LoopbackEvent::FullMessage(text)
@@ -271,10 +319,14 @@ fn loopback_event_to_update(event: LoopbackEvent) -> Option<acp::SessionUpdate> 
         LoopbackEvent::ToolOutput {
             tool_name, display, ..
         } => {
-            let text = format!("[{tool_name}] {display}");
-            Some(acp::SessionUpdate::AgentMessageChunk(
-                acp::ContentChunk::new(text.into()),
-            ))
+            let tool_call_id = uuid::Uuid::new_v4().to_string();
+            let tool_call = acp::ToolCall::new(tool_call_id, &tool_name)
+                .kind(tool_kind_from_name(&tool_name))
+                .status(acp::ToolCallStatus::Completed)
+                .content(vec![acp::ToolCallContent::from(acp::ContentBlock::Text(
+                    acp::TextContent::new(display),
+                ))]);
+            Some(acp::SessionUpdate::ToolCall(tool_call))
         }
         LoopbackEvent::Flush => None,
     }
@@ -353,6 +405,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancel_triggers_notify_one() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (agent, _rx) = make_agent();
+                use acp::Agent as _;
+                let resp = agent
+                    .new_session(acp::NewSessionRequest::new(std::path::PathBuf::from(".")))
+                    .await
+                    .unwrap();
+                let sid = resp.session_id.clone();
+
+                // Capture the cancel_signal before cancel() removes the entry.
+                let signal = std::sync::Arc::clone(
+                    &agent.sessions.borrow().get(&sid).unwrap().cancel_signal,
+                );
+
+                // Set up a notified future before calling cancel().
+                let notified = signal.notified();
+
+                agent
+                    .cancel(acp::CancelNotification::new(sid))
+                    .await
+                    .unwrap();
+
+                // Should resolve immediately since cancel() called notify_one().
+                tokio::time::timeout(std::time::Duration::from_millis(100), notified)
+                    .await
+                    .expect("cancel_signal was not notified within timeout");
+            })
+            .await;
+    }
+
+    #[tokio::test]
     async fn prompt_rejects_oversized() {
         let local = tokio::task::LocalSet::new();
         local
@@ -400,7 +486,7 @@ mod tests {
     }
 
     #[test]
-    fn loopback_tool_output_maps_to_agent_message() {
+    fn loopback_tool_output_maps_to_tool_call() {
         let event = LoopbackEvent::ToolOutput {
             tool_name: "bash".to_owned(),
             display: "done".to_owned(),
@@ -408,10 +494,25 @@ mod tests {
             filter_stats: None,
             kept_lines: None,
         };
-        assert!(matches!(
-            loopback_event_to_update(event),
-            Some(acp::SessionUpdate::AgentMessageChunk(_))
-        ));
+        let update = loopback_event_to_update(event);
+        match update {
+            Some(acp::SessionUpdate::ToolCall(tc)) => {
+                assert_eq!(tc.title, "bash");
+                assert_eq!(tc.status, acp::ToolCallStatus::Completed);
+                assert_eq!(tc.kind, acp::ToolKind::Execute);
+            }
+            other => panic!("expected ToolCall, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_kind_from_name_maps_correctly() {
+        assert_eq!(tool_kind_from_name("bash"), acp::ToolKind::Execute);
+        assert_eq!(tool_kind_from_name("read_file"), acp::ToolKind::Read);
+        assert_eq!(tool_kind_from_name("write_file"), acp::ToolKind::Edit);
+        assert_eq!(tool_kind_from_name("search"), acp::ToolKind::Search);
+        assert_eq!(tool_kind_from_name("web_scrape"), acp::ToolKind::Fetch);
+        assert_eq!(tool_kind_from_name("unknown"), acp::ToolKind::Other);
     }
 
     #[tokio::test]
