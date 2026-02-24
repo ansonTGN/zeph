@@ -18,6 +18,7 @@ use crate::transport::bridge::spawn_acp_connection;
 #[cfg(feature = "acp-http")]
 use crate::transport::http::AcpHttpState;
 
+#[cfg(feature = "acp-http")]
 const WS_MAX_MESSAGE_SIZE: usize = 1_048_576; // 1 MiB
 
 /// `GET /acp/ws` — WebSocket upgrade handler.
