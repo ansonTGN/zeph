@@ -9225,6 +9225,7 @@ dependencies = [
  "uuid",
  "zeph-core",
  "zeph-mcp",
+ "zeph-memory",
  "zeph-tools",
 ]
 

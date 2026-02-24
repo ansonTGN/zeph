@@ -7,6 +7,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- Multi-session ACP support with configurable `max_sessions` (default 4) and LRU eviction of idle sessions (#781)
+- `session_idle_timeout_secs` config for automatic session cleanup (default 30 min) with background reaper task (#781)
+- `ZEPH_ACP_MAX_SESSIONS` and `ZEPH_ACP_SESSION_IDLE_TIMEOUT_SECS` env overrides (#781)
+- ACP session persistence to `SQLite` — `acp_sessions` and `acp_session_events` tables with conversation replay on `load_session` per ACP spec (#782)
+- `SqliteStore` methods for ACP session lifecycle: `create_acp_session`, `save_acp_event`, `load_acp_events`, `delete_acp_session`, `acp_session_exists` (#782)
 - `TokenCounter` in `zeph-memory` — accurate token counting with `tiktoken-rs` cl100k_base, replacing `chars/4` heuristic (#789)
 - DashMap-backed token cache (10k cap) for amortized O(1) lookups
 - OpenAI tool schema token formula for precise context budget allocation
