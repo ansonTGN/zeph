@@ -12,18 +12,56 @@ use crate::channel::Channel;
 use crate::redact::redact_secrets;
 use tracing::Instrument;
 
-/// Strip volatile IDs from message content so doom-loop comparison is stable.
-/// Normalizes `[tool_result: <id>]` and `[tool_use: <name>(<id>)]` by removing unique IDs.
+/// Hash message content for doom-loop detection, skipping volatile IDs in-place.
+/// Normalizes `[tool_result: <id>]` → `[tool_result]` and `[tool_use: <name>(<id>)]` → `[tool_use: <name>]`
+/// by feeding only stable segments into the hasher without materializing the normalized string.
 // DefaultHasher output is not stable across Rust versions — do not persist or serialize
 // these hashes. They are used only for within-session equality comparison.
 fn doom_loop_hash(content: &str) -> u64 {
-    use std::hash::{DefaultHasher, Hash, Hasher};
-    let normalized = normalize_for_doom_loop(content);
+    use std::hash::{DefaultHasher, Hasher};
     let mut hasher = DefaultHasher::new();
-    normalized.hash(&mut hasher);
+    let mut rest = content;
+    while !rest.is_empty() {
+        let r_pos = rest.find("[tool_result: ");
+        let u_pos = rest.find("[tool_use: ");
+        match (r_pos, u_pos) {
+            (Some(r), Some(u)) if u < r => hash_tool_use_in_place(&mut hasher, &mut rest, u),
+            (Some(r), _) => hash_tool_result_in_place(&mut hasher, &mut rest, r),
+            (_, Some(u)) => hash_tool_use_in_place(&mut hasher, &mut rest, u),
+            _ => {
+                hasher.write(rest.as_bytes());
+                break;
+            }
+        }
+    }
     hasher.finish()
 }
 
+fn hash_tool_result_in_place(hasher: &mut impl std::hash::Hasher, rest: &mut &str, start: usize) {
+    hasher.write(&rest.as_bytes()[..start]);
+    if let Some(end) = rest[start..].find(']') {
+        hasher.write(b"[tool_result]");
+        *rest = &rest[start + end + 1..];
+    } else {
+        hasher.write(&rest.as_bytes()[start..]);
+        *rest = "";
+    }
+}
+
+fn hash_tool_use_in_place(hasher: &mut impl std::hash::Hasher, rest: &mut &str, start: usize) {
+    hasher.write(&rest.as_bytes()[..start]);
+    let tag = &rest[start..];
+    if let (Some(paren), Some(end)) = (tag.find('('), tag.find(']')) {
+        hasher.write(&tag.as_bytes()[..paren]);
+        hasher.write(b"]");
+        *rest = &rest[start + end + 1..];
+    } else {
+        hasher.write(tag.as_bytes());
+        *rest = "";
+    }
+}
+
+#[cfg(test)]
 fn normalize_for_doom_loop(content: &str) -> String {
     let mut out = String::with_capacity(content.len());
     let mut rest = content;
@@ -49,6 +87,7 @@ fn normalize_for_doom_loop(content: &str) -> String {
     out
 }
 
+#[cfg(test)]
 fn handle_tool_result(out: &mut String, rest: &mut &str, start: usize) {
     out.push_str(&rest[..start]);
     if let Some(end) = rest[start..].find(']') {
@@ -60,6 +99,7 @@ fn handle_tool_result(out: &mut String, rest: &mut &str, start: usize) {
     }
 }
 
+#[cfg(test)]
 fn handle_tool_use(out: &mut String, rest: &mut &str, start: usize) {
     out.push_str(&rest[..start]);
     let tag = &rest[start..];
@@ -1036,7 +1076,7 @@ mod tests {
     use futures::future::join_all;
     use zeph_tools::executor::{ToolCall, ToolError, ToolExecutor, ToolOutput};
 
-    use super::{normalize_for_doom_loop, tool_def_to_definition};
+    use super::{doom_loop_hash, normalize_for_doom_loop, tool_def_to_definition};
 
     #[test]
     fn tool_def_strips_schema_and_title() {
@@ -1112,6 +1152,61 @@ mod tests {
             normalize_for_doom_loop(s),
             "[tool_use: bash] result: [tool_result]"
         );
+    }
+
+    // Helpers to hash a string the same way doom_loop_hash would if it materialized.
+    fn hash_str(s: &str) -> u64 {
+        use std::hash::{DefaultHasher, Hasher};
+        let mut h = DefaultHasher::new();
+        h.write(s.as_bytes());
+        h.finish()
+    }
+
+    // doom_loop_hash must produce the same value as hashing the normalize_for_doom_loop output.
+    fn expected_hash(content: &str) -> u64 {
+        hash_str(&normalize_for_doom_loop(content))
+    }
+
+    #[test]
+    fn doom_loop_hash_matches_normalize_then_hash_plain_text() {
+        let s = "hello world, no tool tags here";
+        assert_eq!(doom_loop_hash(s), expected_hash(s));
+    }
+
+    #[test]
+    fn doom_loop_hash_matches_normalize_then_hash_tool_result() {
+        let s = "[tool_result: toolu_abc123]\nerror: missing field";
+        assert_eq!(doom_loop_hash(s), expected_hash(s));
+    }
+
+    #[test]
+    fn doom_loop_hash_matches_normalize_then_hash_tool_use() {
+        let s = "[tool_use: bash(toolu_abc)]";
+        assert_eq!(doom_loop_hash(s), expected_hash(s));
+    }
+
+    #[test]
+    fn doom_loop_hash_matches_normalize_then_hash_mixed() {
+        let s = "[tool_use: bash(id1)] result: [tool_result: id2]";
+        assert_eq!(doom_loop_hash(s), expected_hash(s));
+    }
+
+    #[test]
+    fn doom_loop_hash_matches_normalize_then_hash_multiple_results() {
+        let s = "[tool_result: id1]\nok\n[tool_result: id2]\nfail\n[tool_result: id3]\nok";
+        assert_eq!(doom_loop_hash(s), expected_hash(s));
+    }
+
+    #[test]
+    fn doom_loop_hash_same_content_different_ids_equal() {
+        let a = "[tool_result: toolu_abc]\nerror";
+        let b = "[tool_result: toolu_xyz]\nerror";
+        assert_eq!(doom_loop_hash(a), doom_loop_hash(b));
+    }
+
+    #[test]
+    fn doom_loop_hash_empty_string() {
+        assert_eq!(doom_loop_hash(""), expected_hash(""));
     }
 
     struct DelayExecutor {

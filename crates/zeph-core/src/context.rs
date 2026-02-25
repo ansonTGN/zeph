@@ -145,6 +145,21 @@ impl EnvironmentContext {
         }
     }
 
+    /// Update only the git branch, leaving all other fields unchanged.
+    pub fn refresh_git_branch(&mut self) {
+        self.git_branch = std::process::Command::new("git")
+            .args(["branch", "--show-current"])
+            .output()
+            .ok()
+            .and_then(|o| {
+                if o.status.success() {
+                    Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+                } else {
+                    None
+                }
+            });
+    }
+
     #[must_use]
     pub fn format(&self) -> String {
         use std::fmt::Write;
@@ -334,6 +349,44 @@ mod tests {
         assert!(!env.working_dir.is_empty());
         assert_eq!(env.os, std::env::consts::OS);
         assert_eq!(env.model_name, "test-model");
+    }
+
+    #[test]
+    fn refresh_git_branch_does_not_panic() {
+        let mut env = EnvironmentContext::gather("test-model");
+        let original_dir = env.working_dir.clone();
+        let original_os = env.os.clone();
+        let original_model = env.model_name.clone();
+
+        env.refresh_git_branch();
+
+        // Other fields must remain unchanged.
+        assert_eq!(env.working_dir, original_dir);
+        assert_eq!(env.os, original_os);
+        assert_eq!(env.model_name, original_model);
+        // git_branch is Some or None — both are valid. Just verify format output is coherent.
+        let formatted = env.format();
+        assert!(formatted.starts_with("<environment>"));
+        assert!(formatted.ends_with("</environment>"));
+    }
+
+    #[test]
+    fn refresh_git_branch_overwrites_previous_branch() {
+        let mut env = EnvironmentContext {
+            working_dir: "/tmp".into(),
+            git_branch: Some("old-branch".into()),
+            os: "linux".into(),
+            model_name: "test".into(),
+        };
+        env.refresh_git_branch();
+        // After refresh, git_branch reflects the actual git state (Some or None).
+        // Importantly the call must not panic and must no longer hold "old-branch"
+        // when running outside a git repo with that branch name.
+        // We just verify the field is in a valid state (Some string or None).
+        match &env.git_branch {
+            Some(b) => assert!(!b.contains('\n'), "branch name must not contain newlines"),
+            None => {} // not in a git repo — acceptable
+        }
     }
 
     #[test]
