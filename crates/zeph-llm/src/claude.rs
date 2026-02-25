@@ -636,10 +636,13 @@ struct ImageSource {
 struct ToolApiResponse {
     content: Vec<AnthropicContentBlock>,
     #[serde(default)]
+    stop_reason: Option<String>,
+    #[serde(default)]
     usage: Option<ApiUsage>,
 }
 
 fn parse_tool_response(resp: ToolApiResponse) -> ChatResponse {
+    let truncated = resp.stop_reason.as_deref() == Some("max_tokens");
     let mut text_parts = Vec::new();
     let mut tool_calls = Vec::new();
 
@@ -651,6 +654,23 @@ fn parse_tool_response(resp: ToolApiResponse) -> ChatResponse {
             }
             AnthropicContentBlock::ToolResult { .. } | AnthropicContentBlock::Image { .. } => {}
         }
+    }
+
+    // When response was cut off by max_tokens with pending tool calls, the tool
+    // inputs are incomplete JSON. Discard them and surface the partial text so
+    // the agent loop can retry rather than executing a malformed tool call.
+    if truncated && !tool_calls.is_empty() {
+        tracing::warn!(
+            tool_count = tool_calls.len(),
+            "response truncated by max_tokens with pending tool calls; discarding incomplete tool use"
+        );
+        let combined = text_parts.join("");
+        return ChatResponse::Text(if combined.is_empty() {
+            "[Response truncated: max_tokens limit reached. Please reduce the request scope.]"
+                .to_owned()
+        } else {
+            combined
+        });
     }
 
     if tool_calls.is_empty() {
@@ -1385,6 +1405,7 @@ mod tests {
             content: vec![AnthropicContentBlock::Text {
                 text: "Hello".into(),
             }],
+            stop_reason: None,
             usage: None,
         };
         let result = parse_tool_response(resp);
@@ -1404,6 +1425,7 @@ mod tests {
                     input: serde_json::json!({"command": "ls"}),
                 },
             ],
+            stop_reason: None,
             usage: None,
         };
         let result = parse_tool_response(resp);
@@ -1425,6 +1447,7 @@ mod tests {
                 name: "read".into(),
                 input: serde_json::json!({"path": "/tmp/file.txt"}),
             }],
+            stop_reason: None,
             usage: None,
         };
         let result = parse_tool_response(resp);
