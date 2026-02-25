@@ -1,0 +1,7 @@
+[env]
+# Do not pass RUSTC_WRAPPER into the cross container — sccache is host-only.
+passthrough = [
+    "CARGO_TERM_COLOR",
+    "CARGO_HTTP_MULTIPLEXING",
+    "SCCACHE_GHA_ENABLED",
+]
