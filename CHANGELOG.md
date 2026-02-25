@@ -17,6 +17,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `schema` feature flag in `zeph-llm` gating `schemars` dependency and typed output API (#879)
 
 ### Changed
+- Replace `source_kind: String` in `SkillTrustRow` with `SourceKind` enum (`Local`, `Hub`, `File`) with serde DB serialization; invalid values fail at parse time (#848)
+- Replace `kind: String` in `ScheduledTaskConfig` with `ScheduledTaskKind` enum (`MemoryCleanup`, `SkillRefresh`, `HealthCheck`, `UpdateCheck`, `Custom`); invalid values fail at parse time (#850)
+- Replace unjustified `#[allow(dead_code)]` with `#[expect(dead_code, reason = "...")]` or remove suppression and add doc comments across zeph-a2a, zeph-tools, zeph-core, zeph-acp (#849)
 - `A2aServer::serve()` emits `tracing::warn!` when `auth_token` is `None`, signalling unauthenticated exposure (#869)
 - `GatewayServer::serve()` emits `tracing::warn!` when `auth_token` is `None`, signalling unauthenticated exposure (#873)
 - Moved `TrustLevel` enum to `zeph-tools::trust_level`; `zeph-skills` re-exports it, breaking the `zeph-tools → zeph-skills` reverse dependency (#841)
