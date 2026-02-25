@@ -17,6 +17,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `schema` feature flag in `zeph-llm` gating `schemars` dependency and typed output API (#879)
 
 ### Changed
+- `A2aServer::serve()` emits `tracing::warn!` when `auth_token` is `None`, signalling unauthenticated exposure (#869)
+- `GatewayServer::serve()` emits `tracing::warn!` when `auth_token` is `None`, signalling unauthenticated exposure (#873)
 - Moved `TrustLevel` enum to `zeph-tools::trust_level`; `zeph-skills` re-exports it, breaking the `zeph-tools → zeph-skills` reverse dependency (#841)
 - Removed duplicate `ChannelError` from `zeph-channels::error`; all channel adapters use `zeph_core::channel::ChannelError` (#842)
 - Replaced `zeph_a2a::types::TaskState` in `zeph-core` with a local `SubAgentState` enum; removed `zeph-a2a` from `zeph-core` dependencies (#843)
