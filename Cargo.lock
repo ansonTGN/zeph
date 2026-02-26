@@ -9279,6 +9279,7 @@ dependencies = [
  "anyhow",
  "blake3",
  "criterion",
+ "dirs",
  "futures",
  "insta",
  "notify",
@@ -9362,6 +9363,7 @@ dependencies = [
  "candle-core",
  "candle-nn",
  "candle-transformers",
+ "dirs",
  "eventsource-stream",
  "futures-core",
  "hf-hub",
@@ -9379,6 +9381,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tracing",
+ "wiremock",
 ]
 
 [[package]]

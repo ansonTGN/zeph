@@ -99,6 +99,110 @@ impl ClaudeProvider {
         self
     }
 
+    /// Fetch all available Claude models from the Anthropic API and cache them.
+    ///
+    /// Paginates until `has_more` is false.
+    /// 401/403 responses are returned as `LlmError::Other` without touching the cache.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the API request fails or returns an auth error.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the hardcoded Anthropic API URL cannot be parsed (impossible in practice).
+    pub async fn list_models_remote(
+        &self,
+    ) -> Result<Vec<crate::model_cache::RemoteModelInfo>, LlmError> {
+        let mut models: Vec<crate::model_cache::RemoteModelInfo> = Vec::new();
+        let mut after_id: Option<String> = None;
+
+        loop {
+            // Build URL with cursor as a proper query parameter to avoid injection.
+            let url = {
+                let mut u = reqwest::Url::parse("https://api.anthropic.com/v1/models")
+                    .expect("static URL is valid");
+                if let Some(ref cursor) = after_id {
+                    u.query_pairs_mut().append_pair("after_id", cursor);
+                }
+                u
+            };
+
+            let resp = self
+                .client
+                .get(url)
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-version", ANTHROPIC_VERSION)
+                .send()
+                .await?;
+
+            let status = resp.status();
+            if status == reqwest::StatusCode::UNAUTHORIZED
+                || status == reqwest::StatusCode::FORBIDDEN
+            {
+                return Err(LlmError::Other(format!(
+                    "Claude API auth error listing models: {status}"
+                )));
+            }
+            if !status.is_success() {
+                let body = resp.text().await.unwrap_or_default();
+                tracing::debug!(status = %status, body = %body, "Claude list_models_remote error body");
+                return Err(LlmError::Other(format!(
+                    "Claude list models failed: {status}"
+                )));
+            }
+
+            let page: serde_json::Value = resp.json().await?;
+            if let Some(data) = page.get("data").and_then(|v| v.as_array()) {
+                for item in data {
+                    let type_field = item
+                        .get("type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default();
+                    if type_field != "model" {
+                        continue;
+                    }
+                    let id = item
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let display_name = item
+                        .get("display_name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(&id)
+                        .to_string();
+                    let created_at = item.get("created_at").and_then(serde_json::Value::as_i64);
+                    models.push(crate::model_cache::RemoteModelInfo {
+                        id,
+                        display_name,
+                        context_window: None,
+                        created_at,
+                    });
+                }
+            }
+
+            let has_more = page
+                .get("has_more")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            if !has_more {
+                break;
+            }
+            after_id = page
+                .get("last_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned);
+            if after_id.is_none() {
+                break;
+            }
+        }
+
+        let cache = crate::model_cache::ModelCache::for_slug("claude");
+        cache.save(&models)?;
+        Ok(models)
+    }
+
     fn get_or_build_api_tools(&self, tools: &[ToolDefinition]) -> Vec<serde_json::Value> {
         let names: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
         let mut guard = self
@@ -1816,5 +1920,101 @@ mod tests {
         let without_image = Message::from_legacy(Role::User, "plain text");
         assert!(ClaudeProvider::has_image_parts(&[with_image]));
         assert!(!ClaudeProvider::has_image_parts(&[without_image]));
+    }
+
+    // Test that the pagination response JSON structure is correctly parsed inline.
+    // list_models_remote uses serde_json::Value for page parsing; test the same logic here.
+    #[test]
+    fn pagination_response_has_more_true_extracts_last_id() {
+        let page = serde_json::json!({
+            "data": [{"id": "model-a", "type": "model", "display_name": "Model A"}],
+            "has_more": true,
+            "last_id": "model-a"
+        });
+        let has_more = page
+            .get("has_more")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let last_id = page
+            .get("last_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned);
+        assert!(has_more);
+        assert_eq!(last_id, Some("model-a".to_string()));
+    }
+
+    #[test]
+    fn pagination_response_has_more_false_stops_loop() {
+        let page = serde_json::json!({
+            "data": [{"id": "model-b", "type": "model", "display_name": "Model B"}],
+            "has_more": false
+        });
+        let has_more = page
+            .get("has_more")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        assert!(!has_more);
+    }
+
+    #[test]
+    fn model_item_filters_non_model_type() {
+        let page = serde_json::json!({
+            "data": [
+                {"id": "model-ok", "type": "model", "display_name": "OK"},
+                {"id": "skip-me", "type": "other", "display_name": "Skip"}
+            ],
+            "has_more": false
+        });
+        let models: Vec<crate::model_cache::RemoteModelInfo> = page
+            .get("data")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|item| {
+                        let type_field = item
+                            .get("type")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default();
+                        if type_field != "model" {
+                            return None;
+                        }
+                        let id = item
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string();
+                        let display_name = item
+                            .get("display_name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(&id)
+                            .to_string();
+                        Some(crate::model_cache::RemoteModelInfo {
+                            id,
+                            display_name,
+                            context_window: None,
+                            created_at: None,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "model-ok");
+    }
+
+    #[test]
+    fn model_item_uses_id_as_display_name_when_missing() {
+        let item = serde_json::json!({"id": "claude-x", "type": "model"});
+        let id = item
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let display_name = item
+            .get("display_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&id)
+            .to_string();
+        assert_eq!(display_name, "claude-x");
     }
 }
