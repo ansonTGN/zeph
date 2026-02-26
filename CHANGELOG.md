@@ -7,6 +7,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- `zeph-acp`: three unstable ACP session features gated behind cargo feature flags:
+  - `unstable-session-list`: implements `session/list` — returns active in-memory sessions with optional `cwd` filter
+  - `unstable-session-fork`: implements `session/fork` — clones an existing session (history copied via `import_acp_events`) and spawns a new agent loop
+  - `unstable-session-resume`: implements `session/resume` — restores a persisted session without history replay (unlike `session/load`)
+- Root `acp-unstable` feature activates all three unstable features for the `zeph` binary; included in `full`
+- `initialize()` advertises `SessionCapabilities` (list/fork/resume) when corresponding features are enabled
 - `McpToolExecutor` now implements `tool_definitions()` and `execute_tool_call()` — MCP tools are exposed as native `ToolDefinition`s and dispatched via structured tool_use when provider supports it
 - `McpToolExecutor` accepts `Arc<RwLock<Vec<McpTool>>>` at construction; shared reference is kept in `McpState.shared_tools` and updated on `/mcp add`/`/mcp remove`
 - `append_mcp_prompt()` skips text-based MCP tool injection when `provider.supports_tool_use()` is true, preventing duplicate tool descriptions
