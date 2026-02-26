@@ -33,7 +33,7 @@ struct AgentDeps {
     embed_model: String,
     skill_paths: Vec<PathBuf>,
     reload_rx: tokio::sync::mpsc::Receiver<zeph_skills::watcher::SkillEvent>,
-    memory: zeph_memory::semantic::SemanticMemory,
+    memory: std::sync::Arc<zeph_memory::semantic::SemanticMemory>,
     conversation_id: zeph_memory::ConversationId,
     history_limit: u32,
     recall_limit: usize,
@@ -87,7 +87,7 @@ async fn build_acp_deps(
     let embed_model = app.embedding_model();
     let budget_tokens = app.auto_budget_tokens(&provider);
     let registry = app.build_registry();
-    let memory = app.build_memory(&provider).await?;
+    let memory = std::sync::Arc::new(app.build_memory(&provider).await?);
     let all_meta = registry.all_meta();
     let matcher = app.build_skill_matcher(&provider, &all_meta, &memory).await;
     let config = app.config();
@@ -207,6 +207,7 @@ async fn build_acp_deps(
 /// When `acp_ctx` is `Some`, ACP executors are composed on top of the local tool executor
 /// (ACP-first, local fallback). When `None`, local tools handle everything.
 #[cfg(feature = "acp")]
+#[allow(clippy::too_many_lines)]
 async fn spawn_acp_agent(
     d: AgentDeps,
     channel: zeph_core::channel::LoopbackChannel,
@@ -217,34 +218,39 @@ async fn spawn_acp_agent(
 
     // Build tool executor: ACP executors take priority via CompositeExecutor (first-match-wins).
     // DynExecutor wraps Arc<dyn ErasedToolExecutor> so it satisfies Agent::new's ToolExecutor bound.
-    let (tool_executor, cancel_signal, provider_override) = match acp_ctx {
-        Some(ctx) => {
-            let cancel_signal = Arc::clone(&ctx.cancel_signal);
-            let provider_override = Arc::clone(&ctx.provider_override);
-            let mut base: Arc<dyn ErasedToolExecutor> = Arc::new(d.tool_executor);
-            if let Some(fs) = ctx.file_executor {
-                base = Arc::new(zeph_tools::CompositeExecutor::new(
-                    fs,
-                    zeph_tools::DynExecutor(base),
-                ));
-            }
-            if let Some(shell) = ctx.shell_executor {
-                base = Arc::new(zeph_tools::CompositeExecutor::new(
-                    shell,
-                    zeph_tools::DynExecutor(base),
-                ));
-            }
-            (
+    let memory_executor =
+        zeph_core::memory_tools::MemoryToolExecutor::new(Arc::clone(&d.memory), d.conversation_id);
+    let (tool_executor, cancel_signal, provider_override) = if let Some(ctx) = acp_ctx {
+        let cancel_signal = Arc::clone(&ctx.cancel_signal);
+        let provider_override = Arc::clone(&ctx.provider_override);
+        let mut base: Arc<dyn ErasedToolExecutor> = Arc::new(d.tool_executor);
+        if let Some(fs) = ctx.file_executor {
+            base = Arc::new(zeph_tools::CompositeExecutor::new(
+                fs,
                 zeph_tools::DynExecutor(base),
-                Some(cancel_signal),
-                Some(provider_override),
-            )
+            ));
         }
-        None => (
+        if let Some(shell) = ctx.shell_executor {
+            base = Arc::new(zeph_tools::CompositeExecutor::new(
+                shell,
+                zeph_tools::DynExecutor(base),
+            ));
+        }
+        base = Arc::new(zeph_tools::CompositeExecutor::new(
+            memory_executor,
+            zeph_tools::DynExecutor(base),
+        ));
+        (
+            zeph_tools::DynExecutor(base),
+            Some(cancel_signal),
+            Some(provider_override),
+        )
+    } else {
+        let base: Arc<dyn ErasedToolExecutor> = Arc::new(zeph_tools::CompositeExecutor::new(
+            memory_executor,
             zeph_tools::DynExecutor(Arc::new(d.tool_executor)),
-            None,
-            None,
-        ),
+        ));
+        (zeph_tools::DynExecutor(base), None, None)
     };
 
     let mut agent = Agent::new(
@@ -261,7 +267,7 @@ async fn spawn_acp_agent(
     .with_skill_reload(d.skill_paths, d.reload_rx)
     .with_managed_skills_dir(zeph_core::bootstrap::managed_skills_dir())
     .with_memory(
-        d.memory,
+        Arc::clone(&d.memory),
         d.conversation_id,
         d.history_limit,
         d.recall_limit,
