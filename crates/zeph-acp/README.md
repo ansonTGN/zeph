@@ -86,6 +86,29 @@ Each tool call is identified by a UUID generated per invocation. The UUID is thr
 > [!NOTE]
 > Prior to #1003 the fenced-block path did not generate a UUID or emit `ToolStart`. Prior to #1013 the terminal was released inside `execute_in_terminal` before `tool_call_update` was sent, preventing IDEs from displaying terminal output. Both issues are now resolved.
 
+## Subagent IDE visibility
+
+Three `_meta` extensions give IDEs (Zed, VS Code ACP) structured visibility into sub-agent execution:
+
+### Parent tool use ID propagation (#1008)
+
+Every `session_update` emitted by a sub-agent carries `_meta.claudeCode.parentToolUseId` set to the tool call ID that spawned it. IDEs use this to nest sub-agent output under the originating tool card, so multi-agent runs render as collapsible trees rather than interleaved flat messages.
+
+### Terminal streaming (#1009)
+
+`AcpShellExecutor` streams shell output in real time instead of buffering until completion:
+
+- Each chunk of stdout/stderr is emitted as a `session_update` with `_meta.terminal_output`.
+- When the command exits, a final `session_update` with `_meta.terminal_exit` carries the exit code.
+- IDEs display the output inside the tool card as it arrives.
+
+### Tool call location (#1010)
+
+`ToolCall.location` carries a `filePath` for file read/write tool calls. IDEs move the editor cursor to the referenced file as the agent works, so the user always sees which file is being modified without manually switching tabs.
+
+> [!TIP]
+> All three extensions are additive `_meta` fields — they are ignored by clients that do not recognize them and require no feature flag.
+
 ### Terminal command timeout
 
 `AcpShellExecutor` enforces a configurable wall-clock timeout on every IDE-proxied shell command (default: 120 seconds, controlled via `acp.terminal_timeout_secs`). When the timeout expires:

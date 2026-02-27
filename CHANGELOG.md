@@ -26,6 +26,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - UUID validation on `session_id` path parameter in `session_messages_handler` — returns 400 on invalid input (#1004)
 - Startup `tracing::warn!` when `auth_bearer_token` is None and HTTP transport is active (#1004)
 - `--init` wizard prompts for `max_history` and `title_max_chars` (#1004)
+- `zeph-acp`: `parent_tool_use_id` propagation through `LoopbackEvent::ToolStart/ToolOutput` → `AcpContext` → `loopback_event_to_updates`; subagent events carry `_meta.claudeCode.parentToolUseId` so IDEs can nest subagent output under the parent tool call card (#1008)
+- `zeph-core`: `Agent::with_parent_tool_use_id()` builder method; `AgentBuilder` injects the parent tool call UUID when spawning subagents via `SubAgentManager` (#1008)
+- `zeph-acp`: `AcpShellExecutor` terminal streaming — `stream_until_exit` helper polls output every 200 ms via `tokio::select!` and emits `ToolCallUpdate` with `_meta.terminal_output` per chunk and `_meta.terminal_exit` on completion; IDEs receive real-time bash output inside tool cards (#1009)
+- `zeph-tools`: `locations: Option<Vec<String>>` field on `ToolOutput`; `AcpFileExecutor` populates it with the absolute file path for `read_file`/`write_file` operations; `loopback_event_to_updates` forwards it as `ToolCall.location` for IDE file-following (#1010)
+- Unit tests: `loopback_tool_start_parent_tool_use_id_injected_into_meta`, `loopback_tool_output_parent_tool_use_id_injected_into_meta`, `streaming_mode_emits_terminal_exit_notification`, `read_file_returns_location`, `write_file_returns_location` (#1008, #1009, #1010)
 
 ### Fixed
 - ACP terminal release deferred until after `tool_call_update` notification: IDE now receives `ToolCallContent::Terminal` while the terminal is still alive, enabling tool output display in Zed ACP panel (#1013)
