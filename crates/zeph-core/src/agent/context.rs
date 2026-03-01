@@ -15,8 +15,9 @@ use zeph_skills::prompt::{format_skills_catalog, format_skills_prompt_compact};
 use crate::redact::scrub_content;
 
 use super::{
-    Agent, CODE_CONTEXT_PREFIX, CROSS_SESSION_PREFIX, Channel, ContextBudget, LlmProvider, Message,
-    RECALL_PREFIX, Role, SUMMARY_PREFIX, Skill, build_system_prompt, format_skills_prompt,
+    Agent, CODE_CONTEXT_PREFIX, CORRECTIONS_PREFIX, CROSS_SESSION_PREFIX, Channel, ContextBudget,
+    LlmProvider, Message, RECALL_PREFIX, Role, SUMMARY_PREFIX, Skill, build_system_prompt,
+    format_skills_prompt,
 };
 
 fn chunk_messages(
@@ -62,7 +63,7 @@ fn chunk_messages(
 }
 
 /// Truncate `s` to at most `max_chars` Unicode scalar values, appending "…" if truncated.
-fn truncate_chars(s: &str, max_chars: usize) -> String {
+pub(super) fn truncate_chars(s: &str, max_chars: usize) -> String {
     match s.char_indices().nth(max_chars) {
         Some((byte_idx, _)) => format!("{}…", &s[..byte_idx]),
         None => s.to_owned(),
@@ -803,6 +804,40 @@ impl<C: Channel> Agent<C> {
         });
     }
 
+    pub(super) fn remove_correction_messages(&mut self) {
+        self.messages
+            .retain(|m| m.role != Role::System || !m.content.starts_with(CORRECTIONS_PREFIX));
+    }
+
+    async fn fetch_corrections(
+        memory_state: &super::MemoryState,
+        query: &str,
+        limit: usize,
+        min_score: f32,
+    ) -> Result<Option<Message>, super::error::AgentError> {
+        let Some(ref memory) = memory_state.memory else {
+            return Ok(None);
+        };
+        let corrections = memory
+            .retrieve_similar_corrections(query, limit, min_score)
+            .await
+            .unwrap_or_default();
+        if corrections.is_empty() {
+            return Ok(None);
+        }
+        let mut text = String::from(CORRECTIONS_PREFIX);
+        for c in &corrections {
+            use std::fmt::Write;
+            let _ = writeln!(
+                text,
+                "- When you said: \"{}…\" → User corrected: \"{}\"",
+                truncate_chars(&scrub_content(&c.original_output), 80),
+                truncate_chars(&scrub_content(&c.correction_text), 200),
+            );
+        }
+        Ok(Some(Message::from_legacy(Role::System, text)))
+    }
+
     #[cfg(test)]
     pub(super) async fn inject_semantic_recall(
         &mut self,
@@ -1110,20 +1145,35 @@ impl<C: Channel> Agent<C> {
         self.remove_summary_messages();
         self.remove_cross_session_messages();
         self.remove_recall_messages();
+        self.remove_correction_messages();
         #[cfg(feature = "index")]
         self.remove_code_context_messages();
 
         // Own the query to satisfy Send bounds when agent.run() is spawned
         let query = query.to_owned();
 
+        let correction_params = self
+            .learning_engine
+            .config
+            .as_ref()
+            .filter(|c| c.correction_detection)
+            .map(|c| {
+                (
+                    c.correction_recall_limit as usize,
+                    c.correction_min_similarity,
+                )
+            });
+
         // Fetch all context sources concurrently
         let tc = self.token_counter.clone();
         #[cfg(not(feature = "index"))]
-        let (summaries_msg, cross_session_msg, recall_msg) = {
+        let (summaries_msg, cross_session_msg, recall_msg, corrections_msg) = {
+            let (recall_limit, min_sim) = correction_params.unwrap_or((3, 0.75));
             let result = tokio::try_join!(
                 Self::fetch_summaries(&self.memory_state, alloc.summaries, &tc),
                 Self::fetch_cross_session(&self.memory_state, &query, alloc.cross_session, &tc),
                 Self::fetch_semantic_recall(&self.memory_state, &query, alloc.semantic_recall, &tc),
+                Self::fetch_corrections(&self.memory_state, &query, recall_limit, min_sim),
             );
             match result {
                 Ok(v) => v,
@@ -1135,12 +1185,14 @@ impl<C: Channel> Agent<C> {
         };
 
         #[cfg(feature = "index")]
-        let (summaries_msg, cross_session_msg, recall_msg, code_rag_text) = {
+        let (summaries_msg, cross_session_msg, recall_msg, code_rag_text, corrections_msg) = {
+            let (recall_limit, min_sim) = correction_params.unwrap_or((3, 0.75));
             let result = tokio::try_join!(
                 Self::fetch_summaries(&self.memory_state, alloc.summaries, &tc),
                 Self::fetch_cross_session(&self.memory_state, &query, alloc.cross_session, &tc),
                 Self::fetch_semantic_recall(&self.memory_state, &query, alloc.semantic_recall, &tc),
                 Self::fetch_code_rag(&self.index, &query, alloc.code_context),
+                Self::fetch_corrections(&self.memory_state, &query, recall_limit, min_sim),
             );
             match result {
                 Ok(v) => v,
@@ -1151,7 +1203,11 @@ impl<C: Channel> Agent<C> {
             }
         };
 
-        // Insert fetched messages (order: recall, cross-session, summaries at position 1)
+        // Insert fetched messages (order: corrections, recall, cross-session, summaries at position 1)
+        if let Some(msg) = corrections_msg.filter(|_| self.messages.len() > 1) {
+            self.messages.insert(1, msg); // lgtm[rust/cleartext-logging]
+            tracing::debug!("injected past corrections into context");
+        }
         if let Some(msg) = recall_msg.filter(|_| self.messages.len() > 1) {
             self.messages.insert(1, msg);
         }
@@ -1243,7 +1299,7 @@ impl<C: Channel> Agent<C> {
         let matched_indices: Vec<usize> = if let Some(matcher) = &self.skill_state.matcher {
             let provider = self.provider.clone();
             let _ = self.channel.send_status("matching skills...").await;
-            let scored = matcher
+            let mut scored = matcher
                 .match_skills(
                     &all_meta,
                     query,
@@ -1255,6 +1311,50 @@ impl<C: Channel> Agent<C> {
                     },
                 )
                 .await;
+
+            if !scored.is_empty() {
+                if self.skill_state.hybrid_search
+                    && let Some(ref bm25) = self.skill_state.bm25_index
+                {
+                    let bm25_results = bm25.search(query, self.skill_state.max_active_skills);
+                    scored = zeph_skills::bm25::rrf_fuse(
+                        &scored,
+                        &bm25_results,
+                        self.skill_state.max_active_skills,
+                    );
+                }
+
+                let metrics_map: std::collections::HashMap<String, (u32, u32)> =
+                    if let Some(memory) = &self.memory_state.memory {
+                        memory
+                            .sqlite()
+                            .load_skill_outcome_stats()
+                            .await
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|m| {
+                                let pair = (
+                                    u32::try_from(m.successes).unwrap_or(0),
+                                    u32::try_from(m.failures).unwrap_or(0),
+                                );
+                                (m.skill_name, pair)
+                            })
+                            .collect()
+                    } else {
+                        std::collections::HashMap::new()
+                    };
+                zeph_skills::trust_score::rerank(
+                    &mut scored,
+                    self.skill_state.cosine_weight,
+                    |idx| {
+                        all_meta
+                            .get(idx)
+                            .and_then(|m| metrics_map.get(&m.name))
+                            .copied()
+                            .unwrap_or((0, 0))
+                    },
+                );
+            }
 
             let indices: Vec<usize> = if scored.is_empty() {
                 // Embed or Qdrant failure: fall back to all skills so the agent
@@ -1358,6 +1458,28 @@ impl<C: Channel> Agent<C> {
 
         let trust_map = self.build_skill_trust_map().await;
 
+        // Build health_map: skill_name -> (posterior_mean, total_uses) for XML attributes.
+        let health_map: std::collections::HashMap<String, (f64, u32)> = if let Some(memory) =
+            &self.memory_state.memory
+        {
+            memory
+                .sqlite()
+                .load_skill_outcome_stats()
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|m| {
+                    let successes = u32::try_from(m.successes).unwrap_or(0);
+                    let failures = u32::try_from(m.failures).unwrap_or(0);
+                    let total = successes + failures;
+                    let posterior = zeph_skills::trust_score::posterior_mean(successes, failures);
+                    (m.skill_name, (posterior, total))
+                })
+                .collect()
+        } else {
+            std::collections::HashMap::new()
+        };
+
         let effective_mode = match self.skill_state.prompt_mode {
             crate::config::SkillPromptMode::Auto => {
                 if let Some(ref budget) = self.context_manager.budget
@@ -1374,7 +1496,7 @@ impl<C: Channel> Agent<C> {
         let skills_prompt = if effective_mode == crate::config::SkillPromptMode::Compact {
             format_skills_prompt_compact(&active_skills)
         } else {
-            format_skills_prompt(&active_skills, &trust_map)
+            format_skills_prompt(&active_skills, &trust_map, &health_map)
         };
         let catalog_prompt = format_skills_catalog(&remaining_skills);
         self.skill_state
@@ -1775,6 +1897,79 @@ mod tests {
 
         agent.prepare_context("test query").await.unwrap();
         assert_eq!(agent.messages.len(), msg_count);
+    }
+
+    #[tokio::test]
+    async fn test_correction_messages_removed_between_turns() {
+        let provider = mock_provider(vec![]);
+        let channel = MockChannel::new(vec![]);
+        let registry = create_test_registry();
+        let executor = MockToolExecutor::no_tools();
+
+        let mut agent = Agent::new(provider, channel, registry, None, 5, executor);
+
+        agent.messages.insert(
+            1,
+            Message {
+                role: Role::System,
+                content: format!("{CORRECTIONS_PREFIX}old correction data"),
+                parts: vec![],
+                metadata: MessageMetadata::default(),
+            },
+        );
+        assert_eq!(agent.messages.len(), 2);
+
+        agent.remove_correction_messages();
+        assert_eq!(agent.messages.len(), 1);
+        assert!(!agent.messages[0].content.starts_with(CORRECTIONS_PREFIX));
+    }
+
+    #[tokio::test]
+    async fn test_remove_correction_messages_preserves_non_correction_system() {
+        let provider = mock_provider(vec![]);
+        let channel = MockChannel::new(vec![]);
+        let registry = create_test_registry();
+        let executor = MockToolExecutor::no_tools();
+
+        let mut agent = Agent::new(provider, channel, registry, None, 5, executor);
+
+        // Add a non-correction system message
+        agent.messages.insert(
+            1,
+            Message {
+                role: Role::System,
+                content: "regular system message".to_string(),
+                parts: vec![],
+                metadata: MessageMetadata::default(),
+            },
+        );
+        // Add a correction system message
+        agent.messages.insert(
+            2,
+            Message {
+                role: Role::System,
+                content: format!("{CORRECTIONS_PREFIX}correction data"),
+                parts: vec![],
+                metadata: MessageMetadata::default(),
+            },
+        );
+        assert_eq!(agent.messages.len(), 3);
+
+        agent.remove_correction_messages();
+
+        assert_eq!(agent.messages.len(), 2);
+        assert!(
+            agent
+                .messages
+                .iter()
+                .any(|m| m.content == "regular system message")
+        );
+        assert!(
+            !agent
+                .messages
+                .iter()
+                .any(|m| m.content.starts_with(CORRECTIONS_PREFIX))
+        );
     }
 
     #[tokio::test]
