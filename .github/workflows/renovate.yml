@@ -20,6 +20,8 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: renovatebot/github-action@8d75b92f43899d483728e9a8a7fd44238020f6e6 # v46.1.2
+        env:
+          RENOVATE_REPOSITORIES: ${{ github.repository }}
         with:
           token: ${{ secrets.RENOVATE_TOKEN }}
           configurationFile: renovate.json
