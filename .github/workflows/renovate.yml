@@ -6,7 +6,7 @@ on:
   workflow_dispatch: {}
   push:
     branches: [main]
-    paths: ["renovate.json"]
+    paths: [".github/renovate.json"]
 
 # The workflow itself only needs read access. RENOVATE_TOKEN (PAT with repo+workflow
 # scopes) provides write access for branch creation and PR management.
@@ -24,4 +24,4 @@ jobs:
           RENOVATE_REPOSITORIES: ${{ github.repository }}
         with:
           token: ${{ secrets.RENOVATE_TOKEN }}
-          configurationFile: renovate.json
+          configurationFile: .github/renovate.json
