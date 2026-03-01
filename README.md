@@ -3,306 +3,67 @@
 
   **The AI agent that respects your resources.**
 
-  Single binary. Minimal hardware. Maximum context efficiency.<br>
-  Every token counts — Zeph makes sure none are wasted.
+  Single binary. Minimal hardware. Maximum context efficiency.
 
   [![Crates.io](https://img.shields.io/crates/v/zeph)](https://crates.io/crates/zeph)
   [![docs](https://img.shields.io/badge/docs-book-blue)](https://bug-ops.github.io/zeph/)
   [![CI](https://img.shields.io/github/actions/workflow/status/bug-ops/zeph/ci.yml?branch=main&label=CI)](https://github.com/bug-ops/zeph/actions)
   [![codecov](https://codecov.io/gh/bug-ops/zeph/graph/badge.svg?token=S5O0GR9U6G)](https://codecov.io/gh/bug-ops/zeph)
-  [![Trivy](https://img.shields.io/badge/Trivy-0%20CVEs-success)](https://github.com/bug-ops/zeph/security)
   [![MSRV](https://img.shields.io/badge/MSRV-1.88-blue)](https://www.rust-lang.org)
   [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 </div>
 
 ---
 
-## Why Zeph
-
-Most AI agent frameworks dump every tool description, skill, and raw output into the context window — and bill you for it. Zeph takes the opposite approach: **automated context engineering**. Only relevant data enters the context. The result — lower costs, faster responses, and an agent that runs on hardware you already have.
-
-- **Semantic skill selection** — embeds skills as vectors, retrieves only top-K relevant per query instead of injecting all
-- **Smart output filtering** — command-aware filters strip 70-99% of noise before context injection; oversized responses offloaded to filesystem
-- **Resilient context compaction** — reactive retry on context overflow, middle-out progressive tool response removal, 9-section structured compaction prompt, LLM-free metadata fallback
-- **Tool-pair summarization** — when visible tool call/response pairs exceed a configurable cutoff, the oldest pair is summarized via LLM and originals hidden from context
-- **Accurate token counting** — tiktoken-based cl100k_base tokenizer with DashMap cache replaces chars/4 heuristic
-- **Proportional budget allocation** — context space distributed by purpose, not arrival order
-- **Optimized agent loop hot-path** — compaction check is O(1) via cached token count; `EnvironmentContext` built once at bootstrap and partially refreshed on skill reload; doom-loop hashing done in-place with no intermediate allocations; token counting for tool output pruning reduced to a single call per part
-
-## Installation
-
-> [!TIP]
-> ```bash
-> curl -fsSL https://github.com/bug-ops/zeph/releases/latest/download/install.sh | sh
-> ```
-
-<details>
-<summary>Other methods</summary>
+Zeph is a Rust AI agent built around one principle: **every token in the context window must earn its place**. Skills are retrieved semantically, tool output is filtered before injection, and the context compacts automatically under pressure — keeping costs low and responses fast on hardware you already own.
 
 ```bash
-cargo install zeph                                        # crates.io
-cargo install --git https://github.com/bug-ops/zeph      # from source
-docker pull ghcr.io/bug-ops/zeph:latest                  # Docker
+curl -fsSL https://github.com/bug-ops/zeph/releases/latest/download/install.sh | sh
+zeph init   # interactive setup wizard
+zeph        # start the agent
 ```
-
-Pre-built binaries: [GitHub Releases](https://github.com/bug-ops/zeph/releases/latest) · [Docker guide](https://bug-ops.github.io/zeph/guides/docker.html)
-
-</details>
-
-## Quick Start
-
-```bash
-zeph init          # interactive setup wizard
-zeph               # run the agent
-zeph --tui         # run with TUI dashboard
-```
-
-[Full setup guide →](https://bug-ops.github.io/zeph/getting-started/installation.html) · [Configuration reference →](https://bug-ops.github.io/zeph/reference/configuration.html)
-
-## Key Features
-
-| | |
-|---|---|
-| **Hybrid inference** | Ollama, Claude, OpenAI, Candle (GGUF), any OpenAI-compatible API. Multi-model orchestrator with fallback chains. Response cache with blake3 hashing and TTL. Ollama native tool calling via `llm.ollama.tool_use = true`. EMA-based per-provider latency routing (`router_ema_enabled`) with configurable alpha and reorder interval |
-| **Skills-first architecture** | YAML+Markdown skill files with semantic matching, self-learning evolution, 4-tier trust model, and compact prompt mode for small-context models. Wilson score Bayesian re-ranking with `posterior_weight`/`posterior_mean`. Auto-promote/demote via `check_trust_transition()`. BM25 hybrid search with RRF fusion (`hybrid_search = true`). Skill health XML attributes (`reliability="N%"`, `uses="N"`) injected into the system prompt. `/skill reject <name> <reason>` command for immediate user-driven feedback |
-| **Semantic memory** | SQLite + Qdrant (or embedded SQLite vector search) with MMR re-ranking, temporal decay scoring, resilient compaction (reactive retry, middle-out tool response removal, 9-section structured prompt, LLM-free fallback), durable compaction with message visibility control, tool-pair summarization (LLM-based, configurable cutoff), credential scrubbing, cross-session recall, vector retrieval, autosave assistant responses, snapshot export/import, configurable SQLite pool, background response-cache cleanup, and native `memory_search`/`memory_save` tools the model can invoke explicitly. Implicit correction detection (`FeedbackDetector`) stores `UserCorrection` records in SQLite and Qdrant (`zeph_corrections` collection) for cross-session personalization |
-| **Multi-channel I/O** | CLI, Telegram, Discord, Slack, TUI — all with streaming. Vision and speech-to-text input |
-| **Protocols** | MCP client (stdio + HTTP), A2A agent-to-agent communication, ACP server for IDE integration (stdio + HTTP+SSE + WebSocket, multi-session with LRU eviction, persistence, idle reaper, permission persistence, multi-modal prompts, runtime model switching, session modes (ask/architect/code), MCP server management via `ext_method`, session export/import, tool call lifecycle notifications, terminal command timeout with kill support, `UserMessageChunk` echo, `ext_notification` passthrough, `list`/`fork`/`resume` sessions behind unstable flags), sub-agent orchestration with zero-trust secret delegation. MCP tools exposed as native `ToolDefinition`s — used via structured tool_use with Claude and OpenAI |
-| **Document RAG** | `zeph ingest <path>` ingests `.txt`, `.md`, `.pdf` files into Qdrant `zeph_documents`. When `memory.documents.rag_enabled = true`, the agent automatically retrieves top-K relevant chunks on each turn and prepends them to the context window — no manual `/ingest` needed per session. Also available as `/ingest <path>` in TUI |
-| **Anomaly detection** | `AnomalyDetector` monitors tool failure rates in a sliding window. When the failure fraction exceeds `tools.anomaly.failure_threshold`, a Critical alert is raised and the tool is auto-blocked via the trust system — no manual intervention required |
-| **Webhook gateway** | `GatewayServer` starts automatically in daemon mode (`--features gateway --daemon`) — axum HTTP server with bearer auth, rate limiting, and `/health` endpoint for webhook ingestion |
-| **Defense-in-depth** | Shell sandbox (blocklist + confirmation patterns for process substitution, here-strings, eval, subshell injection via `$(` and backtick), effective command extraction (strips `env`/`exec` prefixes), `ToolPermission` TOML config with per-binary pattern matching (`allow`/`deny`), secret redaction via `redact_json` on all ACP `raw_response` payloads, SSRF protection (HTTPS-only, DNS validation, address pinning, redirect chain re-validation), skill trust quarantine, audit logging. Secrets held in memory as `Zeroizing<String>` — wiped on drop |
-| **TUI dashboard** | ratatui-based with syntax highlighting, live metrics, file picker, command palette, daemon mode. Status bar shows filter savings %; command palette includes `/ingest`, `/gateway status`, and `ViewFilters` |
-| **Tools** | `FileExecutor`: `read`, `write`, `find_path` (renamed from `glob`), `list_directory`, `create_directory`, `delete_path`, `move_path`, `copy_path` — all paths sandbox-validated, symlink-safe. `WebScrapeExecutor`: `web_scrape` + `fetch` (plain URL-to-text, no selector required). `DiagnosticsExecutor`: runs `cargo check` or `cargo clippy --message-format=json`, returns structured diagnostics with file, line, col, severity, and message — output capped, graceful degradation if cargo absent |
-| **Single binary** | ~15 MB, no runtime dependencies, ~50ms startup, ~20 MB idle memory |
-
-[Architecture →](https://bug-ops.github.io/zeph/architecture/overview.html) · [Feature flags →](https://bug-ops.github.io/zeph/reference/feature-flags.html) · [Security model →](https://bug-ops.github.io/zeph/reference/security.html)
-
-## IDE Integration (ACP)
-
-Zeph implements the [Agent Client Protocol](https://agentclientprotocol.com/) — use it as an AI backend in Zed, Helix, VS Code, or any ACP-compatible editor via stdio, HTTP+SSE, or WebSocket transport.
-
-```bash
-zeph acp                    # stdio (editor spawns as subprocess)
-zeph acp --http :8080       # HTTP+SSE (shared/remote)
-zeph acp --ws :8080         # WebSocket
-```
-
-**ACP capabilities:**
-
-- Session modes: `ask`, `code`, `architect` — switch at runtime via `set_session_mode`; editors receive `current_mode_update` notifications
-- Tool call lifecycle: `InProgress` → `Completed` updates with `ToolCallContent::Terminal` for shell calls; terminal release deferred until after the `tool_call_update` notification so IDE can display tool output
-- Terminal command timeout (default 120 s, configurable via `terminal_timeout_secs`) with `kill_terminal_command` support
-- `UserMessageChunk` echo notification after each user prompt
-- `ext_notification` passthrough to running sessions
-- `AgentCapabilities` advertises `session_capabilities`: `list`, `fork`, `resume`
-- MCP HTTP transport support in the MCP bridge
-- Unsupported content blocks (Audio, ResourceLink) produce structured log warnings instead of silent drops
-- **Usage reporting** — token counts (input, output, cache) streamed back to the IDE as `UsageUpdate` session notifications after each turn; IDEs that support `UsageUpdate` render this as a context percentage badge (`unstable-session-usage`, enabled by default)
-- **Loaded rules reporting** — skill paths and system rule files discovered at session start are sent to the IDE via `_meta.projectRules` in `NewSessionResponse`; IDEs that implement this extension display an **N project rules** badge
-- **IDE model picker** — `SetSessionModel` lets the editor switch the active model via a native dropdown without a custom `session/configure` call (`unstable-session-model`)
-- **Auto session title** — `SessionInfoUpdate` notifies the IDE of an agent-generated session title after the first turn (`unstable-session-info-update`)
-- **Plan updates** — `SessionUpdate::Plan` events emitted during orchestrator runs so the editor can display intermediate planning steps
-- **Slash commands** — `AvailableCommandsUpdate` advertises built-in slash commands (`/help`, `/model`, `/mode`, `/clear`, `/compact`); user input starting with `/` is dispatched to the matching handler
-- **LSP diagnostics injection** — `@diagnostics` mention in a Zed prompt triggers LSP diagnostic context injection, providing the agent with current editor diagnostics
-- **Session history** — `GET /sessions` lists persisted sessions with title, timestamp, and message count; `GET /sessions/{id}/messages` returns the full event log; sending an existing `session_id` resumes the conversation from stored context; title auto-inferred from the first user message
-- **Subagent nesting** — sub-agent output is nested under the parent tool call in the IDE via `_meta.claudeCode.parentToolUseId` carried on every `session_update`, so multi-agent runs appear as collapsible trees in Zed and VS Code ACP tool cards
-- **Terminal streaming** — `AcpShellExecutor` streams bash output in real time via `_meta.terminal_output` chunks with a final `_meta.terminal_exit` event; IDEs display live output inside the tool card as commands execute
-- **File following** — `ToolCall.location` carries `filePath` for file read/write operations; the IDE editor cursor tracks the agent across files automatically
-- **Native file tools** — `AcpFileExecutor` exposes `list_directory` and `find_path` tools that run on the agent filesystem when the IDE advertises `fs.readTextFile` capability; paths are sandbox-validated, glob segments validated against `..` traversal, results capped at 1000 entries
-- **ToolFilter** — suppresses local `FileExecutor` tools (`read`, `write`, `glob`) automatically when `AcpFileExecutor` provides IDE-proxied alternatives, preventing tool duplication in the model's context
-- **Permission gate hardening** — subshell injection (`$(`, backticks) blocked before pattern matching; `effective_shell_command()` extracts inner command from `bash -c <cmd>` to prevent args-field bypass; `extract_command_binary()` strips transparent prefixes so "Allow always" for `git` does not auto-approve `rm`; `deny` patterns fast-path to `RejectAlways` without IDE round-trip
-
-> [!NOTE]
-> `list_sessions`, `fork_session`, and `resume_session` are gated behind the `unstable` feature flag. `UsageUpdate`, `SetSessionModel`, and `SessionInfoUpdate` are gated behind their respective `unstable-session-usage`, `unstable-session-model`, and `unstable-session-info-update` flags.
-
-### WebSocket transport hardening
-
-The WebSocket transport is hardened against a range of protocol and concurrency issues:
-
-| Property | Value |
-|---|---|
-| Max concurrent sessions | Configurable; enforced with atomic slot reservation (eliminates TOCTOU race) |
-| Keepalive | 30 s ping interval / 90 s pong timeout — idle connections are closed |
-| Max message size | 1 MiB |
-| Binary frames | Rejected with close code `1003 Unsupported Data` (text-only protocol) |
-| Disconnect drain | Write task given 1 s to deliver the RFC 6455 close frame before the socket is dropped |
-
-### Bearer token authentication
-
-Protect the `/acp` (HTTP+SSE) and `/acp/ws` (WebSocket) endpoints with a static bearer token. The discovery endpoint is always exempt.
-
-```toml
-# config.toml
-[acp]
-auth_bearer_token = "your-secret-token"
-```
-
-| Method | Value |
-|---|---|
-| Config key | `acp.auth_bearer_token` |
-| Environment variable | `ZEPH_ACP_AUTH_TOKEN` |
-| CLI flag | `--acp-auth-token <token>` |
-
-Requests to guarded routes without a valid `Authorization: Bearer <token>` header receive `401 Unauthorized`. When no token is configured, the server runs in open mode — no authentication is enforced. stdio transport is always unaffected.
 
 > [!TIP]
-> Always set `auth_bearer_token` when exposing the ACP server on a network interface. For local-only stdio or single-user setups no token is required.
+> `cargo install zeph` also works. Pre-built binaries and Docker images are on the [releases page](https://github.com/bug-ops/zeph/releases).
 
-> [!CAUTION]
-> Open mode (no token configured) is suitable only for trusted local use. Any process on the same host can issue agent commands without authentication.
+---
 
-### Agent discovery
+## What's inside
 
-Zeph publishes a machine-readable agent manifest at `GET /.well-known/acp.json` that ACP-compatible clients use for capability discovery. The manifest includes the agent name, version, supported transports, and authentication type.
-
-```toml
-# config.toml
-[acp]
-discovery_enabled = true   # default: true
-```
-
-| Method | Value |
+| Feature | Description |
 |---|---|
-| Config key | `acp.discovery_enabled` |
-| Environment variable | `ZEPH_ACP_DISCOVERY_ENABLED=false` to disable |
+| **Hybrid inference** | Ollama, Claude, OpenAI, any OpenAI-compatible API, or fully local via Candle (GGUF). Multi-model orchestrator with fallback chains and EMA latency routing. [→ Providers](https://bug-ops.github.io/zeph/concepts/providers.html) |
+| **Skills-first architecture** | YAML+Markdown skill files with BM25+cosine hybrid retrieval. Bayesian re-ranking, 4-tier trust model, and self-learning evolution — skills improve from real usage. [→ Skills](https://bug-ops.github.io/zeph/concepts/skills.html) · [→ Self-learning](https://bug-ops.github.io/zeph/advanced/self-learning.html) |
+| **Context engineering** | Semantic skill selection, command-aware output filters, tool-pair summarization, and reactive middle-out compaction keep the window efficient under any load. [→ Context](https://bug-ops.github.io/zeph/advanced/context.html) |
+| **Semantic memory** | SQLite + Qdrant with MMR re-ranking, temporal decay, cross-session recall, implicit correction detection, and credential scrubbing. [→ Memory](https://bug-ops.github.io/zeph/concepts/memory.html) |
+| **IDE integration (ACP)** | Stdio, HTTP+SSE, or WebSocket transport. Session modes, live tool streaming, LSP diagnostics injection, file following, usage reporting. Works in Zed, Helix, VS Code. [→ ACP](https://bug-ops.github.io/zeph/advanced/acp.html) |
+| **Multi-channel I/O** | CLI, Telegram, TUI dashboard — all with streaming. Voice and vision input supported. [→ Channels](https://bug-ops.github.io/zeph/advanced/channels.html) |
+| **MCP & A2A** | MCP client with full tool exposure to the model. A2A agent-to-agent protocol for multi-agent orchestration. [→ MCP](https://bug-ops.github.io/zeph/guides/mcp.html) · [→ A2A](https://bug-ops.github.io/zeph/advanced/a2a.html) |
+| **Sub-agents** | Spawn isolated agents with scoped tools, skills, and zero-trust secret delegation — defined as Markdown files. [→ Sub-agents](https://bug-ops.github.io/zeph/advanced/sub-agents.html) |
+| **Defense-in-depth** | Shell sandbox, SSRF protection, skill trust quarantine, secret zeroization, audit logging, `unsafe_code = "deny"` workspace-wide. [→ Security](https://bug-ops.github.io/zeph/reference/security.html) |
+| **Document RAG** | `zeph ingest <path>` indexes `.txt`, `.md`, `.pdf` into Qdrant. Relevant chunks surface automatically on each turn. [→ Document loaders](https://bug-ops.github.io/zeph/advanced/document-loaders.html) |
+| **Daemon & scheduler** | HTTP webhook gateway with bearer auth, cron-based task scheduler with SQLite persistence, background mode. [→ Daemon](https://bug-ops.github.io/zeph/advanced/daemon.html) |
+| **Single binary** | ~15 MB, no runtime dependencies, ~50 ms startup, ~20 MB idle memory. |
 
-> [!NOTE]
-> The discovery endpoint is intentionally unauthenticated so clients can discover the agent and its auth requirements before presenting credentials. Do not include sensitive data in the manifest. Set `discovery_enabled = false` if the endpoint must not be publicly reachable.
-
-[ACP setup guide →](https://bug-ops.github.io/zeph/advanced/acp.html)
-
-## Sub-Agents
-
-Zeph supports spawning sub-agents — isolated agent instances with their own LLM provider, filtered tool access, and injected skills. Sub-agents are defined as Markdown files with TOML frontmatter and loaded from `.zeph/agents/` (project scope) or `~/.config/zeph/agents/` (user scope).
-
-### Definition format
-
-```markdown
-+++
-name = "code-reviewer"
-description = "Reviews code changes for correctness and style"
-model = "claude-sonnet-4-20250514"
-
-[tools]
-allow = ["shell", "web_scrape"]
-
-[permissions]
-network = true
-filesystem = "read"
-secrets = ["GITHUB_TOKEN"]
-ttl_secs = 120
-
-[skills]
-include = ["git-*", "rust-*"]
-exclude = ["deploy-*"]
-+++
-
-You are a code reviewer. Report findings with severity.
+```text
+┌─ Skills (3/12) ────────────────────┐┌─ MCP Tools ─────────────────────────┐
+│  web-search  [████████░░] 82% (117)││  - filesystem/read_file             │
+│  git-commit  [███████░░░] 73%  (42)││  - filesystem/write_file            │
+│  code-review [████░░░░░░] 41%   (8)││  - github/create_pr                 │
+└────────────────────────────────────┘└─────────────────────────────────────┘
 ```
-
-### CLI commands
-
-| Command | Description |
-|---------|-------------|
-| `/agent list` | List available sub-agent definitions |
-| `/agent spawn <name> <prompt>` | Spawn a foreground sub-agent |
-| `/agent bg <name> <prompt>` | Spawn a background sub-agent |
-| `/agent status` | Show active sub-agents with state, turns, and elapsed time |
-| `/agent cancel <id>` | Cancel a running sub-agent by ID prefix |
-| `/agent approve <id>` | Approve a pending secret request |
-| `/agent deny <id>` | Deny a pending secret request |
-
-### Configuration
-
-```toml
-[agents]
-enabled = true
-max_concurrent = 4
-extra_dirs = ["/path/to/shared/agents"]
-```
-
-> [!NOTE]
-> Sub-agents are disabled by default. Set `agents.enabled = true` to activate. Each sub-agent receives only explicitly granted tools, skills, and secrets via zero-trust `PermissionGrants`.
-
-## Self-Learning
-
-Zeph continuously improves skill selection and routing based on real usage, without requiring explicit training or model retraining.
-
-### How it works
-
-| Phase | Mechanism | Effect |
-|-------|-----------|--------|
-| **Feedback capture** | `FailureKind` enum records rejection type; `/skill reject <name> <reason>` triggers immediate skill improvement | Negative signal persisted in `outcome_detail` column (migration 018) |
-| **Implicit correction** | `FeedbackDetector` recognizes correction patterns ("actually", "that's wrong", "try again") in user messages | `UserCorrection` stored in SQLite + Qdrant `zeph_corrections` collection |
-| **Cross-session recall** | Corrections are retrieved by embedding similarity at context-build time | Agent adapts to user preferences across sessions without user re-stating preferences |
-| **Bayesian re-ranking** | Wilson score lower-bound updates `posterior_weight` and `posterior_mean` per skill | Proven skills surface higher; underperforming skills demoted automatically |
-| **Trust transitions** | `check_trust_transition()` runs after each outcome | Skills auto-promoted to `Trusted` or demoted to `Quarantined` based on accumulated evidence |
-| **Hybrid search** | BM25 keyword score fused with cosine similarity via Reciprocal Rank Fusion | Better recall for exact-match queries; `cosine_weight` controls blend ratio |
-| **EMA routing** | `EmaTracker` tracks per-provider exponential moving average latency | Fastest reliable provider gets priority; reordering interval is configurable |
-
-### Configuration
-
-```toml
-[skills]
-cosine_weight   = 0.7   # weight of cosine similarity vs BM25 in hybrid search (default: 0.7)
-hybrid_search   = true  # enable BM25 + cosine RRF fusion (default: true)
-
-[agent.learning]
-correction_detection              = true   # implicit correction detection
-correction_confidence_threshold   = 0.7    # minimum confidence to record a correction
-correction_recall_limit           = 5      # max corrections injected into context per turn
-correction_min_similarity         = 0.75   # minimum vector similarity for correction recall
-
-[llm]
-router_ema_enabled       = false  # enable EMA-based provider routing (default: false)
-router_ema_alpha         = 0.1    # EMA smoothing factor (default: 0.1)
-router_reorder_interval  = 60     # seconds between provider reordering (default: 60)
-```
-
-### TUI confidence bars
-
-When running with `--tui`, the skills panel shows live confidence bars derived from the Wilson score posterior:
-
-```
-web-search    [████████░░] 82% (117 uses)
-git-commit    [███████░░░] 73% (42 uses)
-code-review   [████░░░░░░] 41% (8 uses)
-```
-
-### CLI commands
-
-| Command | Description |
-|---------|-------------|
-| `/skill reject <name> <reason>` | Record a rejection and trigger immediate skill improvement cycle |
-
-> [!TIP]
-> Use `/skill reject` whenever a skill produces a wrong result. The rejection is stored with a typed `FailureKind` and immediately feeds the Bayesian re-ranker — no manual config required.
-
-> [!NOTE]
-> Implicit corrections are detected automatically from natural language ("actually, ...", "that's not right"). Explicit `/skill reject` provides stronger signal and is preferred when the failure is clear-cut.
-
-## TUI Demo
 
 <div align="center">
   <img src="asset/zeph.gif" alt="Zeph TUI Dashboard" width="800">
 </div>
 
-[TUI guide →](https://bug-ops.github.io/zeph/advanced/tui.html)
-
 ## Documentation
 
-**[bug-ops.github.io/zeph](https://bug-ops.github.io/zeph/)** — installation, configuration, guides, architecture, and API reference.
+Full documentation — installation, configuration, guides, and architecture reference — at **[bug-ops.github.io/zeph](https://bug-ops.github.io/zeph/)**.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development workflow and guidelines.
-
-## Security
-
-The workspace enforces `unsafe_code = "deny"` at the Cargo workspace lint level — no unsafe Rust is permitted in any crate without an explicit override.
-
-Found a vulnerability? Please use [GitHub Security Advisories](https://github.com/bug-ops/zeph/security/advisories/new) for responsible disclosure.
+See [CONTRIBUTING.md](CONTRIBUTING.md). Found a vulnerability? Use [GitHub Security Advisories](https://github.com/bug-ops/zeph/security/advisories/new).
 
 ## License
 
