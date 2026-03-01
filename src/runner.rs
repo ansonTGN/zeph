@@ -22,7 +22,9 @@ use zeph_channels::AnyChannel;
 use zeph_core::agent::Agent;
 #[cfg(not(feature = "tui"))]
 use zeph_core::bootstrap::resolve_config_path;
-use zeph_core::bootstrap::{AppBuilder, create_mcp_registry, warmup_provider};
+#[cfg(not(feature = "tui"))]
+use zeph_core::bootstrap::warmup_provider;
+use zeph_core::bootstrap::{AppBuilder, create_mcp_registry};
 use zeph_core::vault::Secret;
 
 #[cfg(feature = "acp-http")]
@@ -141,19 +143,46 @@ pub(crate) async fn run(cli: Cli) -> anyhow::Result<()> {
     let embed_model = app.embedding_model();
     let budget_tokens = app.auto_budget_tokens(&provider);
 
+    let config = app.config();
+    let permission_policy = config
+        .tools
+        .permission_policy(config.security.autonomy_level);
+
+    #[cfg(feature = "tui")]
+    let with_tool_events = cli.tui && cfg!(feature = "tui");
+    #[cfg(not(feature = "tui"))]
+    let with_tool_events = false;
+
     let registry = app.build_registry();
-    let memory = std::sync::Arc::new(app.build_memory(&provider).await?);
+    let watchers = app.build_watchers();
+    let summary_provider = app.build_summary_provider();
+
+    let warmup_provider_clone = provider.clone();
+    #[cfg(feature = "tui")]
+    let warmup_handle = None::<tokio::task::JoinHandle<()>>;
+    #[cfg(not(feature = "tui"))]
+    let warmup_handle = {
+        let p = warmup_provider_clone.clone();
+        Some(tokio::spawn(async move { warmup_provider(&p).await }))
+    };
+
+    let (memory_result, tool_setup) = tokio::join!(
+        app.build_memory(&provider),
+        agent_setup::build_tool_setup(config, permission_policy.clone(), with_tool_events),
+    );
+    let memory = std::sync::Arc::new(memory_result?);
 
     let all_meta = registry.all_meta();
-    let matcher = app.build_skill_matcher(&provider, &all_meta, &memory).await;
     let skill_count = all_meta.len();
+    let (matcher, cli_history) = tokio::join!(
+        app.build_skill_matcher(&provider, &all_meta, &memory),
+        build_cli_history(&memory),
+    );
     if matcher.is_some() {
         tracing::info!("skill matcher initialized for {skill_count} skill(s)");
     } else {
         tracing::info!("skill matcher unavailable, using all {skill_count} skill(s)");
     }
-
-    let cli_history = build_cli_history(&memory).await;
 
     #[cfg(feature = "tui")]
     let (channel, tui_handle) =
@@ -185,18 +214,8 @@ pub(crate) async fn run(cli: Cli) -> anyhow::Result<()> {
         });
     }
 
-    let permission_policy = config
-        .tools
-        .permission_policy(config.security.autonomy_level);
     let skill_paths = app.skill_paths();
 
-    #[cfg(feature = "tui")]
-    let with_tool_events = tui_handle.is_some();
-    #[cfg(not(feature = "tui"))]
-    let with_tool_events = false;
-
-    let tool_setup =
-        agent_setup::build_tool_setup(config, permission_policy.clone(), with_tool_events).await;
     let memory_executor = zeph_core::memory_tools::MemoryToolExecutor::new(
         std::sync::Arc::clone(&memory),
         conversation_id,
@@ -214,7 +233,6 @@ pub(crate) async fn run(cli: Cli) -> anyhow::Result<()> {
     #[cfg(not(feature = "tui"))]
     let _tool_event_rx = tool_setup.tool_event_rx;
 
-    let watchers = app.build_watchers();
     let _skill_watcher = watchers.skill_watcher;
     let reload_rx = watchers.skill_reload_rx;
     let _config_watcher = watchers.config_watcher;
@@ -228,10 +246,6 @@ pub(crate) async fn run(cli: Cli) -> anyhow::Result<()> {
     let index_provider = provider.clone();
     #[cfg(feature = "index")]
     let provider_has_tools = provider.supports_tool_use();
-    let warmup_provider_clone = provider.clone();
-
-    let summary_provider = app.build_summary_provider();
-    let config = app.config();
     let config_path = app.config_path().to_owned();
     let cache_pool = memory.sqlite().pool().clone();
 
@@ -383,7 +397,9 @@ pub(crate) async fn run(cli: Cli) -> anyhow::Result<()> {
         .await;
     }
 
-    warmup_provider(&warmup_provider_clone).await;
+    if let Some(handle) = warmup_handle {
+        let _ = handle.await;
+    }
     tokio::spawn(forward_status_to_stderr(status_rx));
     let result = Box::pin(agent.run()).await;
     agent.shutdown().await;
