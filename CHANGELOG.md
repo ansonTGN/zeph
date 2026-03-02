@@ -6,7 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.12.5] - 2026-03-02
+
 ### Added
+
+- `load_skill` tool in `zeph-core`: LLM can call `load_skill(skill_name)` at inference time to retrieve the full body of any registered skill by name. Non-TOP skills appear in the system prompt as metadata-only catalog entries; this tool enables on-demand access to their full instructions without expanding the system prompt (#1125)
 
 - Provider instruction file loader (`InstructionLoader`) in `zeph-core`: auto-detects `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, and `zeph.md` from the working directory and injects them into the system prompt with path-traversal protection (symlink boundary check, null byte guard, 256 KiB size cap) (#1122)
 
@@ -1578,7 +1582,8 @@ let agent = Agent::new(provider, channel, &skills_prompt, executor);
 - Agent calls channel.send_typing() before each LLM request
 - Agent::run() uses tokio::select! to race channel messages against shutdown signal
 
-[Unreleased]: https://github.com/bug-ops/zeph/compare/v0.12.4...HEAD
+[Unreleased]: https://github.com/bug-ops/zeph/compare/v0.12.5...HEAD
+[0.12.5]: https://github.com/bug-ops/zeph/compare/v0.12.4...v0.12.5
 [0.12.4]: https://github.com/bug-ops/zeph/compare/v0.12.3...v0.12.4
 [0.12.3]: https://github.com/bug-ops/zeph/compare/v0.12.2...v0.12.3
 [0.12.2]: https://github.com/bug-ops/zeph/compare/v0.12.1...v0.12.2
