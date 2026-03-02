@@ -28,7 +28,7 @@ jobs:
       - uses: contributor-assistant/github-action@v2.6.1
         with:
           path-to-signatures: cla-signatures.json
-          path-to-document: https://github.com/bug-ops/zeph/blob/main/CLA.md
+          path-to-document: https://github.com/bug-ops/zeph/blob/main/.github/CLA.md
           branch: cla-signatures
           allowlist: bug-ops,dependabot[bot],github-actions[bot]
         env:
@@ -116,7 +116,7 @@ jobs:
       - uses: mozilla-actions/sccache-action@v0.0.9
       - uses: taiki-e/install-action@nextest
       - name: Build and archive tests
-        run: cargo nextest archive --workspace --features full --lib --bins --archive-file nextest-archive.tar.zst
+        run: cargo nextest archive --config-file .github/nextest.toml --workspace --features full --lib --bins --archive-file nextest-archive.tar.zst
         env:
           RUSTC_WRAPPER: sccache
           SCCACHE_GHA_ENABLED: "true"
@@ -144,7 +144,7 @@ jobs:
         with:
           name: nextest-archive-${{ matrix.os }}
       - name: Run tests
-        run: cargo nextest run --archive-file nextest-archive.tar.zst --workspace-remap .
+        run: cargo nextest run --config-file .github/nextest.toml --archive-file nextest-archive.tar.zst --workspace-remap .
 
   test-no-network:
     name: Test (no-network)
@@ -159,7 +159,7 @@ jobs:
         with:
           name: nextest-archive-ubuntu-latest
       - name: Run tests without network
-        run: cargo nextest run --archive-file nextest-archive.tar.zst --workspace-remap .
+        run: cargo nextest run --config-file .github/nextest.toml --archive-file nextest-archive.tar.zst --workspace-remap .
 
   doc-test:
     name: Doc Tests
@@ -193,7 +193,7 @@ jobs:
       - uses: mozilla-actions/sccache-action@v0.0.9
       - uses: taiki-e/install-action@nextest
       - name: Run integration tests (testcontainers)
-        run: cargo nextest run --workspace --features full --profile ci --test '*integration*'
+        run: cargo nextest run --config-file .github/nextest.toml --workspace --features full --profile ci --test '*integration*'
         env:
           RUSTC_WRAPPER: sccache
           SCCACHE_GHA_ENABLED: "true"
@@ -213,7 +213,7 @@ jobs:
       - uses: taiki-e/install-action@cargo-llvm-cov
       - uses: taiki-e/install-action@nextest
       - name: Generate coverage
-        run: cargo llvm-cov nextest --workspace --features full --lib --bins --lcov --output-path lcov.info
+        run: cargo llvm-cov nextest --config-file .github/nextest.toml --workspace --features full --lib --bins --lcov --output-path lcov.info
         env:
           RUSTC_WRAPPER: sccache
           SCCACHE_GHA_ENABLED: "true"
