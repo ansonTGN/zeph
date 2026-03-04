@@ -34,7 +34,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `PermissionMode` re-exported from `zeph-core::subagent` public API
 - MCP declarative policy layer (`zeph-mcp`): per-server `McpPolicy` with allowlist, denylist, and sliding-window rate limiting; `PolicyEnforcer` (backed by `DashMap` per-server mutexes) enforces policy before each `call_tool()` invocation; policy configured via `[mcp.servers.policy]` TOML sub-table; no-policy servers allow all tools (backward compatible)
 - Thompson Sampling router strategy in `zeph-llm`: `router/thompson.rs` adds `ThompsonState` with per-provider `BetaDist` (alpha/beta updated on each response); `RouterProvider` now supports `RouterStrategy::Thompson` via `with_thompson()`; state persisted atomically to `~/.zeph/router_thompson_state.json`; enabled via `strategy = "thompson"` in `[llm.router]` config; `rand_distr::Beta` used for numerically stable sampling with 1e-6 clamping
-- Thompson Sampling router strategy in `zeph-llm`: `router/thompson.rs` adds `ThompsonState` with per-provider `BetaDist` (alpha/beta updated on each response); `RouterProvider` now supports `RouterStrategy::Thompson` via `with_thompson()`; state persisted atomically to `~/.zeph/router_thompson_state.json`; enabled via `strategy = "thompson"` in `[llm.router]` config; `rand_distr::Beta` used for numerically stable sampling with 1e-6 clamping
+- Sub-agent scope & priority system: agents loaded from four scopes with explicit priority — CLI (`--agents` flag) → project (`.zeph/agents/`) → user (`~/.config/zeph/agents/`) → config `extra_dirs`; first definition wins on name collision (#1145)
+- `--agents <path>` CLI flag: one or more `.md` files or directories for session-scoped sub-agent definitions; non-existent paths are a hard error
+- `SubAgentConfig.user_agents_dir`: configurable user-level agents directory; empty string disables user scope
+- `/agent list` now shows scope labels: `(cli)`, `(project)`, `(user)`, `(config)` per agent
+- `SubAgentDef.source`: scope label field on every loaded definition for diagnostics
+- `load_with_boundary()`: canonicalizes paths, enforces directory boundaries (symlink escape prevention), caps at 100 entries per directory
+- `--init` wizard: new prompt for user-level agents directory path
 - `serde_norway = "0.9.42"` dependency for YAML parsing in sub-agent definitions (replaces TOML-only parsing)
 - `FrontmatterFormat` enum in `zeph-core` routes sub-agent definitions to the correct deserializer based on detected delimiter
 - 256 KiB file size cap in `SubAgentDef::load()` to prevent DoS via oversized definition files
