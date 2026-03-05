@@ -3189,6 +3189,7 @@ pub(super) mod agent_tests {
             hooks: SubagentHooks::default(),
             memory: None,
             source: None,
+            file_path: None,
         });
         agent.subagent_manager = Some(mgr);
         agent
@@ -3486,6 +3487,7 @@ mod compaction_e2e {
             hooks: SubagentHooks::default(),
             memory: None,
             source: None,
+            file_path: None,
         });
         agent.subagent_manager = Some(mgr);
 
@@ -3598,6 +3600,7 @@ mod compaction_e2e {
             hooks: SubagentHooks::default(),
             memory: None,
             source: None,
+            file_path: None,
         });
         agent.subagent_manager = Some(mgr);
 
