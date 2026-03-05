@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- Add task orchestration core types (`TaskGraph`, `TaskNode`, `TaskId`, `GraphId`, `TaskStatus`, `GraphStatus`, `FailureStrategy`, `TaskResult`), DAG algorithms (`validate`, `toposort`, `ready_tasks`, `propagate_failure`), `OrchestrationConfig`, `OrchestrationError`, and SQLite persistence via `RawGraphStore`/`GraphPersistence` (Phase 1, #1236)
+- Add `orchestration` feature flag in root, `zeph-core`, and `zeph-memory` crates (included in `full`) (#1236)
+- Add `[orchestration]` TOML config section: `enabled`, `max_tasks`, `max_parallel`, `default_failure_strategy`, `default_max_retries`, `task_timeout_secs` (#1236)
+- Add migration `022_task_graphs.sql` with JSON blob persistence for task graphs (#1236)
 - Add TUI security integration (Phase 5, #1195): security indicator in status bar (yellow "SEC: N flags", red "N blocked"), security side panel widget with aggregate metrics and recent events, `security:events` command palette entry for full event history (#1195)
 - Add `SecurityEvent` and `SecurityEventCategory` types in `zeph-core::metrics` with ring buffer (VecDeque, cap 100) in `MetricsSnapshot` for security event transport via existing watch channel (#1195)
 - Add `SecurityEvent` emission at Agent call sites (context.rs, tool_execution.rs, persistence.rs) for injection flags, truncations, quarantine successes/failures, exfiltration blocks, and memory write guards (#1195)
