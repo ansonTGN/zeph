@@ -8,6 +8,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- Add TUI security integration (Phase 5, #1195): security indicator in status bar (yellow "SEC: N flags", red "N blocked"), security side panel widget with aggregate metrics and recent events, `security:events` command palette entry for full event history (#1195)
+- Add `SecurityEvent` and `SecurityEventCategory` types in `zeph-core::metrics` with ring buffer (VecDeque, cap 100) in `MetricsSnapshot` for security event transport via existing watch channel (#1195)
+- Add `SecurityEvent` emission at Agent call sites (context.rs, tool_execution.rs, persistence.rs) for injection flags, truncations, quarantine successes/failures, exfiltration blocks, and memory write guards (#1195)
+- Add time-based Security/Subagents panel toggle (60s recency window) to avoid permanently hiding subagent visibility after a single security event (#1195)
+- Add UTF-8-safe truncation for `SecurityEvent` detail (128 chars) and source (64 chars) fields with ASCII control character stripping (#1195)
 - Add `GraphExtractor` with LLM-powered entity/relation extraction via `chat_typed_erased`, system prompt with 10 extraction rules, truncation guards, and graceful parse-failure degradation (#1225)
 - Add `EntityResolver` with exact name+type entity resolution (`resolve`) and edge deduplication/supersession (`resolve_edge`), case-insensitive entity matching, unknown-type coercion to `Concept` (#1225)
 - Add `ExtractionResult`, `ExtractedEntity`, `ExtractedEdge` types with `JsonSchema` derivation for structured LLM output (#1225)
