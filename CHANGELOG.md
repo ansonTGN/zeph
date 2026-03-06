@@ -8,6 +8,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- Add DAG scheduler (`DagScheduler`) with tick-based execution loop, command pattern (`SchedulerAction`), mpsc event channel (`TaskEvent`/`TaskOutcome`), task timeout monitoring, and cross-task context injection with char-safe truncation (Phase 3, #1238)
+- Add `AgentRouter` trait and `RuleBasedRouter` with 3-step fallback chain (agent_hint, tool keyword matching, first available) for task-to-agent routing (#1238)
+- Add `spawn_for_task()` to `SubAgentManager` with JoinHandle wrapping for orchestration event delivery (#1238)
+- Add stale event guard in scheduler: rejects completion events from timed-out-then-retried agents (#1238)
+- Add `ContentSanitizer` integration in `build_task_prompt()` for cross-task dependency output sanitization (#1238)
+- Add `dependency_context_budget` (default 16384) and `confirm_before_execute` (default true) to `OrchestrationConfig` (#1238)
 - Add graph-aware retrieval with BFS traversal: `graph_recall` function with fuzzy word-split entity matching, depth-tracked BFS expansion, composite scoring, and deduplication (#1226)
 - Add `MemoryRoute::Graph` variant to memory router with `RELATIONSHIP_PATTERNS` heuristic for relationship-style queries (#1226)
 - Add `BudgetAllocation.graph_facts` (4% when graph-memory enabled) and `ContextBudget.graph_enabled` for graph-aware context budget allocation (#1226)
