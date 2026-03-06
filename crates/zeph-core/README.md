@@ -58,7 +58,6 @@ Key `AgentConfig` fields (TOML section `[agent]`):
 |-------|------|---------|--------------|-------------|
 | `name` | string | `"zeph"` | — | Agent display name |
 | `max_tool_iterations` | usize | `10` | — | Max tool calls per turn |
-| `summary_model` | string? | `null` | — | Model used for context summarization |
 | `auto_update_check` | bool | `true` | `ZEPH_AUTO_UPDATE_CHECK` | Check GitHub releases for a newer version on startup / via scheduler |
 
 Key `InstructionConfig` fields (TOML section `[agent.instructions]`):
@@ -104,7 +103,7 @@ Key `MemoryConfig` fields (TOML section `[memory]`):
 auto_update_check = true   # set to false to disable update notifications
 ```
 
-Set `ZEPH_AUTO_UPDATE_CHECK=false` to disable without changing the config file.
+Set `ZEPH_AUTO_UPDATE_CHECK=false` to disable update notifications without changing the config file.
 
 Key `DebugConfig` fields (TOML section `[debug]`):
 
@@ -143,13 +142,22 @@ Key `AgentConfig.learning` fields (TOML section `[agent.learning]`):
 | `judge_adaptive_low` | f32 | `0.5` | Regex confidence below this value skips judge invocation (treated as "not a correction") |
 | `judge_adaptive_high` | f32 | `0.8` | Regex confidence above this value skips judge invocation (high-confidence regex match accepted) |
 
-Key `LlmConfig` fields for EMA routing (TOML section `[llm]`):
+Key `LlmConfig` fields (TOML section `[llm]`):
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
+| `summary_model` | string? | `null` | Shorthand spec for the summarization provider. Formats: `ollama/<model>`, `claude[/<model>]`, `openai[/<model>]`, `compatible/<name>`, `candle`. Ignored when `[llm.summary_provider]` is set. |
+| `summary_provider` | table? | `null` | Structured summarization provider (takes precedence over `summary_model`). Same fields as `[llm.orchestrator.providers.*]`: `type`, `model`, `base_url`, `embedding_model`, `device`. For `compatible` type, `model` is the `[[llm.compatible]]` entry name. |
 | `router_ema_enabled` | bool | `false` | Enable per-provider EMA latency tracking and reordering |
 | `router_ema_alpha` | f64 | `0.1` | EMA smoothing factor (lower = slower adaptation) |
 | `router_reorder_interval` | u64 | `60` | Seconds between provider list reordering |
+
+```toml
+# Example: use Claude Haiku for summarization, primary model for inference
+[llm.summary_provider]
+type = "claude"
+model = "claude-haiku-4-5-20251001"
+```
 
 ## Sub-agent Commands
 

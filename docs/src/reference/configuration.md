@@ -87,6 +87,24 @@ embedding_model = "qwen3-embedding"  # Model for text embeddings
 # response_cache_enabled = false     # SQLite-backed LLM response cache (default: false)
 # response_cache_ttl_secs = 3600     # Cache TTL in seconds (default: 3600)
 
+# Dedicated provider for tool-pair summarization and context compaction (optional).
+# String shorthand — pick one format, or use [llm.summary_provider] below.
+# summary_model = "ollama/qwen3:1.7b"              # ollama/<model>
+# summary_model = "claude"                         # Claude, model from [llm.cloud]
+# summary_model = "claude/claude-haiku-4-5-20251001"
+# summary_model = "openai/gpt-4o-mini"
+# summary_model = "compatible/<name>"              # [[llm.compatible]] entry name
+# summary_model = "candle"
+
+# Structured summary provider (same format as [llm.orchestrator.providers.*]).
+# Takes precedence over summary_model when both are set.
+# [llm.summary_provider]
+# type = "claude"                        # claude, openai, compatible, ollama, candle
+# model = "claude-haiku-4-5-20251001"   # model override (for compatible: [[llm.compatible]] entry name)
+# base_url = "..."                       # endpoint override (ollama / openai only)
+# embedding_model = "..."               # embedding model override (ollama / openai only)
+# device = "cpu"                         # cpu, cuda, metal (candle only)
+
 [llm.cloud]
 model = "claude-sonnet-4-5-20250929"
 max_tokens = 4096
