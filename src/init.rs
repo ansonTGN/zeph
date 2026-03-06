@@ -81,6 +81,9 @@ pub(crate) struct WizardState {
     pub(crate) orchestration_confirm_before_execute: bool,
     pub(crate) orchestration_failure_strategy: String,
     pub(crate) orchestration_planner_model: Option<String>,
+    // Graph memory settings
+    pub(crate) graph_memory_enabled: bool,
+    pub(crate) graph_extract_model: Option<String>,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -413,6 +416,21 @@ fn step_memory(state: &mut WizardState) -> anyhow::Result<()> {
         );
     }
 
+    state.graph_memory_enabled = Confirm::new()
+        .with_prompt("Enable knowledge graph memory? (experimental)")
+        .default(false)
+        .interact()?;
+
+    if state.graph_memory_enabled {
+        let model: String = Input::new()
+            .with_prompt("LLM model for entity extraction (empty = same as agent)")
+            .default(String::new())
+            .interact_text()?;
+        if !model.is_empty() {
+            state.graph_extract_model = Some(model);
+        }
+    }
+
     println!();
     Ok(())
 }
@@ -594,6 +612,10 @@ pub(crate) fn build_config(state: &WizardState) -> Config {
         },
         ..config.memory
     };
+    config.memory.graph.enabled = state.graph_memory_enabled;
+    if let Some(ref m) = state.graph_extract_model {
+        config.memory.graph.extract_model.clone_from(m);
+    }
 
     match state.channel {
         ChannelChoice::Cli => {}
@@ -1383,5 +1405,29 @@ mod tests {
             config.llm.orchestrator.is_none(),
             "missing primary provider must yield no OrchestratorConfig"
         );
+    }
+
+    #[test]
+    fn build_config_graph_memory_enabled() {
+        let state = WizardState {
+            graph_memory_enabled: true,
+            graph_extract_model: Some("llama3".into()),
+            vault_backend: "env".into(),
+            ..WizardState::default()
+        };
+        let config = build_config(&state);
+        assert!(config.memory.graph.enabled);
+        assert_eq!(config.memory.graph.extract_model, "llama3");
+    }
+
+    #[test]
+    fn build_config_graph_memory_disabled() {
+        let state = WizardState {
+            graph_memory_enabled: false,
+            vault_backend: "env".into(),
+            ..WizardState::default()
+        };
+        let config = build_config(&state);
+        assert!(!config.memory.graph.enabled);
     }
 }
