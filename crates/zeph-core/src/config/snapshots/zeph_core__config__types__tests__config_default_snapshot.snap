@@ -313,3 +313,18 @@ max_experiments_per_run = 20
 enabled = false
 output_dir = ".local/debug"
 format = "json"
+
+[lsp]
+enabled = false
+mcp_server_id = "mcpls"
+token_budget = 2000
+call_timeout_secs = 5
+
+[lsp.diagnostics]
+enabled = true
+max_per_file = 20
+min_severity = "error"
+
+[lsp.hover]
+enabled = false
+max_symbols = 10
