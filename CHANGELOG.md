@@ -15,6 +15,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Add `/lsp` interactive command and `lsp:status` TUI command palette entry: shows hook state, MCP server connection status, per-hook injection counts, and token budget usage.
 - Add `LspConfig` to `AgentConfig` behind `#[cfg(feature = "lsp-context")]`.
 - Add autonomous self-experimentation engine (Phase 1): `experiments` feature flag (opt-in), `ExperimentConfig` with `enabled = false` default and numeric bounds validation, `Variation`/`ParameterKind`/`ExperimentResult` types with `ordered-float` for deterministic hashing, SQLite storage with CRUD operations (`insert_result`, `list_results`, `best_result`, `results_since`, `session_summary`), timestamp format validation, safety caps on query results (#1313, #1312)
+- Add benchmark dataset and LLM-as-judge evaluator for autonomous experiments engine (`experiments` feature flag): TOML benchmark format with prompt/context/reference/tags fields, `Evaluator` with configurable judge model and parallel scoring via `FuturesUnordered`, `EvalReport` with mean score, p50/p95 latency, partial result indicators, budget enforcement with per-invocation token tracking, XML boundary tags for prompt injection defense, path traversal protection and file size limits on benchmark files (#1314)
 
 ## [0.14.1] - 2026-03-07
 
