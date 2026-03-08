@@ -5,7 +5,7 @@ Create your own skills to teach Zeph new capabilities. A skill is a single `SKIL
 ## Skill Structure
 
 ```text
-skills/
+.zeph/skills/
 └── my-skill/
     └── SKILL.md
 ```
@@ -76,7 +76,7 @@ Lowercase letters, numbers, and hyphens only. No leading, trailing, or consecuti
 Add reference files alongside `SKILL.md`:
 
 ```text
-skills/
+.zeph/skills/
 └── system-info/
     ├── SKILL.md
     └── references/
@@ -93,7 +93,7 @@ Local file references in the skill body (e.g., `[see config](references/config.m
 
 ```toml
 [skills]
-paths = ["./skills", "/home/user/my-skills"]
+paths = [".zeph/skills", "/home/user/my-skills"]
 max_active_skills = 5
 ```
 
@@ -101,7 +101,7 @@ Skills from multiple paths are scanned. If a skill with the same name appears in
 
 ## Testing Your Skill
 
-1. Place the skill directory under `./skills/`
+1. Place the skill directory under `.zeph/skills/`
 2. Start Zeph — the skill is loaded automatically
 3. Send a message that should match your skill's description
 4. Run `/skills` to verify it was selected
