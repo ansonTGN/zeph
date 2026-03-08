@@ -16,6 +16,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Correction embedding storage fails with FOREIGN KEY constraint error (SQLite code 787) on a clean database. Add missing `ensure_named_collection()` call before vector store operations in `store_correction_embedding()` and `retrieve_similar_corrections()` (#1348)
 - Router provider no longer eagerly initializes all providers in chain at startup. Providers that fail to initialize (e.g. missing API keys) are skipped with a warning instead of aborting the entire chain (#1345)
 - Compatible provider API key is now optional for local endpoints (localhost, private networks). Add `api_key` field to `[[llm.compatible]]` config as an alternative to vault secrets (#1345)
+- Claude adaptive thinking mode (`--thinking adaptive`) no longer fails with 400 Bad Request. Use correct API type `"adaptive"` instead of `"enabled"` without `budget_tokens`. Add `output_config.effort` support for adaptive effort levels (#1356)
 
 ### Breaking Changes
 
