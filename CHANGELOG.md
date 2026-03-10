@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- `zeph migrate-config [--config PATH] [--in-place] [--diff]` command: reads an existing user config, adds all missing parameters as commented-out blocks with descriptions from the canonical reference, and reformats the file by grouping and sorting keys within each section. Existing values are never modified. Running the command twice produces identical output (idempotent). The `--init` wizard now shows a tip about this command.
+
 ### Changed
 
 - Consolidate `is_private_ip` (SSRF IP check) into `zeph-tools::net::is_private_ip` (canonical superset with CGNAT `100.64.0.0/10`); update `zeph-mcp`, `zeph-acp`, `zeph-tools/scrape` to use it; upgrade A2A's own copy with CGNAT range (DEDUP-01)
