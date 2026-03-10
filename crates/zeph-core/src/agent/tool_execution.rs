@@ -1764,36 +1764,75 @@ impl<C: Channel> Agent<C> {
                     .sanitizer
                     .sanitize(&output, ContentSource::new(ContentSourceKind::ToolResult))
                     .body;
-                if !self.learning_engine.was_reflection_used()
-                    && self
+                if !self.learning_engine.was_reflection_used() {
+                    match self
                         .attempt_self_reflection(&sanitized_out, &sanitized_out)
-                        .await?
-                {
-                    // Push ToolResult for the current (failing) tool and synthetic results
-                    // for any remaining unexecuted tools so every ToolUse in the assistant
-                    // message has a matching ToolResult. Without this the conversation history
-                    // contains orphaned ToolUse blocks that cause Claude API 400 errors on the
-                    // next request (issue #1512).
-                    result_parts.push(MessagePart::ToolResult {
-                        tool_use_id: tc.id.clone(),
-                        content: sanitized_out.clone(),
-                        is_error: true,
-                    });
-                    for remaining_tc in tool_calls.iter().skip(idx + 1) {
-                        result_parts.push(MessagePart::ToolResult {
-                            tool_use_id: remaining_tc.id.clone(),
-                            content: "[skipped: prior tool failed]".to_owned(),
-                            is_error: true,
-                        });
+                        .await
+                    {
+                        Ok(true) => {
+                            // Push ToolResult for the current (failing) tool and synthetic results
+                            // for any remaining unexecuted tools so every ToolUse in the assistant
+                            // message has a matching ToolResult. Without this the conversation history
+                            // contains orphaned ToolUse blocks that cause Claude API 400 errors on the
+                            // next request (issue #1512).
+                            result_parts.push(MessagePart::ToolResult {
+                                tool_use_id: tc.id.clone(),
+                                content: sanitized_out.clone(),
+                                is_error: true,
+                            });
+                            for remaining_tc in tool_calls.iter().skip(idx + 1) {
+                                result_parts.push(MessagePart::ToolResult {
+                                    tool_use_id: remaining_tc.id.clone(),
+                                    content: "[skipped: prior tool failed]".to_owned(),
+                                    is_error: true,
+                                });
+                            }
+                            let user_msg = Message::from_parts(Role::User, result_parts);
+                            // has_injection_flags=false is safe here: `sanitized_out` already passed
+                            // through ContentSanitizer above (line ~1763), and "[skipped: prior tool
+                            // failed]" is a hardcoded constant with no external content.
+                            self.persist_message(
+                                Role::User,
+                                &user_msg.content,
+                                &user_msg.parts,
+                                false,
+                            )
+                            .await;
+                            self.push_message(user_msg);
+                            return Ok(());
+                        }
+                        Ok(false) => {
+                            // Self-reflection declined or not applicable; continue normal processing.
+                        }
+                        Err(e) => {
+                            // Self-reflection failed. Push ToolResults for all tool calls so
+                            // the conversation is never left with orphaned ToolUse blocks (#1517).
+                            result_parts.push(MessagePart::ToolResult {
+                                tool_use_id: tc.id.clone(),
+                                content: output.clone(),
+                                is_error,
+                            });
+                            for remaining_tc in tool_calls.iter().skip(idx + 1) {
+                                result_parts.push(MessagePart::ToolResult {
+                                    tool_use_id: remaining_tc.id.clone(),
+                                    content:
+                                        "[error] self-reflection failed before result was processed"
+                                            .to_owned(),
+                                    is_error: true,
+                                });
+                            }
+                            let user_msg = Message::from_parts(Role::User, result_parts);
+                            self.persist_message(
+                                Role::User,
+                                &user_msg.content,
+                                &user_msg.parts,
+                                false,
+                            )
+                            .await;
+                            self.push_message(user_msg);
+                            return Err(e);
+                        }
                     }
-                    let user_msg = Message::from_parts(Role::User, result_parts);
-                    // has_injection_flags=false is safe here: `sanitized_out` already passed
-                    // through ContentSanitizer above (line ~1763), and "[skipped: prior tool
-                    // failed]" is a hardcoded constant with no external content.
-                    self.persist_message(Role::User, &user_msg.content, &user_msg.parts, false)
-                        .await;
-                    self.push_message(user_msg);
-                    return Ok(());
                 }
             } else {
                 self.record_skill_outcomes("success", None, None).await;
@@ -5159,6 +5198,229 @@ mod tests {
             tool_result_ids.len(),
             3,
             "expected exactly 3 ToolResult parts; got: {tool_result_ids:?}"
+        );
+    }
+
+    // R-NTP-10: attempt_self_reflection returns Err — handle_native_tool_calls must push ToolResult
+    // messages for ALL tool calls in the batch before propagating the error (#1517 fix).
+    // Uses a failing provider so that process_response() inside attempt_self_reflection returns Err.
+    #[tokio::test]
+    async fn self_reflection_err_pushes_tool_results_for_all_calls() {
+        use super::super::agent_tests::{MockChannel, mock_provider_failing};
+        use crate::config::LearningConfig;
+        use zeph_llm::provider::{MessagePart, Role};
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let skill_dir = temp_dir.path().join("test-skill");
+        std::fs::create_dir(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: test-skill\ndescription: A test skill\n---\nTest skill body",
+        )
+        .unwrap();
+        let registry = zeph_skills::registry::SkillRegistry::load(&[temp_dir.path().to_path_buf()]);
+
+        // FixedOutputExecutor produces an "[error]" output to trigger the self-reflection path.
+        let executor = FixedOutputExecutor {
+            summary: "[error] something failed".into(),
+            is_err: false,
+        };
+        // mock_provider_failing makes process_response() inside attempt_self_reflection return Err.
+        let provider = mock_provider_failing();
+        let channel = MockChannel::new(vec![]);
+
+        let mut agent = super::super::Agent::new(provider, channel, registry, None, 5, executor)
+            .with_learning(LearningConfig {
+                enabled: true,
+                ..LearningConfig::default()
+            });
+        agent
+            .skill_state
+            .active_skill_names
+            .push("test-skill".into());
+
+        // Three tool calls in one batch.
+        let tool_calls = vec![
+            make_tool_use_request("id-r1", "bash"),
+            make_tool_use_request("id-r2", "bash"),
+            make_tool_use_request("id-r3", "bash"),
+        ];
+
+        let result = agent.handle_native_tool_calls(None, &tool_calls).await;
+        assert!(result.is_err(), "expected Err from self-reflection failure");
+
+        // The last message must be a User message with ToolResult parts covering every ToolUse ID.
+        let last = agent
+            .messages
+            .last()
+            .expect("at least one message after handle_native_tool_calls");
+        assert_eq!(
+            last.role,
+            Role::User,
+            "last message must be User (ToolResults)"
+        );
+
+        let tool_result_ids: Vec<&str> = last
+            .parts
+            .iter()
+            .filter_map(|p| {
+                if let MessagePart::ToolResult { tool_use_id, .. } = p {
+                    Some(tool_use_id.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        assert!(
+            tool_result_ids.contains(&"id-r1"),
+            "ToolResult for id-r1 must be present: {tool_result_ids:?}"
+        );
+        assert!(
+            tool_result_ids.contains(&"id-r2"),
+            "ToolResult for id-r2 must be present: {tool_result_ids:?}"
+        );
+        assert!(
+            tool_result_ids.contains(&"id-r3"),
+            "ToolResult for id-r3 must be present: {tool_result_ids:?}"
+        );
+    }
+
+    // R-NTP-11: single-tool Err path — N=1 batch, attempt_self_reflection returns Err.
+    // Verifies the Err arm pushes a ToolResult for the sole tool call before returning Err.
+    #[tokio::test]
+    async fn self_reflection_err_single_tool_pushes_tool_result() {
+        use super::super::agent_tests::{MockChannel, mock_provider_failing};
+        use crate::config::LearningConfig;
+        use zeph_llm::provider::{MessagePart, Role};
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let skill_dir = temp_dir.path().join("test-skill");
+        std::fs::create_dir(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: test-skill\ndescription: A test skill\n---\nTest skill body",
+        )
+        .unwrap();
+        let registry = zeph_skills::registry::SkillRegistry::load(&[temp_dir.path().to_path_buf()]);
+
+        let executor = FixedOutputExecutor {
+            summary: "[error] something failed".into(),
+            is_err: false,
+        };
+        let provider = mock_provider_failing();
+        let channel = MockChannel::new(vec![]);
+
+        let mut agent = super::super::Agent::new(provider, channel, registry, None, 5, executor)
+            .with_learning(LearningConfig {
+                enabled: true,
+                ..LearningConfig::default()
+            });
+        agent
+            .skill_state
+            .active_skill_names
+            .push("test-skill".into());
+
+        // Single tool call in the batch.
+        let tool_calls = vec![make_tool_use_request("id-r1", "bash")];
+
+        let result = agent.handle_native_tool_calls(None, &tool_calls).await;
+        assert!(result.is_err(), "expected Err from self-reflection failure");
+
+        let last = agent
+            .messages
+            .last()
+            .expect("at least one message after handle_native_tool_calls");
+        assert_eq!(
+            last.role,
+            Role::User,
+            "last message must be User (ToolResults)"
+        );
+
+        let has_tool_result = last.parts.iter().any(
+            |p| matches!(p, MessagePart::ToolResult { tool_use_id, .. } if tool_use_id == "id-r1"),
+        );
+        assert!(has_tool_result, "ToolResult for id-r1 must be present");
+    }
+
+    // R-NTP-12: mid-batch Err path — N=3 batch, tc[0] triggers attempt_self_reflection which
+    // returns Err. All 3 IDs must be present in the pushed ToolResults: tc[0] is the reflection
+    // trigger, tc[1] and tc[2] get tombstones.
+    #[tokio::test]
+    async fn self_reflection_err_mid_batch_pushes_all_tool_results() {
+        use super::super::agent_tests::{MockChannel, mock_provider_failing};
+        use crate::config::LearningConfig;
+        use zeph_llm::provider::{MessagePart, Role};
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let skill_dir = temp_dir.path().join("test-skill");
+        std::fs::create_dir(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: test-skill\ndescription: A test skill\n---\nTest skill body",
+        )
+        .unwrap();
+        let registry = zeph_skills::registry::SkillRegistry::load(&[temp_dir.path().to_path_buf()]);
+
+        let executor = FixedOutputExecutor {
+            summary: "[error] something failed".into(),
+            is_err: false,
+        };
+        let provider = mock_provider_failing();
+        let channel = MockChannel::new(vec![]);
+
+        let mut agent = super::super::Agent::new(provider, channel, registry, None, 5, executor)
+            .with_learning(LearningConfig {
+                enabled: true,
+                ..LearningConfig::default()
+            });
+        agent
+            .skill_state
+            .active_skill_names
+            .push("test-skill".into());
+
+        let tool_calls = vec![
+            make_tool_use_request("id-r1", "bash"),
+            make_tool_use_request("id-r2", "bash"),
+            make_tool_use_request("id-r3", "bash"),
+        ];
+
+        let result = agent.handle_native_tool_calls(None, &tool_calls).await;
+        assert!(result.is_err(), "expected Err from self-reflection failure");
+
+        let last = agent
+            .messages
+            .last()
+            .expect("at least one message after handle_native_tool_calls");
+        assert_eq!(
+            last.role,
+            Role::User,
+            "last message must be User (ToolResults)"
+        );
+
+        let tool_result_ids: Vec<&str> = last
+            .parts
+            .iter()
+            .filter_map(|p| {
+                if let MessagePart::ToolResult { tool_use_id, .. } = p {
+                    Some(tool_use_id.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        assert!(
+            tool_result_ids.contains(&"id-r1"),
+            "ToolResult for id-r1 must be present: {tool_result_ids:?}"
+        );
+        assert!(
+            tool_result_ids.contains(&"id-r2"),
+            "ToolResult for id-r2 must be present: {tool_result_ids:?}"
+        );
+        assert!(
+            tool_result_ids.contains(&"id-r3"),
+            "ToolResult for id-r3 must be present: {tool_result_ids:?}"
         );
     }
 }
