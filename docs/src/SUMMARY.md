@@ -19,6 +19,7 @@
 - [Instruction Files](concepts/instruction-files.md)
 - [load_skill Tool](concepts/load-skill-tool.md)
 - [Scheduler](concepts/scheduler.md)
+- [LSP Context Injection](concepts/lsp-context-injection.md)
 - [Task Orchestration](concepts/task-orchestration.md)
 - [Logging](concepts/logging.md)
 - [Experiments](concepts/experiments.md)
