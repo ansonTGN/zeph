@@ -7,6 +7,13 @@ exclude = [
   "https://codecov.io/.*",
   "https://docs.rs/.*",
   "https://crates.io/.*",
+  # Spec sites — rate-limit or block CI user-agents
+  "https://agentskills.io/.*",
+  "https://modelcontextprotocol.io/.*",
+  "https://agentclientprotocol.com/.*",
+  "https://platform.claude.com/.*",
+  # Requires GitHub auth
+  "https://github.com/.*/security/advisories/.*",
 ]
 
 # Skip URLs that require authentication

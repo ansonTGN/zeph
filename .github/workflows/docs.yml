@@ -6,6 +6,8 @@ on:
     paths: [docs/**, README.md, "crates/*/README.md", ".github/lychee.toml", ".github/workflows/docs.yml"]
   pull_request:
     paths: [docs/**, README.md, "crates/*/README.md", ".github/lychee.toml", ".github/workflows/docs.yml"]
+  schedule:
+    - cron: "0 6 * * 1"  # every Monday 06:00 UTC
   workflow_dispatch:
 
 permissions:
@@ -46,6 +48,23 @@ jobs:
       - uses: lycheeverse/lychee-action@v2
         with:
           args: "--config .github/lychee.toml README.md crates/*/README.md docs/src/**/*.md --offline --no-progress"
+          fail: true
+
+  link-check-external:
+    name: Check external links (lychee)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: lycheeverse/lychee-action@v2
+        with:
+          args: >-
+            --config .github/lychee.toml
+            --cache
+            --max-retries 3
+            --retry-wait-time 5
+            README.md crates/*/README.md docs/src/**/*.md
           fail: true
 
   deploy:
