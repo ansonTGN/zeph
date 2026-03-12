@@ -4,6 +4,7 @@
 use std::borrow::Cow;
 use std::fmt::Write;
 use std::future::Future;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -164,10 +165,9 @@ impl<C: Channel> Agent<C> {
             None,
         )
         .await?
+            && self.messages.len() > 1
         {
-            if self.messages.len() > 1 {
-                self.messages.insert(1, msg);
-            }
+            self.messages.insert(1, msg);
         }
 
         Ok(())
@@ -345,11 +345,10 @@ impl<C: Channel> Agent<C> {
         if let Some(msg) =
             Self::fetch_cross_session(&self.memory_state, query, token_budget, &self.token_counter)
                 .await?
+            && self.messages.len() > 1
         {
-            if self.messages.len() > 1 {
-                self.messages.insert(1, msg);
-                tracing::debug!("injected cross-session context");
-            }
+            self.messages.insert(1, msg);
+            tracing::debug!("injected cross-session context");
         }
 
         Ok(())
@@ -411,11 +410,10 @@ impl<C: Channel> Agent<C> {
 
         if let Some(msg) =
             Self::fetch_summaries(&self.memory_state, token_budget, &self.token_counter).await?
+            && self.messages.len() > 1
         {
-            if self.messages.len() > 1 {
-                self.messages.insert(1, msg);
-                tracing::debug!("injected summaries into context");
-            }
+            self.messages.insert(1, msg);
+            tracing::debug!("injected summaries into context");
         }
 
         Ok(())
@@ -1146,7 +1144,10 @@ impl<C: Channel> Agent<C> {
 
         self.append_mcp_prompt(query, &mut system_prompt).await;
 
-        let cwd = std::env::current_dir().unwrap_or_default();
+        let cwd = match self.env_context.working_dir.as_str() {
+            "" | "unknown" => std::env::current_dir().unwrap_or_default(),
+            dir => PathBuf::from(dir),
+        };
         let project_configs = crate::project::discover_project_configs(&cwd);
         let project_context = crate::project::load_project_context(&project_configs);
         if !project_context.is_empty() {
