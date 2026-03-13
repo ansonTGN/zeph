@@ -22,6 +22,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `--init` wizard generated unsupported `--workspace-root` flag for mcpls. The wizard now writes `.zeph/mcpls.toml` (with workspace roots, language extensions, and rust-analyzer LSP server config) and passes `--config .zeph/mcpls.toml` to mcpls instead. Fixes broken LSP setup for all users who configured mcpls via `zeph init`. (#1534)
 - Update `deny.toml` suppression comment for RUSTSEC-2025-0134 (`rustls-pemfile` unmaintained) to reference upstream tracking issue qdrant/rust-client#255 (tonic 0.14 upgrade that removes the dependency); no code change possible until upstream ships a release.
 - Shell command blocklist (`blocked_commands`, `DEFAULT_BLOCKED`, `allow_network = false`) was silently skipped whenever a `PermissionPolicy` was attached to `ShellExecutor` (i.e., in all normal operation with `autonomy_level` set). `find_blocked_command()` now runs unconditionally before the policy check, making it a hard security boundary that cannot be bypassed by any autonomy level or permission policy configuration.
+- OpenAI: assistant tool-call messages with `null` content are now accepted; `ChatResponse::ToolUse` carries `text: None` for tool-only assistant turns instead of failing deserialization (#1561, #1562)
+- GPT-5 OpenAI requests now use `max_completion_tokens` instead of deprecated `max_tokens`; non-GPT-5 models retain `max_tokens` (#1558, #1559)
+- Claude `cache_control` blocks capped to 4 per request: new helpers limit markers across tools, system blocks, and messages before each request is built, preventing HTTP 400 from the Anthropic API when tool-call sequences accumulate more than 4 markers (#1570, #1572)
+- ACP tool-use prompt no longer leaks the literal `[PATH]` placeholder into bash commands during diagnosis sessions (#1569, #1571)
+- SQLite `database is locked` errors on concurrent skill-outcome writes resolved by adding `busy_timeout` and per-call retry in the skill recorder (#1563, #1564)
+- ACP session now uses the `cwd` provided at session creation for project discovery, environment context assembly, and prompt construction (#1567)
+- `apply_code_index()` now starts the tree-sitter `CodeIndexer` and `IndexWatcher` for all providers; Qdrant semantic retrieval is only skipped for native-tool-use providers (Claude, OpenAI), making structural index available to all configurations (#1557, #1589)
+- Config default annotations normalized; legacy runtime paths (logs, skills, debug, SQLite) are rewritten to computed user-data defaults in the wizard and `--init` flow (#1582)
+- `ZephAcpAgent` and its diagnostics cache refactored to `Send + Sync` via `Arc<RwLock<_>>`; ACP stdio sessions no longer require `LocalSet` and fully utilize the tokio thread pool (#1577, #1587)
+- `warm_model_caches()` no longer blocks ACP server startup; model warming is dispatched as a background task and the shared model list is stored in a `RwLock` for multi-session consistency (#1576, #1583)
+- ACP `[acp] enabled = true` in config now auto-starts the server without requiring `--acp` CLI flag; `--acp` and `--acp-http` remain functional and bypass the config field (#1574, #1590)
+- `apply_code_index()` now starts `CodeIndexer` and `IndexWatcher` for native-tool-use providers so the tree-sitter index is available to the `search_code` tool regardless of provider type (#1556, #1591)
 
 ### Added
 
@@ -31,6 +43,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **#1553**: Replace regex-based hover pre-filter in `lsp_hooks/hover.rs` with tree-sitter extraction. New `extract_symbol_positions_tsquery()` uses `Lang::symbol_query()` to capture definition node positions at any AST depth (not top-level-only), supporting all languages with grammars. `strip_cat_n_prefix()` strips `cat -n` line number prefixes before parsing, producing a clean source string and a line-number mapping for correct LSP position translation. The `.rs`-only file extension check is removed; language detection via `detect_language()` handles all supported languages. The regex fallback (`extract_symbol_positions_regex()`) is preserved for when tree-sitter cannot parse the file (unknown language or grammar unavailable).
 
 - `zeph migrate-config [--config PATH] [--in-place] [--diff]` command: reads an existing user config, adds all missing parameters as commented-out blocks with descriptions from the canonical reference, and reformats the file by grouping and sorting keys within each section. Existing values are never modified. Running the command twice produces identical output (idempotent). The `--init` wizard now shows a tip about this command.
+- `search_code` native tool: unified semantic vector (Qdrant) + structural tree-sitter + LSP symbol/reference resolution in a single agent-callable tool; returns ranked, deduplicated results across all three layers (#1551/#1556, #1591)
+- Request metadata (model, token limit, exposed tools, temperature, cache breakpoints) included in debug dumps for both `json` and `raw` formats; `LlmProvider::debug_request_json()` added with provider-specific implementations for Claude, OpenAI, and Ollama; wrapper providers (Router, Orchestrator, Compatible) delegate to the inner provider (#1485, #1560)
+- ACP readiness probes: `/health` HTTP endpoint returns `200 OK` when ready and `503` during startup; stdio transport emits `zeph/ready` JSON-RPC notification as the first outbound packet; ready metadata included in the ACP manifest (#1578, #1585)
+- MCP server liveness check: `McpLspProvider::is_available()` is now gated on `McpServerManager`'s live-server set via new `is_server_connected()` helper; availability state is updated on client registration and removal (#1586)
+- Broadcast channel capacity is now configurable to prevent silent event drops under load; fixes `broadcast_to_mpsc` lagged-receiver silent-drop regression (#1579, #1584)
+- ACP startup diagnostic logging: process `cwd` and resolved artifact paths (data, debug, skills, logs) are logged before memory and bootstrap initialization to aid diagnosing read-only filesystem errors in IDE-launched sessions (#1580)
+- LSP hook debug tracing: `LspHookRunner::after_tool()`, `fetch_hover()`, and `fetch_diagnostics()` now emit `tracing` events for hook activation, skip reasons, symbol extraction, and MCP call attempts, making hook failures diagnosable from logs without source inspection (#1536, #1588)
 
 ### Changed
 
@@ -48,6 +67,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Extract `SecurityState` struct (sanitizer, quarantine_summarizer, exfiltration_guard, flagged_urls) and `DebugState` struct (debug_dumper, dump_format, anomaly_detector, logging_config) from `Agent` struct; access via `agent.security.*` and `agent.debug_state.*` (ARCH-01)
 - Expand `AgentError` with `Shutdown`, `ContextExhausted`, `ToolTimeout`, `SchemaValidation` variants; change `Agent::run` return type from `anyhow::Result<()>` to `Result<(), AgentError>` (ARCH-10)
 - Add `AgentTestHarness` builder struct with `new()`, `with_responses()`, `with_registry()`, `with_tool_outputs()`, and `build()` to the test module for cleaner agent unit tests (ARCH-08)
+
+### CI / Docs
+
+- Add weekly external link check via lychee scheduled workflow (Mondays 06:00 UTC); lychee cache and 3-retry resilience enabled for spec sites and auth-gated GitHub URLs
+- Add `docs/src/concepts/lsp-context-injection.md` concept page with feature overview, hook table, and enable instructions; fix broken README link
+- Add 9 specialized Rust agent profiles (`.zeph/agents/`) and `rust-agent-handoff` skill (`.zeph/skills/`) for multi-agent workflow coordination
 
 ## [0.14.3] - 2026-03-10
 
