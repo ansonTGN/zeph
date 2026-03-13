@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Router debug logging**: `RouterProvider` now emits `tracing::debug!` on every provider selection — Thompson selections include `alpha`, `beta`, and `mode` (exploit/explore); EMA selections include `latency_ema_ms`. Closes #1388.
+
 - **`/scheduler list` command and `list_tasks` tool**: adds `list_jobs_full()` to `JobStore` returning a new `ScheduledTaskInfo` struct with `name`, `kind`, `task_mode`, `cron_expr`, and `next_run` fields. Adds a `list_tasks` LLM tool to `SchedulerExecutor` (fenced block dispatch, registered in `tool_definitions()`). Adds `/scheduler list` slash command in `zeph-core` (dispatches through `tool_executor.execute_tool_call_erased` — no new cross-crate dependency). `/scheduler` with no subcommand also lists tasks; unknown subcommands show help. `/scheduler` entry added to the help registry, feature-gated on `scheduler`. Closes #1423.
 - **5-field cron expression support in scheduler**: `normalize_cron_expr()` now accepts standard 5-field cron expressions (e.g. `*/5 * * * *`) by auto-prepending `0` for the seconds field. All three parse sites (`ScheduledTask::periodic`, `SchedulerExecutor::schedule_periodic`, `load_config_tasks`) and the DB persistence path now use the normalized 6-field form. Closes #1422.
 
