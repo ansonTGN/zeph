@@ -15,7 +15,9 @@ mod orchestration_integration {
         AgentRouter, Aggregator, DagScheduler, FailureStrategy, GraphStatus, LlmAggregator,
         SchedulerAction, TaskEvent, TaskGraph, TaskId, TaskNode, TaskOutcome, TaskStatus,
     };
-    use zeph_core::subagent::{SkillFilter, SubAgentDef, SubAgentPermissions, ToolPolicy};
+    use zeph_core::subagent::{
+        SkillFilter, SubAgentDef, SubAgentPermissions, SubagentHooks, ToolPolicy,
+    };
     use zeph_llm::mock::MockProvider;
 
     // ── Helpers ────────────────────────────────────────────────────────────────
@@ -30,7 +32,7 @@ mod orchestration_integration {
             permissions: SubAgentPermissions::default(),
             skills: SkillFilter::default(),
             system_prompt: String::new(),
-            hooks: zeph_core::subagent::SubagentHooks::default(),
+            hooks: SubagentHooks::default(),
             memory: None,
             source: None,
             file_path: None,

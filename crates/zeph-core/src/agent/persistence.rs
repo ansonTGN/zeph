@@ -2056,7 +2056,7 @@ mod tests {
         );
     }
 
-    /// Regression: a properly matched tool_use/tool_result pair must NOT be touched by the
+    /// Regression: a properly matched `tool_use/tool_result` pair must NOT be touched by the
     /// mid-history scan — ensures the fix doesn't break valid tool exchanges.
     #[tokio::test]
     async fn sanitize_tool_pairs_preserves_matched_tool_pair() {
@@ -2130,7 +2130,7 @@ mod tests {
     }
 
     /// RC5: `persist_cancelled_tool_results` must persist a tombstone user message containing
-    /// is_error=true ToolResult parts for all tool_calls IDs so the preceding assistant ToolUse
+    /// `is_error=true` `ToolResult` parts for all `tool_calls` IDs so the preceding assistant `ToolUse`
     /// is never orphaned in the DB after a cancellation.
     #[tokio::test]
     async fn persist_cancelled_tool_results_pairs_tool_use() {

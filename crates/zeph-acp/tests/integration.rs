@@ -154,7 +154,7 @@ async fn stdio_ready_notification_is_first_frame() {
         res = server_fut => {
             let _ = res;
         }
-        _ = client_fut => {}
+        () = client_fut => {}
     }
 }
 
