@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Gemini SSE TODO for Phase 4 (streaming tool use)**: added a TODO comment in `parse_gemini_sse_event()` documenting that `GeminiStreamPart` lacks a `function_call` field and that `functionCall` SSE chunks are silently dropped. `chat_with_tools()` uses the non-streaming endpoint today, so this is safe; the TODO tracks Phase 4 work (extend `GeminiStreamPart` and handle `functionCall` parts in the SSE loop). Closes #1639.
 - **Router debug logging**: `RouterProvider` now emits `tracing::debug!` on every provider selection — Thompson selections include `alpha`, `beta`, and `mode` (exploit/explore); EMA selections include `latency_ema_ms`. Closes #1388.
 
 - **`/scheduler list` command and `list_tasks` tool**: adds `list_jobs_full()` to `JobStore` returning a new `ScheduledTaskInfo` struct with `name`, `kind`, `task_mode`, `cron_expr`, and `next_run` fields. Adds a `list_tasks` LLM tool to `SchedulerExecutor` (fenced block dispatch, registered in `tool_definitions()`). Adds `/scheduler list` slash command in `zeph-core` (dispatches through `tool_executor.execute_tool_call_erased` — no new cross-crate dependency). `/scheduler` with no subcommand also lists tasks; unknown subcommands show help. `/scheduler` entry added to the help registry, feature-gated on `scheduler`. Closes #1423.
