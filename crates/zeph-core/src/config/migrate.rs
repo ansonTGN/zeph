@@ -81,7 +81,7 @@ impl ConfigMigrator {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            reference_src: include_str!("../../../../config/default.toml"),
+            reference_src: include_str!("../../config/default.toml"),
         }
     }
 
@@ -640,7 +640,7 @@ name = "Test"
     #[test]
     fn full_config_produces_zero_additions() {
         // Migrating the reference config itself should add nothing new.
-        let reference = include_str!("../../../../config/default.toml");
+        let reference = include_str!("../../config/default.toml");
         let migrator = ConfigMigrator::new();
         let result = migrator.migrate(reference).expect("migrate reference");
         assert_eq!(
