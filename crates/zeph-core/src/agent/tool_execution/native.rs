@@ -258,6 +258,13 @@ impl<C: Channel> Agent<C> {
                     })
                 });
 
+        // CR-01: open LLM span before the call.
+        let trace_guard = self.debug_state.trace_collector.as_ref().and_then(|tc| {
+            self.debug_state
+                .current_iteration_span_id
+                .map(|id| tc.begin_llm_request(id))
+        });
+
         let llm_span = tracing::info_span!("llm_call", model = %self.runtime.model_name);
         let chat_fut = tokio::time::timeout(
             llm_timeout,
@@ -285,28 +292,51 @@ impl<C: Channel> Agent<C> {
 
         self.record_chat_metrics_and_compact(start, &result).await?;
 
-        if let (Some(d), Some(id)) = (self.debug_state.debug_dumper.as_ref(), dump_id) {
-            let raw_dump_text = match &result {
-                ChatResponse::Text(t) => t.clone(),
-                ChatResponse::ToolUse {
-                    text, tool_calls, ..
-                } => {
-                    let calls = serde_json::to_string_pretty(tool_calls).unwrap_or_default();
-                    format!(
-                        "{}\n\n---TOOL_CALLS---\n{calls}",
-                        text.as_deref().unwrap_or("")
-                    )
-                }
-            };
-            let dump_text = if self.security.pii_filter.is_enabled() {
-                self.security.pii_filter.scrub(&raw_dump_text).into_owned()
-            } else {
-                raw_dump_text
-            };
-            d.dump_response(id, &dump_text);
+        // CR-01: close LLM span after the call completes.
+        if let Some(guard) = trace_guard
+            && let Some(ref mut tc) = self.debug_state.trace_collector
+        {
+            let latency = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+            let (prompt_tokens, completion_tokens) = self.provider.last_usage().unwrap_or((0, 0));
+            tc.end_llm_request(
+                guard,
+                &crate::debug_dump::trace::LlmAttributes {
+                    model: self.runtime.model_name.clone(),
+                    prompt_tokens,
+                    completion_tokens,
+                    latency_ms: latency,
+                    streaming: false,
+                    cache_hit: false,
+                },
+            );
         }
 
+        self.write_chat_debug_dump(dump_id, &result);
         Ok(Some(result))
+    }
+
+    fn write_chat_debug_dump(&self, dump_id: Option<u32>, result: &ChatResponse) {
+        let Some((d, id)) = self.debug_state.debug_dumper.as_ref().zip(dump_id) else {
+            return;
+        };
+        let raw = match result {
+            ChatResponse::Text(t) => t.clone(),
+            ChatResponse::ToolUse {
+                text, tool_calls, ..
+            } => {
+                let calls = serde_json::to_string_pretty(tool_calls).unwrap_or_default();
+                format!(
+                    "{}\n\n---TOOL_CALLS---\n{calls}",
+                    text.as_deref().unwrap_or("")
+                )
+            }
+        };
+        let text = if self.security.pii_filter.is_enabled() {
+            self.security.pii_filter.scrub(&raw).into_owned()
+        } else {
+            raw
+        };
+        d.dump_response(id, &text);
     }
 
     async fn record_chat_metrics_and_compact(
@@ -1071,6 +1101,28 @@ impl<C: Channel> Agent<C> {
                     (format!("[error] {e}"), true, None, None, false, None, None)
                 }
             };
+
+            // CR-01: emit a tool span for each completed tool call.
+            if let Some(ref mut trace_coll) = self.debug_state.trace_collector
+                && let Some(iter_span_id) = self.debug_state.current_iteration_span_id
+            {
+                let latency = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+                let guard = trace_coll.begin_tool_call(&tc.name, iter_span_id);
+                let error_kind = if is_error {
+                    Some(output.chars().take(200).collect::<String>())
+                } else {
+                    None
+                };
+                trace_coll.end_tool_call(
+                    guard,
+                    &tc.name,
+                    crate::debug_dump::trace::ToolAttributes {
+                        latency_ms: latency,
+                        is_error,
+                        error_kind,
+                    },
+                );
+            }
 
             // Record skill learning outcomes for the native tool path (mirrors legacy path in
             // handle_tool_result). Must happen before processing so self_reflection can inject

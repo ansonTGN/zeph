@@ -966,6 +966,8 @@ pub(crate) async fn run(cli: Cli) -> anyhow::Result<()> {
     };
 
     // Wire debug dump: CLI flag takes priority over [debug] config section.
+    // --dump-format CLI override takes priority over config.debug.format.
+    let effective_format = cli.dump_format.unwrap_or(config.debug.format);
     let agent = {
         let dump_dir = cli
             .debug_dump
@@ -983,13 +985,38 @@ pub(crate) async fn run(cli: Cli) -> anyhow::Result<()> {
                     .enabled
                     .then(|| config.debug.output_dir.clone())
             });
-        if let Some(dir) = dump_dir {
-            match zeph_core::debug_dump::DebugDumper::new(dir.as_path(), config.debug.format) {
-                Ok(dumper) => agent.with_debug_dumper(dumper),
-                Err(e) => {
-                    tracing::warn!(error = %e, "debug dump initialization failed");
-                    agent
+        if let Some(ref dir) = dump_dir {
+            let agent =
+                match zeph_core::debug_dump::DebugDumper::new(dir.as_path(), effective_format) {
+                    Ok(dumper) => agent.with_debug_dumper(dumper),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "debug dump initialization failed");
+                        agent
+                    }
+                };
+            // Store trace config so runtime `/dump-format trace` can create a collector (CR-04).
+            let agent = agent.with_trace_config(
+                dir.clone(),
+                config.debug.traces.service_name.clone(),
+                config.debug.traces.redact,
+            );
+            // When format=Trace, also wire a TracingCollector (C-03: independent of legacy dumper).
+            if effective_format == zeph_core::debug_dump::DumpFormat::Trace {
+                // OTLP channel is None here; wired in tracing_init.rs when otel feature enabled.
+                match zeph_core::debug_dump::trace::TracingCollector::new(
+                    dir.as_path(),
+                    &config.debug.traces.service_name,
+                    config.debug.traces.redact,
+                    None,
+                ) {
+                    Ok(collector) => agent.with_trace_collector(collector),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "trace collector initialization failed");
+                        agent
+                    }
                 }
+            } else {
+                agent
             }
         } else {
             agent
