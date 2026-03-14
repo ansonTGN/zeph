@@ -39,7 +39,9 @@ pub use graph::{Community, Edge, Entity, EntityType, GraphFact, GraphStore};
 pub use math::cosine_similarity;
 pub use qdrant_ops::QdrantOps;
 pub use response_cache::ResponseCache;
-pub use router::{HeuristicRouter, MemoryRoute, MemoryRouter};
+pub use router::{
+    HeuristicRouter, MemoryRoute, MemoryRouter, TemporalRange, strip_temporal_keywords,
+};
 pub use semantic::{
     ExtractionResult, ExtractionStats, GraphExtractionConfig, LinkingStats, NoteLinkingConfig,
     extract_and_store, link_memory_notes,
