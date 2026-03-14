@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- feat(memory,core): migrate tool overflow storage from filesystem to SQLite (`tool_overflow` table, migration 031); `maybe_summarize_tool_output` now writes to `SqliteStore.save_overflow` instead of disk files; overflow references use opaque `overflow:<uuid>` format (eliminates absolute-path leakage SEC-JIT-03); new `read_overflow` native tool allows LLM to retrieve full content; age-based cleanup via `SqliteStore.cleanup_overflow` on startup; `ON DELETE CASCADE` automatically removes overflow rows when conversation is deleted (closes #1774)
 - feat(memory): temporal versioning on graph edges (closes #1341) — `edges_at_timestamp()`, `bfs_at_timestamp()`, `edge_history()` on `GraphStore`; optional `at_timestamp` parameter on `graph_recall()` and `SemanticMemory::recall_graph()` for historical graph queries; `valid_from` field on `GraphFact` for recency-aware scoring; `temporal_decay_rate` config knob in `[memory.graph]` (default `0.0`, existing behavior unchanged); migration 030 adds two partial indexes (`idx_graph_edges_src_temporal`, `idx_graph_edges_tgt_temporal`) to accelerate temporal range queries on expired edges
 
 - test(core): add COV-04 unit test for channel-close (`Ok(None)`) → `GraphStatus::Failed` transition in `run_scheduler_loop`; fix implementation to return `Failed` instead of `Canceled` on channel close — channel close is an error condition, not a user-initiated cancel (closes #1614)
@@ -35,6 +36,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - refactor(memory): split `semantic.rs` (3335 lines) into sub-modules — `mod` (struct + constructors + accessors), `recall`, `summarization`, `cross_session`, `corrections`, `graph`, and `tests`; public API unchanged (#1736)
 - Box large `LoopbackEvent` variants (`ToolStart`, `ToolOutput`) to reduce enum size on the stack; extracted `ToolStartData` and `ToolOutputData` structs with public fields (#1737)
 - Replace `async-trait` with native async traits in `zeph-tools` search backends (`SemanticSearchBackend`, `LspSearchBackend`); removed `async-trait` dependency from `zeph-tools` (#1733)
+
+### Removed
+
+- **breaking**: `OverflowConfig.dir` field removed from `[tools.overflow]` config; old configs with `dir = "..."` are silently ignored (unknown field) — no migration needed (closes #1774)
+- **breaking**: `zeph_tools::save_overflow` and `zeph_tools::cleanup_overflow_files` removed from public API; replaced by `SqliteStore::save_overflow` and `SqliteStore::cleanup_overflow` (closes #1774)
+- Filesystem-based overflow storage (`crates/zeph-tools/src/overflow.rs`) removed; existing `~/.zeph/data/tool-output/` files are not migrated and can be manually deleted (closes #1774)
 
 ### Security
 

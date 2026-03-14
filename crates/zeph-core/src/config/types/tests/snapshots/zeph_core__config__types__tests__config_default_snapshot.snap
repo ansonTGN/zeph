@@ -175,6 +175,7 @@ extra_patterns = []
 [tools.overflow]
 threshold = 50000
 retention_days = 7
+max_overflow_bytes = 10485760
 
 [tools.anomaly]
 enabled = false
