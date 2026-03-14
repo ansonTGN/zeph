@@ -17,6 +17,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- Context compaction loop when budget too tight: added cooldown guard (`compaction_cooldown_turns`, default 2), counterproductive summary guard (marks exhausted when net freed tokens is zero — summary consumed all freed space), exhaustion guard (marks exhausted when context remains above threshold after compaction — further attempts unlikely to help), and user-visible warning when compaction is exhausted (#1708)
 - **`ContextManagement` top-level `type` field removed** (closes #1715): the `ContextManagement` struct no longer serializes a `"type": "auto_truncate"` discriminator at the top level. The Claude API rejects requests with `context_management.type: Extra inputs are not permitted` — the correct format contains only `trigger` and `pause_after_compaction`. `--server-compaction` was still non-functional after PR #1709 due to this field.
 - llm: `with_server_compaction(true)` on Haiku models now emits a `WARN` and keeps the flag disabled — the `compact-2026-01-12` beta is not supported for Haiku
 - llm: extend `is_compact_beta_rejection()` to catch `invalid_request_error` 400s mentioning `context_management` (fixes #1706)
