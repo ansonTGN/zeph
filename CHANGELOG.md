@@ -18,6 +18,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- fix(security): redact secrets and filesystem paths in compression_failure_pairs before SQLite storage (#1801)
 - fix(llm): strip URL path in `parse_host_port` — Ollama `base_url` with `/v1` suffix no longer produces 404 on embed calls (#1832)
 - Qdrant collection dimension mismatch when switching embedding models on collections with 0 points (#1815)
 - fix(debug): trace.json now written inside per-session subdir, preventing overwrites (#1814)
