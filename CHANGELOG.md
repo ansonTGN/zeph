@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- feat(memory,core): ACON failure-driven compression guidelines (#1647) — after a hard compaction, the agent watches subsequent LLM responses for two-signal context-loss indicators (uncertainty phrase + prior-context reference); confirmed failure pairs are stored in SQLite (`compression_failure_pairs`); a background updater wakes periodically, calls the LLM to synthesise updated guidelines from accumulated pairs, sanitizes the output to strip prompt injection, and persists the result; guidelines are injected into every future compaction prompt via a `<compression-guidelines>` block; `CompressionGuidelinesConfig` in `[memory.compression_guidelines]` (disabled by default); addresses all critic findings including two-signal false-positive guard, `enabled` guard ordering, LLM timeout, prompt injection sanitization, field truncation, and cleanup policy
 - feat(debug): debug dumps can now emit OpenTelemetry-compatible OTLP JSON traces (`--dump-format trace`); span hierarchy: session → iteration → LLM request / tool call / memory search; `[debug.traces]` config section with `otlp_endpoint`, `service_name`, `redact` options; when `format = "trace"` legacy numbered dump files are NOT written (closes #1343)
 - feat(debug): `/dump-format <json|raw|trace>` TUI/CLI command to switch debug dump format at runtime
 - feat(cli): `--dump-format <FORMAT>` flag to override debug dump format from the command line
