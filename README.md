@@ -71,6 +71,8 @@ zeph                                                 # start the agent
 
 Full documentation — installation, configuration, guides, and architecture reference — at **[bug-ops.github.io/zeph](https://bug-ops.github.io/zeph/)**.
 
+Zeph's design draws from a broad range of published research: parallel tool execution ([LLMCompiler, ICML 2024](https://arxiv.org/abs/2312.04511)), failure-driven context compression ([ACON, ICLR 2026](https://arxiv.org/abs/2510.00615)), temporal knowledge graphs ([Zep/Graphiti, 2025](https://arxiv.org/abs/2501.13956)), agentic memory linking ([A-MEM, NeurIPS 2025](https://arxiv.org/abs/2502.12110)), observation masking and schema-based summarization ([Manus, 2025](https://rlancemartin.github.io/2025/10/15/manus/)), and more. The full list of papers, blog posts, and specifications that shaped Zeph is at **[References & Inspirations](https://bug-ops.github.io/zeph/references.html)**.
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Found a vulnerability? Use [GitHub Security Advisories](https://github.com/bug-ops/zeph/security/advisories/new).

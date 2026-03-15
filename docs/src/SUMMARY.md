@@ -87,3 +87,4 @@
 
 - [Contributing](contributing.md)
 - [Changelog](changelog.md)
+- [References & Inspirations](references.md)
