@@ -1081,6 +1081,131 @@ tool = "shell"
         );
     }
 
+    // ── MAX_RULES boundary ────────────────────────────────────────────────────
+
+    // GAP-04: exactly MAX_RULES (256) rules must compile without error.
+    #[test]
+    fn max_rules_exactly_256_compiles() {
+        let rules: Vec<PolicyRuleConfig> = (0..MAX_RULES)
+            .map(|i| PolicyRuleConfig {
+                effect: PolicyEffect::Allow,
+                tool: format!("tool_{i}"),
+                paths: vec![],
+                env: vec![],
+                trust_level: None,
+                args_match: None,
+            })
+            .collect();
+        let config = PolicyConfig {
+            enabled: true,
+            default_effect: DefaultEffect::Deny,
+            rules,
+            policy_file: None,
+        };
+        assert!(
+            PolicyEnforcer::compile(&config).is_ok(),
+            "exactly {MAX_RULES} rules must compile successfully"
+        );
+    }
+
+    // ── policy_file external TOML loading ─────────────────────────────────────
+
+    // GAP-03a: happy path — file with a deny rule is loaded and evaluated correctly.
+    //
+    // The file must reside within the process cwd (boundary check in load_policy_file).
+    // We create a tempdir inside the cwd so canonicalization passes without changing
+    // global process state.
+    #[test]
+    fn policy_file_happy_path() {
+        let cwd = std::env::current_dir().unwrap();
+        let dir = tempfile::tempdir_in(&cwd).unwrap();
+        let policy_path = dir.path().join("policy.toml");
+        std::fs::write(
+            &policy_path,
+            "[[rules]]\neffect = \"deny\"\ntool = \"shell\"\npaths = [\"/etc/*\"]\n",
+        )
+        .unwrap();
+        let config = PolicyConfig {
+            enabled: true,
+            default_effect: DefaultEffect::Allow,
+            rules: vec![],
+            policy_file: Some(policy_path.to_string_lossy().into_owned()),
+        };
+        let enforcer = PolicyEnforcer::compile(&config).unwrap();
+        let params = make_params("file_path", "/etc/passwd");
+        let ctx = make_context(TrustLevel::Trusted);
+        assert!(
+            matches!(
+                enforcer.evaluate("shell", &params, &ctx),
+                PolicyDecision::Deny { .. }
+            ),
+            "deny rule loaded from file must block the matching call"
+        );
+    }
+
+    // GAP-03b: FileTooLarge — file exceeding 256 KiB must be rejected.
+    #[test]
+    fn policy_file_too_large() {
+        let cwd = std::env::current_dir().unwrap();
+        let dir = tempfile::tempdir_in(&cwd).unwrap();
+        let policy_path = dir.path().join("big.toml");
+        std::fs::write(&policy_path, vec![b'x'; 256 * 1024 + 1]).unwrap();
+        let config = PolicyConfig {
+            enabled: true,
+            default_effect: DefaultEffect::Allow,
+            rules: vec![],
+            policy_file: Some(policy_path.to_string_lossy().into_owned()),
+        };
+        assert!(
+            matches!(
+                PolicyEnforcer::compile(&config),
+                Err(PolicyCompileError::FileTooLarge { .. })
+            ),
+            "file exceeding 256 KiB must return FileTooLarge"
+        );
+    }
+
+    // GAP-03c: FileLoad — nonexistent path must return FileLoad error.
+    // A nonexistent path fails at the canonicalize() call → FileLoad.
+    #[test]
+    fn policy_file_load_error() {
+        let config = PolicyConfig {
+            enabled: true,
+            default_effect: DefaultEffect::Allow,
+            rules: vec![],
+            policy_file: Some("/tmp/__zeph_no_such_policy_file__.toml".to_owned()),
+        };
+        assert!(
+            matches!(
+                PolicyEnforcer::compile(&config),
+                Err(PolicyCompileError::FileLoad { .. })
+            ),
+            "nonexistent policy file must return FileLoad"
+        );
+    }
+
+    // GAP-03d: FileParse — malformed TOML must return FileParse error.
+    #[test]
+    fn policy_file_parse_error() {
+        let cwd = std::env::current_dir().unwrap();
+        let dir = tempfile::tempdir_in(&cwd).unwrap();
+        let policy_path = dir.path().join("bad.toml");
+        std::fs::write(&policy_path, "not valid toml = = =\n[[[\n").unwrap();
+        let config = PolicyConfig {
+            enabled: true,
+            default_effect: DefaultEffect::Allow,
+            rules: vec![],
+            policy_file: Some(policy_path.to_string_lossy().into_owned()),
+        };
+        assert!(
+            matches!(
+                PolicyEnforcer::compile(&config),
+                Err(PolicyCompileError::FileParse { .. })
+            ),
+            "malformed TOML must return FileParse"
+        );
+    }
+
     // Unknown tool names are not aliased.
     #[test]
     fn alias_unknown_tool_unaffected() {
