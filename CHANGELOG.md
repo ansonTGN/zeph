@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- test(memory): add integration tests for `store_session_summary` → Qdrant upsert roundtrip (closes #1916) — four `#[ignore]` tests in `crates/zeph-memory/tests/qdrant_integration.rs` using testcontainers: `store_session_summary_roundtrip`, `store_session_summary_multiple_conversations`, `store_shutdown_summary_full_roundtrip`, `search_session_summaries_returns_empty_when_no_data`; each test guards against silent Qdrant disconnection and verifies both the Qdrant vector path and (where applicable) the SQLite content path
 - feat(index): show indexing progress during background code indexing (#1923)
   - Added `IndexProgress` struct to `zeph-index` with `files_done`, `files_total`, `chunks_created` fields
   - `index_project()` now accepts `progress_tx: Option<&watch::Sender<IndexProgress>>` and sends progress after each file
