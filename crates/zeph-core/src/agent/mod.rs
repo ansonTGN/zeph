@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 mod builder;
+pub(crate) mod compaction_strategy;
 #[cfg(feature = "compression-guidelines")]
 pub(super) mod compression_feedback;
 mod context;
@@ -10,6 +11,7 @@ pub mod error;
 #[cfg(feature = "experiments")]
 mod experiment_cmd;
 pub(super) mod feedback_detector;
+pub(crate) mod focus;
 mod graph_commands;
 #[cfg(feature = "compression-guidelines")]
 mod guidelines_commands;
@@ -28,6 +30,7 @@ pub(crate) mod rate_limiter;
 #[cfg(feature = "scheduler")]
 mod scheduler_commands;
 pub mod session_config;
+pub(crate) mod sidequest;
 mod skill_management;
 pub mod slash_commands;
 pub(crate) mod tool_execution;
@@ -340,6 +343,22 @@ pub struct Agent<C: Channel> {
     /// Snapshot of the policy config for `/policy` command inspection.
     #[cfg(feature = "policy-enforcer")]
     pub(super) policy_config: Option<zeph_tools::PolicyConfig>,
+    /// Focus agent state: active session tracking, knowledge block, reminder counters (#1850).
+    pub(super) focus: focus::FocusState,
+    /// `SideQuest` state: cursor tracking, turn counter, eviction stats (#1885).
+    pub(super) sidequest: sidequest::SidequestState,
+    /// Cached task goal for TaskAware/MIG pruning. Set by `maybe_compact()`,
+    /// invalidated when the last user message hash changes.
+    #[cfg(feature = "context-compression")]
+    pub(super) current_task_goal: Option<String>,
+    /// Hash of the last user message when `current_task_goal` was populated.
+    /// Used to detect when the user's direction has changed.
+    #[cfg(feature = "context-compression")]
+    pub(super) task_goal_user_msg_hash: Option<u64>,
+    /// Pending `SideQuest` eviction result from the background LLM call spawned last turn.
+    /// Applied at the START of the next turn before compaction (PERF-1 fix).
+    #[cfg(feature = "context-compression")]
+    pub(super) pending_sidequest_result: Option<tokio::task::JoinHandle<Option<Vec<usize>>>>,
 }
 
 impl<C: Channel> Agent<C> {
@@ -564,6 +583,14 @@ impl<C: Channel> Agent<C> {
             ),
             #[cfg(feature = "policy-enforcer")]
             policy_config: None,
+            focus: focus::FocusState::default(),
+            sidequest: sidequest::SidequestState::default(),
+            #[cfg(feature = "context-compression")]
+            current_task_goal: None,
+            #[cfg(feature = "context-compression")]
+            task_goal_user_msg_hash: None,
+            #[cfg(feature = "context-compression")]
+            pending_sidequest_result: None,
         }
     }
 
@@ -2612,6 +2639,7 @@ impl<C: Channel> Agent<C> {
 
     /// Dispatch slash commands. Returns `Some(Ok(()))` when handled,
     /// `Some(Err(_))` on I/O error, `None` to fall through to LLM processing.
+    #[allow(clippy::too_many_lines)]
     async fn dispatch_slash_command(
         &mut self,
         trimmed: &str,
@@ -2727,6 +2755,16 @@ impl<C: Channel> Agent<C> {
 
         if trimmed.starts_with("/agent") || trimmed.starts_with('@') {
             return self.dispatch_agent_command(trimmed).await;
+        }
+
+        #[cfg(feature = "context-compression")]
+        if trimmed == "/focus" {
+            handled!(self.handle_focus_status_command().await);
+        }
+
+        #[cfg(feature = "context-compression")]
+        if trimmed == "/sidequest" {
+            handled!(self.handle_sidequest_status_command().await);
         }
 
         None
@@ -3024,6 +3062,7 @@ impl<C: Channel> Agent<C> {
         result
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn process_user_message_inner(
         &mut self,
         text: String,
@@ -3091,8 +3130,22 @@ impl<C: Channel> Agent<C> {
 
         self.detect_and_record_corrections(trimmed, conv_id).await;
 
-        // Reset per-turn compaction guard at the start of context management phase.
+        // Reset per-turn compaction guard FIRST so SideQuest sees a clean slate (C2 fix).
+        // complete_focus and maybe_sidequest_eviction set this flag when they run (C1 fix).
         self.context_manager.compacted_this_turn = false;
+
+        // Tick Focus Agent and SideQuest turn counters (#1850, #1885).
+        #[cfg(feature = "context-compression")]
+        {
+            self.focus.tick();
+
+            // SideQuest eviction: runs every N user turns when enabled.
+            // Skipped when compacted_this_turn is set (focus truncation or prior eviction ran).
+            let sidequest_should_fire = self.sidequest.tick();
+            if sidequest_should_fire && !self.context_manager.compacted_this_turn {
+                self.maybe_sidequest_eviction();
+            }
+        }
 
         // Tier 0: batch-apply deferred tool summaries when approaching context limit.
         // This is a pure in-memory operation (no LLM call) — summaries were pre-computed
@@ -3992,6 +4045,195 @@ impl<C: Channel> Agent<C> {
         self.index.repo_map_ttl = std::time::Duration::from_secs(config.index.repo_map_ttl_secs);
 
         tracing::info!("config reloaded");
+    }
+
+    /// `/focus` slash command: display Focus Agent status.
+    #[cfg(feature = "context-compression")]
+    async fn handle_focus_status_command(&mut self) -> Result<(), error::AgentError> {
+        use std::fmt::Write;
+        let mut out = String::from("Focus Agent status\n\n");
+        let _ = writeln!(out, "Enabled:          {}", self.focus.config.enabled);
+        let _ = writeln!(out, "Active session:   {}", self.focus.is_active());
+        if let Some(ref scope) = self.focus.active_scope {
+            let _ = writeln!(out, "Active scope:     {scope}");
+        }
+        let _ = writeln!(
+            out,
+            "Knowledge blocks: {}",
+            self.focus.knowledge_blocks.len()
+        );
+        let _ = writeln!(out, "Turns since focus: {}", self.focus.turns_since_focus);
+        self.channel.send(&out).await?;
+        Ok(())
+    }
+
+    /// `/sidequest` slash command: display `SideQuest` eviction stats.
+    #[cfg(feature = "context-compression")]
+    async fn handle_sidequest_status_command(&mut self) -> Result<(), error::AgentError> {
+        use std::fmt::Write;
+        let mut out = String::from("SideQuest status\n\n");
+        let _ = writeln!(out, "Enabled:        {}", self.sidequest.config.enabled);
+        let _ = writeln!(
+            out,
+            "Interval turns: {}",
+            self.sidequest.config.interval_turns
+        );
+        let _ = writeln!(out, "Turn counter:   {}", self.sidequest.turn_counter);
+        let _ = writeln!(out, "Passes run:     {}", self.sidequest.passes_run);
+        let _ = writeln!(
+            out,
+            "Total evicted:  {} tool outputs",
+            self.sidequest.total_evicted
+        );
+        self.channel.send(&out).await?;
+        Ok(())
+    }
+
+    /// Run `SideQuest` tool output eviction pass (#1885).
+    ///
+    /// PERF-1 fix: two-phase non-blocking design.
+    ///
+    /// Phase 1 (apply, this turn): check for a background LLM result spawned last turn,
+    /// validate and apply it immediately.
+    ///
+    /// Phase 2 (schedule, this turn): rebuild cursors and spawn a background `tokio::spawn`
+    /// task for the LLM call. The result is stored in `pending_sidequest_result` and applied
+    /// next turn, so the current agent turn is never blocked by the LLM call.
+    #[cfg(feature = "context-compression")]
+    #[allow(clippy::too_many_lines)]
+    fn maybe_sidequest_eviction(&mut self) {
+        use zeph_llm::provider::{Message, MessageMetadata, Role};
+
+        // S1 runtime guard: warn when SideQuest is enabled alongside a non-Reactive pruning
+        // strategy — the two systems share the same pool of evictable tool outputs and can
+        // interfere. Disable sidequest.enabled when pruning_strategy != Reactive.
+        if self.sidequest.config.enabled {
+            use crate::config::PruningStrategy;
+            if !matches!(
+                self.context_manager.compression.pruning_strategy,
+                PruningStrategy::Reactive
+            ) {
+                tracing::warn!(
+                    strategy = ?self.context_manager.compression.pruning_strategy,
+                    "sidequest is enabled alongside a non-Reactive pruning strategy; \
+                     consider disabling sidequest.enabled to avoid redundant eviction"
+                );
+            }
+        }
+
+        // Guard: do not evict while a focus session is active.
+        if self.focus.is_active() {
+            tracing::debug!("sidequest: skipping — focus session active");
+            // Drop any pending result — cursors may be stale relative to focus truncation.
+            self.pending_sidequest_result = None;
+            return;
+        }
+
+        // Phase 1: apply pending result from last turn's background LLM call.
+        if let Some(handle) = self.pending_sidequest_result.take() {
+            // `now_or_never` avoids blocking — if the task isn't done yet, skip this turn.
+            use futures::FutureExt as _;
+            match handle.now_or_never() {
+                Some(Ok(Some(cursors))) if !cursors.is_empty() => {
+                    let freed = self.sidequest.apply_eviction(
+                        &mut self.messages,
+                        &cursors,
+                        &self.metrics.token_counter,
+                    );
+                    if freed > 0 {
+                        self.recompute_prompt_tokens();
+                        // C1 fix: prevent maybe_compact() from firing in the same turn.
+                        self.context_manager.compacted_this_turn = true;
+                        tracing::info!(
+                            freed_tokens = freed,
+                            evicted_cursors = cursors.len(),
+                            pass = self.sidequest.passes_run,
+                            "sidequest eviction complete"
+                        );
+                    }
+                }
+                Some(Ok(None | Some(_))) => {
+                    tracing::debug!("sidequest: pending result: no cursors to evict");
+                }
+                Some(Err(e)) => {
+                    tracing::debug!("sidequest: background task panicked: {e}");
+                }
+                None => {
+                    // Task still running — re-store and wait another turn.
+                    // We already took it; we'd need to re-spawn, but instead just drop and
+                    // schedule fresh below to keep the cursor list current.
+                    tracing::debug!(
+                        "sidequest: background LLM task not yet complete, rescheduling"
+                    );
+                }
+            }
+        }
+
+        // Phase 2: rebuild cursors and schedule the next background eviction LLM call.
+        self.sidequest
+            .rebuild_cursors(&self.messages, &self.metrics.token_counter);
+
+        if self.sidequest.tool_output_cursors.is_empty() {
+            tracing::debug!("sidequest: no eligible cursors");
+            return;
+        }
+
+        let prompt = self.sidequest.build_eviction_prompt();
+        let max_eviction_ratio = self.sidequest.config.max_eviction_ratio;
+        let n_cursors = self.sidequest.tool_output_cursors.len();
+        // Clone the provider so the spawn closure owns it without borrowing self.
+        let provider = self.summary_or_primary_provider().clone();
+
+        // Spawn background task: the LLM call runs without blocking the agent loop.
+        let handle = tokio::spawn(async move {
+            let msgs = [Message {
+                role: Role::User,
+                content: prompt,
+                parts: vec![],
+                metadata: MessageMetadata::default(),
+            }];
+            let response =
+                match tokio::time::timeout(std::time::Duration::from_secs(5), provider.chat(&msgs))
+                    .await
+                {
+                    Ok(Ok(r)) => r,
+                    Ok(Err(e)) => {
+                        tracing::debug!("sidequest bg: LLM call failed: {e:#}");
+                        return None;
+                    }
+                    Err(_) => {
+                        tracing::debug!("sidequest bg: LLM call timed out");
+                        return None;
+                    }
+                };
+
+            // Parse and cap inline (state-free portion of parse_eviction_response).
+            let start = response.find('{')?;
+            let end = response.rfind('}')?;
+            if start > end {
+                return None;
+            }
+            let json_slice = &response[start..=end];
+            let parsed: sidequest::EvictionResponse = serde_json::from_str(json_slice).ok()?;
+            let mut valid: Vec<usize> = parsed
+                .del_cursors
+                .into_iter()
+                .filter(|&c| c < n_cursors)
+                .collect();
+            valid.sort_unstable();
+            valid.dedup();
+            #[allow(
+                clippy::cast_precision_loss,
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss
+            )]
+            let max_evict = ((n_cursors as f32) * max_eviction_ratio).ceil() as usize;
+            valid.truncate(max_evict);
+            Some(valid)
+        });
+
+        self.pending_sidequest_result = Some(handle);
+        tracing::debug!("sidequest: background LLM eviction task spawned");
     }
 }
 pub(crate) async fn shutdown_signal(rx: &mut watch::Receiver<bool>) {
