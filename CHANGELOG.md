@@ -8,6 +8,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- feat(index): show indexing progress during background code indexing (#1923)
+  - Added `IndexProgress` struct to `zeph-index` with `files_done`, `files_total`, `chunks_created` fields
+  - `index_project()` now accepts `progress_tx: Option<&watch::Sender<IndexProgress>>` and sends progress after each file
+  - CLI mode: prints "Indexing codebase in the background (N files)..." and "Codebase indexed: N files, M chunks (Xs) — code search is ready." to stderr
+  - TUI mode: shows "Indexing codebase... N/M files (X%)" in the status bar, then "Index ready (N files, M chunks)" for 3s after completion
 - enhancement(core): `LearningEngine` now performs real behavioral learning from interaction history (closes #1913)
   - New SQLite table `learned_preferences` (migration 036) persists inferred user preferences across sessions
   - Scans `user_corrections` incrementally via watermark (no repeated re-scanning); analyzes every 5 turns when `correction_detection` is enabled

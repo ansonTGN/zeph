@@ -949,13 +949,16 @@ pub(crate) async fn run(cli: Cli) -> anyhow::Result<()> {
     #[cfg(feature = "guardrail")]
     let agent = agent_setup::apply_guardrail(agent, app.build_guardrail_provider());
 
-    let (code_retriever, _index_watcher) = agent_setup::apply_code_indexer(
+    let (code_retriever, _index_watcher, index_progress_rx) = agent_setup::apply_code_indexer(
         &config.index,
         index_qdrant_ops,
         index_provider,
         index_pool,
+        is_cli,
     )
     .await;
+    #[cfg(not(feature = "tui"))]
+    let _ = index_progress_rx;
     let agent =
         agent_setup::apply_code_retrieval(agent, &config.index, code_retriever, provider_has_tools);
     let agent = if let Some(search_executor) = agent_setup::build_search_code_executor(
@@ -1245,6 +1248,7 @@ pub(crate) async fn run(cli: Cli) -> anyhow::Result<()> {
                 tool_rx: shell_executor_for_tui,
                 metrics_rx: tui_metrics_rx,
                 warmup_provider: warmup_provider_clone,
+                index_progress_rx,
             },
         ))
         .await;
