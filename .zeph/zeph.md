@@ -103,13 +103,20 @@ docs/src/        — mdBook documentation
 Skills are loaded from `.zeph/skills/` by default. The watcher monitors this directory for
 hot-reload (500 ms debounce). Override via `[skills] directory = "path"` in config.
 
-## Specifications
+## Specifications (MANDATORY)
 
-- Skills format (SKILL.md): https://agentskills.io/specification.md
-- A2A protocol: https://raw.githubusercontent.com/a2aproject/A2A/main/docs/specification.md
-- MCP protocol: https://modelcontextprotocol.io/specification/2025-11-25.md
-- ACP protocol: https://agentclientprotocol.com/get-started/introduction
-- Claude prompt caching: https://platform.claude.com/docs/en/build-with-claude/prompt-caching
+All feature and system specifications live in `.local/specs/`. **Compliance is non-negotiable.**
+
+- **Before implementing any feature**: read the relevant spec in `.local/specs/` and the system
+  invariants in `.local/specs/001-system-invariants/spec.md`.
+- **Before modifying any subsystem**: read the corresponding spec document. The `## Key Invariants`
+  and `NEVER` sections define hard constraints — violating them requires an explicit architectural
+  decision documented before any code is written.
+- **Index**: `.local/specs/README.md` — maps every subsystem to its spec file.
+- **Constitution**: `.local/specs/constitution.md` — project-wide rules that apply to every change.
+- If a spec is missing or outdated for the area you are changing, update it before writing code.
+
+External protocol specs and research references are in the `## Sources` section of each spec file.
 
 ## Rust Code Conventions
 
