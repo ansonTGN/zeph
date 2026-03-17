@@ -87,6 +87,28 @@ cargo llvm-cov --all-features --workspace
 | `zeph-a2a` | A2A protocol client and server |
 | `zeph-tui` | ratatui TUI dashboard with real-time metrics |
 
+## Spec-Driven Development
+
+Zeph follows a spec-driven development process. **Code changes come after spec changes, not before.**
+
+### Before writing any code
+
+1. Read the relevant specification in `specs/` — every subsystem has a corresponding `spec.md`.
+   Start with `specs/constitution.md` for project-wide invariants.
+2. If your change affects an existing subsystem, open the matching spec and review the
+   `## Key Invariants` and `NEVER` sections. These are hard constraints.
+3. **Propose the spec change first.** Open a GitHub issue or discussion describing:
+   - What you want to change and why
+   - Which spec sections are affected
+   - Whether any invariants need to be updated or explicitly overridden
+4. Once the spec change is agreed upon, update the spec file and open a PR that includes
+   both the spec update and the implementation together.
+5. If no spec exists for the area you are changing, create one in `specs/<area>/spec.md`
+   before writing code. Use the existing specs as a template.
+
+This process ensures that architectural decisions are made deliberately and documented before
+they become code — not reverse-engineered from a diff after the fact.
+
 ## Pull Requests
 
 1. Create a feature branch: `feat/<scope>/<description>` or `fix/<scope>/<description>`
@@ -94,6 +116,8 @@ cargo llvm-cov --all-features --workspace
 3. Add tests for new functionality
 4. Ensure all checks pass: `cargo +nightly fmt`, `cargo clippy`, `cargo nextest run --lib --bins`
 5. Write a clear PR description following the template
+6. If the PR touches a specced subsystem, reference the relevant `specs/` file and confirm
+   that the implementation is compliant with the current spec
 
 ## Commit Messages
 
