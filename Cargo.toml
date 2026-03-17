@@ -91,7 +91,7 @@ thiserror = "2.0"
 tokenizers = { version = "0.22", default-features = false, features = ["fancy-regex"] }
 tokio = "1"
 tokio-stream = "0.1"
-tokio-tungstenite = { version = "0.28", default-features = false }
+tokio-tungstenite = { version = "0.29", default-features = false }
 tokio-util = "0.7"
 toml = "1.0"
 toml_edit = "0.25"
