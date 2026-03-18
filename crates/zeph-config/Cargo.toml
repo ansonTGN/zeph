@@ -23,17 +23,21 @@ policy-enforcer = ["zeph-tools/policy-enforcer"]
 [dependencies]
 dirs.workspace = true
 ordered-float = { workspace = true, optional = true, features = ["serde"] }
-regex.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+toml_edit.workspace = true
+tracing.workspace = true
+zeph-common.workspace = true
 zeph-memory.workspace = true
 zeph-mcp.workspace = true
-zeph-skills.workspace = true
 zeph-tools.workspace = true
 zeph-llm.workspace = true
 
 [dev-dependencies]
-toml.workspace = true
+insta.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true
