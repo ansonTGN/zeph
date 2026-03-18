@@ -99,6 +99,13 @@ pub(crate) struct RuntimeConfig {
     pub(crate) model_name: String,
     pub(crate) permission_policy: zeph_tools::PermissionPolicy,
     pub(crate) redact_credentials: bool,
+    pub(crate) rate_limiter: super::rate_limiter::ToolRateLimiter,
+}
+
+/// Groups feedback detection subsystems: correction detector and judge detector.
+pub(crate) struct FeedbackState {
+    pub(crate) detector: super::feedback_detector::FeedbackDetector,
+    pub(crate) judge: Option<super::feedback_detector::JudgeDetector>,
 }
 
 /// Groups security-related subsystems (sanitizer, quarantine, exfiltration guard).
@@ -259,3 +266,6 @@ pub(crate) struct MessageState {
     /// Image parts staged by `/image` commands, attached to the next user message.
     pub(crate) pending_image_parts: Vec<zeph_llm::provider::MessagePart>,
 }
+
+#[cfg(test)]
+mod tests;
