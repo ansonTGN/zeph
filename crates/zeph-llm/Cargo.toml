@@ -9,6 +9,7 @@ homepage.workspace = true
 documentation.workspace = true
 keywords.workspace = true
 categories.workspace = true
+publish.workspace = true
 description = "LLM provider abstraction with Ollama, Claude, OpenAI, and Candle backends"
 readme = "README.md"
 

@@ -9,7 +9,7 @@ documentation.workspace = true
 homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
-publish = false
+publish.workspace = true
 description = "Content sanitization, exfiltration guard, PII filtering, and quarantine for Zeph"
 readme = "README.md"
 

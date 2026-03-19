@@ -9,6 +9,7 @@ homepage.workspace = true
 documentation.workspace = true
 keywords.workspace = true
 categories.workspace = true
+publish.workspace = true
 description = "ACP (Agent Client Protocol) server for IDE embedding"
 readme = "README.md"
 

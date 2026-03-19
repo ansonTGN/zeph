@@ -9,7 +9,7 @@ documentation.workspace = true
 homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
-publish = false
+publish.workspace = true
 description = "Experiment engine for adaptive agent behavior testing and hyperparameter tuning"
 readme = "README.md"
 

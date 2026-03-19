@@ -9,6 +9,7 @@ homepage.workspace = true
 documentation.workspace = true
 keywords.workspace = true
 categories.workspace = true
+publish.workspace = true
 description = "A2A protocol client and server with agent discovery for Zeph"
 readme = "README.md"
 

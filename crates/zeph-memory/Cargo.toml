@@ -9,6 +9,7 @@ homepage.workspace = true
 documentation.workspace = true
 keywords.workspace = true
 categories.workspace = true
+publish.workspace = true
 description = "Semantic memory with SQLite and Qdrant for Zeph agent"
 readme = "README.md"
 

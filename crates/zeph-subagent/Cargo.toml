@@ -9,7 +9,7 @@ documentation.workspace = true
 homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
-publish = false
+publish.workspace = true
 description = "Subagent management: spawning, grants, transcripts, and lifecycle hooks for Zeph"
 readme = "README.md"
 

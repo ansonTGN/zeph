@@ -9,6 +9,7 @@ homepage.workspace = true
 documentation.workspace = true
 keywords.workspace = true
 categories.workspace = true
+publish.workspace = true
 description = "Cron-based periodic task scheduler with SQLite persistence for Zeph"
 readme = "README.md"
 

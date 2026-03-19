@@ -9,6 +9,7 @@ homepage.workspace = true
 documentation.workspace = true
 keywords.workspace = true
 categories.workspace = true
+publish.workspace = true
 description = "Core agent loop, configuration, context builder, metrics, and vault for Zeph"
 readme = "README.md"
 

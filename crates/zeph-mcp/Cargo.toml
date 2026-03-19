@@ -9,6 +9,7 @@ homepage.workspace = true
 documentation.workspace = true
 keywords.workspace = true
 categories.workspace = true
+publish.workspace = true
 description = "MCP client with multi-server lifecycle and Qdrant tool registry for Zeph"
 readme = "README.md"
 

@@ -9,6 +9,7 @@ homepage.workspace = true
 documentation.workspace = true
 keywords.workspace = true
 categories.workspace = true
+publish.workspace = true
 description = "AST-based code indexing and semantic retrieval for Zeph"
 readme = "README.md"
 

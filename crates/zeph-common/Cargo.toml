@@ -9,6 +9,7 @@ homepage.workspace = true
 documentation.workspace = true
 keywords.workspace = true
 categories.workspace = true
+publish.workspace = true
 description = "Shared utility functions and security primitives for Zeph crates"
 readme = "README.md"
 
