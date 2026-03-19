@@ -68,8 +68,19 @@
 
 - [Overview](architecture/overview.md)
 - [Crate Map](architecture/crates.md)
+- [Crate Extraction](architecture/crate-extraction.md)
+- [Crates Overview](architecture/crates-overview.md)
 - [Token Efficiency](architecture/token-efficiency.md)
 - [Performance](architecture/performance.md)
+
+# Crate Reference
+
+- [zeph-config](reference/crate-config.md)
+- [zeph-vault](reference/crate-vault.md)
+- [zeph-experiments](reference/crate-experiments.md)
+- [zeph-sanitizer](reference/crate-sanitizer.md)
+- [zeph-subagent](reference/crate-subagent.md)
+- [zeph-orchestration](reference/crate-orchestration.md)
 
 # Reference
 
