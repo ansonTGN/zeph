@@ -8,13 +8,14 @@ use std::sync::{Arc, Mutex};
 
 use zeph_core::agent::Agent;
 use zeph_core::channel::{Channel, ChannelError, ChannelMessage};
-use zeph_core::config::{AutonomyLevel, Config, ProviderKind, SecurityConfig, TimeoutConfig};
+use zeph_core::config::{Config, ProviderKind, SecurityConfig, TimeoutConfig};
 use zeph_llm::any::AnyProvider;
 use zeph_llm::mock::MockProvider;
 use zeph_memory::semantic::SemanticMemory;
 use zeph_memory::sqlite::SqliteStore;
 use zeph_skills::loader::load_skill;
 use zeph_skills::registry::SkillRegistry;
+use zeph_tools::AutonomyLevel;
 use zeph_tools::executor::{ToolError, ToolExecutor, ToolOutput};
 
 // -- Provider helpers --

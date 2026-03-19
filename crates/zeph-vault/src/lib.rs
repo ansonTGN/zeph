@@ -1,16 +1,13 @@
 // SPDX-FileCopyrightText: 2026 Andrei G <bug-ops>
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
-use std::io::Write as _;
-use std::pin::Pin;
-
-use std::collections::BTreeMap;
-
-use std::io::Read as _;
-
+use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::sync::Arc;
 
 use zeroize::Zeroizing;
 
@@ -323,8 +320,6 @@ impl VaultProvider for EnvVaultProvider {
 /// persistence via `VaultCredentialStore`.
 pub struct ArcAgeVaultProvider(pub Arc<tokio::sync::RwLock<AgeVaultProvider>>);
 
-use std::sync::Arc;
-
 impl VaultProvider for ArcAgeVaultProvider {
     fn get_secret(
         &self,
@@ -350,7 +345,7 @@ impl VaultProvider for ArcAgeVaultProvider {
 }
 
 /// Test helper with BTreeMap-based secret storage.
-#[cfg(test)]
+#[cfg(any(test, feature = "mock"))]
 #[derive(Default)]
 pub struct MockVaultProvider {
     secrets: std::collections::BTreeMap<String, String>,
@@ -359,7 +354,7 @@ pub struct MockVaultProvider {
     listed_only: Vec<String>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "mock"))]
 impl MockVaultProvider {
     #[must_use]
     pub fn new() -> Self {
@@ -380,7 +375,7 @@ impl MockVaultProvider {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "mock"))]
 impl VaultProvider for MockVaultProvider {
     fn get_secret(
         &self,
@@ -517,7 +512,6 @@ mod tests {
 mod age_tests {
     use std::io::Write as _;
 
-    use crate::config::SecretResolver;
     use age::secrecy::ExposeSecret;
 
     use super::*;
@@ -638,29 +632,6 @@ mod age_tests {
         let (_dir, key_path, vault_path) = write_temp_files(&identity, &encrypted);
         let err = AgeVaultProvider::new(&key_path, &vault_path).unwrap_err();
         assert!(matches!(err, AgeVaultError::Json(_)));
-    }
-
-    #[tokio::test]
-    async fn age_encrypt_decrypt_resolve_secrets_roundtrip() {
-        let identity = age::x25519::Identity::generate();
-        let json = serde_json::json!({
-            "ZEPH_CLAUDE_API_KEY": "sk-ant-test-123",
-            "ZEPH_TELEGRAM_TOKEN": "tg-token-456"
-        });
-        let encrypted = encrypt_json(&identity, &json);
-        let (_dir, key_path, vault_path) = write_temp_files(&identity, &encrypted);
-
-        let vault = AgeVaultProvider::new(&key_path, &vault_path).unwrap();
-        let mut config =
-            crate::config::Config::load(Path::new("/nonexistent/config.toml")).unwrap();
-        config.resolve_secrets(&vault).await.unwrap();
-
-        assert_eq!(
-            config.secrets.claude_api_key.as_ref().unwrap().expose(),
-            "sk-ant-test-123"
-        );
-        let tg = config.telegram.unwrap();
-        assert_eq!(tg.token.as_deref(), Some("tg-token-456"));
     }
 
     #[test]
