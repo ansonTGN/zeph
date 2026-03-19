@@ -307,11 +307,31 @@ In-session commands for autonomous self-experimentation (requires `experiments` 
 > [!TIP]
 > The same CRUD operations are available interactively in the TUI agents panel — press `a` in the TUI to open the panel, then `c` (create), `e` (edit), `d` (delete), Enter (detail view).
 
+## Features
+
+| Feature | Description |
+|---------|-------------|
+| `candle` | Local inference via Candle (enables `zeph-llm/candle`) |
+| `cuda` | CUDA backend for Candle (implies `candle`) |
+| `metal` | Metal backend for Candle on Apple Silicon (implies `candle`) |
+| `guardrail` | Advanced content guardrails via `zeph-sanitizer` |
+| `lsp-context` | LSP context injection hooks via `LspHookRunner` |
+| `compression-guidelines` | LLM-guided compaction guidelines in context assembly |
+| `experiments` | Autonomous self-experimentation engine |
+| `policy-enforcer` | Policy enforcement for tool execution |
+| `scheduler` | Integration with `zeph-scheduler` for cron-based tasks |
+| `context-compression` | Proactive context compression strategy |
+| `mock` | `MockVaultProvider` for tests |
+
 ## Installation
 
 ```bash
 cargo add zeph-core
 ```
+
+## Documentation
+
+Full documentation: <https://bug-ops.github.io/zeph/>
 
 ## License
 

@@ -55,6 +55,10 @@ cargo add zeph-gateway
 
 Enabled via the `gateway` feature flag on the root `zeph` crate.
 
+## Documentation
+
+Full documentation: <https://bug-ops.github.io/zeph/>
+
 ## License
 
 MIT

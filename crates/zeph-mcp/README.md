@@ -22,11 +22,39 @@ Implements the Model Context Protocol client for Zeph, managing connections to m
 - **prompt** — MCP prompt template support
 - **error** — `McpError` error types
 
+## Configuration
+
+```toml
+[[mcp.servers]]
+id = "filesystem"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+env = {}
+
+[[mcp.servers]]
+id = "fetch"
+command = "uvx"
+args = ["mcp-server-fetch"]
+```
+
+> [!NOTE]
+> Statically configured servers (from `[[mcp.servers]]`) bypass SSRF validation to allow connections to `localhost` and private IPs. Dynamically added servers retain full SSRF protection.
+
+## Features
+
+| Feature | Description |
+|---------|-------------|
+| `mock` | Enables `MockMcpClient` for downstream tests |
+
 ## Installation
 
 ```bash
 cargo add zeph-mcp
 ```
+
+## Documentation
+
+Full documentation: <https://bug-ops.github.io/zeph/>
 
 ## License
 

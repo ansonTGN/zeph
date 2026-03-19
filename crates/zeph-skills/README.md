@@ -65,6 +65,10 @@ hybrid_search  = true  # enable BM25 + cosine hybrid search (default: true)
 cargo add zeph-skills
 ```
 
+## Documentation
+
+Full documentation: <https://bug-ops.github.io/zeph/>
+
 ## License
 
 MIT

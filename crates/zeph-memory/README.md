@@ -180,9 +180,16 @@ edge_history_limit = 100            # Max edge versions returned by edge_history
 ```bash
 cargo add zeph-memory
 
-# With PDF support
+# With PDF document loading
 cargo add zeph-memory --features pdf
+
+# With experiment result persistence
+cargo add zeph-memory --features experiments
 ```
+
+## Documentation
+
+Full documentation: <https://bug-ops.github.io/zeph/>
 
 ## License
 

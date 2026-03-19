@@ -27,11 +27,28 @@ Implements I/O channel adapters that connect the agent to different frontends. S
 > [!NOTE]
 > `ChannelError` is defined in `zeph-core::channel` and used directly by all channel adapters. `zeph-channels` does not re-export it.
 
+## Features
+
+| Feature | Description |
+|---------|-------------|
+| `discord` | Discord WebSocket adapter via tokio-tungstenite |
+| `slack` | Slack Events API adapter via axum with HMAC-SHA256 signature verification |
+
 ## Installation
 
 ```bash
 cargo add zeph-channels
+
+# With Discord support
+cargo add zeph-channels --features discord
+
+# With Slack support
+cargo add zeph-channels --features slack
 ```
+
+## Documentation
+
+Full documentation: <https://bug-ops.github.io/zeph/>
 
 ## License
 

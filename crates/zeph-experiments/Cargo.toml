@@ -5,12 +5,13 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-documentation = "https://bug-ops.github.io/zeph/"
+documentation.workspace = true
 homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
 publish = false
 description = "Experiment engine for adaptive agent behavior testing and hyperparameter tuning"
+readme = "README.md"
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }

@@ -164,6 +164,10 @@ Enabled via the `scheduler` feature flag on the root `zeph` crate.
 > [!IMPORTANT]
 > Requires Rust 1.88 or later.
 
+## Documentation
+
+Full documentation: <https://bug-ops.github.io/zeph/>
+
 ## License
 
 MIT

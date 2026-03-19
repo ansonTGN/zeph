@@ -148,7 +148,20 @@ cargo build -p zeph-llm --no-default-features
 
 ```bash
 cargo add zeph-llm
+
+# Without schemars (chat_typed and Extractor not available)
+cargo add zeph-llm --no-default-features
+
+# With local inference via Candle
+cargo add zeph-llm --features candle
+
+# With OpenAI Whisper STT
+cargo add zeph-llm --features stt
 ```
+
+## Documentation
+
+Full documentation: <https://bug-ops.github.io/zeph/>
 
 ## License
 

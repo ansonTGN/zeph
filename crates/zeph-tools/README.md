@@ -78,11 +78,21 @@ failure_threshold = 0.7
 auto_block = true
 ```
 
+## Features
+
+| Feature | Description |
+|---------|-------------|
+| `policy-enforcer` | Enables `PolicyEnforcerConfig` and policy-based tool access control |
+
 ## Installation
 
 ```bash
 cargo add zeph-tools
 ```
+
+## Documentation
+
+Full documentation: <https://bug-ops.github.io/zeph/>
 
 ## License
 

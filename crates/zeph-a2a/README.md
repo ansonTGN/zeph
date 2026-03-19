@@ -34,13 +34,26 @@ A2aServer::new(addr, sender)
 
 Token comparison uses `subtle::ConstantTimeEq` to prevent timing attacks.
 
+## Features
+
+| Feature | Description |
+|---------|-------------|
+| `server` | Enables `A2aServer` with axum HTTP handler and bearer auth (requires `axum`, `blake3`, `tower`) |
+
 ## Installation
 
 ```bash
 cargo add zeph-a2a
+
+# With server component
+cargo add zeph-a2a --features server
 ```
 
 Enabled via the `a2a` feature flag on the root `zeph` crate.
+
+## Documentation
+
+Full documentation: <https://bug-ops.github.io/zeph/>
 
 ## License
 

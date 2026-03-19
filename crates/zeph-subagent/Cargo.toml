@@ -5,12 +5,13 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-documentation = "https://bug-ops.github.io/zeph/"
+documentation.workspace = true
 homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
 publish = false
 description = "Subagent management: spawning, grants, transcripts, and lifecycle hooks for Zeph"
+readme = "README.md"
 
 [dependencies]
 dirs.workspace = true

@@ -124,13 +124,29 @@ The command palette is opened with `:` in normal mode. Type to fuzzy-filter entr
 | `app:help` | Show keybindings help (`?` shortcut) |
 | `app:theme` | Toggle dark/light theme |
 
+## Features
+
+| Feature | Description |
+|---------|-------------|
+| `experiments` | Enables experiment-related TUI commands and widgets |
+| `guardrail` | Enables the security panel and SEC status bar indicator |
+| `lsp-context` | Enables LSP context injection status display |
+
 ## Installation
 
 ```bash
 cargo add zeph-tui
 ```
 
-Enabled via the `tui` feature flag on the root `zeph` crate.
+Enabled via the `tui` feature flag on the root `zeph` crate:
+
+```bash
+cargo run --features tui -- --tui
+```
+
+## Documentation
+
+Full documentation: <https://bug-ops.github.io/zeph/>
 
 ## License
 

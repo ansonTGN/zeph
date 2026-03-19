@@ -453,6 +453,10 @@ During orchestrator runs `ZephAcpAgent` emits `SessionUpdate::Plan` events as th
 
 User input that begins with `/` is matched against this list and dispatched to the corresponding handler before the message reaches the agent loop.
 
+## Documentation
+
+Full documentation: <https://bug-ops.github.io/zeph/>
+
 ## License
 
 MIT

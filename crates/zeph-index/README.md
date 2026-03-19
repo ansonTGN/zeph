@@ -21,6 +21,16 @@ Parses source files with tree-sitter to extract structured symbols (name, kind, 
 - **watcher** — filesystem watcher for incremental re-indexing
 - **error** — `IndexError` error types
 
+## Supported languages
+
+| Language | Symbol extraction | Hover pre-filter |
+|----------|------------------|-----------------|
+| Rust | functions, structs, enums, traits, impls | yes |
+| Python | functions, classes, methods | yes |
+| JavaScript | functions, classes, arrow functions | yes |
+| TypeScript | functions, classes, interfaces, types | yes |
+| Go | functions, structs, interfaces | yes |
+
 ## Installation
 
 ```bash
@@ -29,6 +39,10 @@ cargo add zeph-index
 
 > [!NOTE]
 > `zeph-index` does not depend on `qdrant-client` directly. Vector storage is delegated to `zeph-memory`, which owns the Qdrant client lifecycle. Repo map generation works without Qdrant — it is injected into the agent context for all LLM providers unconditionally.
+
+## Documentation
+
+Full documentation: <https://bug-ops.github.io/zeph/>
 
 ## License
 

@@ -5,12 +5,13 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-documentation = "https://bug-ops.github.io/zeph/"
+documentation.workspace = true
 homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
 publish = false
 description = "Content sanitization, exfiltration guard, PII filtering, and quarantine for Zeph"
+readme = "README.md"
 
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
