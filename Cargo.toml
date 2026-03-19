@@ -10,7 +10,7 @@ authors = ["bug-ops"]
 license = "MIT"
 repository = "https://github.com/bug-ops/zeph"
 homepage = "https://github.com/bug-ops/zeph"
-documentation = "https://docs.rs/zeph"
+documentation = "https://bug-ops.github.io/zeph/"
 keywords = ["ai", "agent", "llm", "inference", "skills"]
 categories = ["command-line-utilities", "science"]
 
