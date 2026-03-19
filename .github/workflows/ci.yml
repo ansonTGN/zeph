@@ -40,7 +40,7 @@ jobs:
               - '**.md'
               - '.local/testing/**'
             specs:
-              - '.local/specs/**'
+              - 'specs/**'
             code:
               - 'crates/**'
               - 'src/**'
@@ -336,10 +336,10 @@ jobs:
       - name: Check spec structure
         run: |
           echo "Spec files found:"
-          find .local/specs -name "*.md" -type f | sort
-          echo "Total: $(find .local/specs -name "*.md" -type f | wc -l)"
+          find specs -name "*.md" -type f | sort
+          echo "Total: $(find specs -name "*.md" -type f | wc -l)"
           # Verify README index exists
-          test -f .local/specs/README.md || (echo "::error::.local/specs/README.md index is missing" && exit 1)
+          test -f specs/README.md || (echo "::error::specs/README.md index is missing" && exit 1)
 
   ci-status:
     name: CI Status
