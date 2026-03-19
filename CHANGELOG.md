@@ -8,6 +8,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- refactor(sanitizer): extract content sanitization into new `zeph-sanitizer` crate (Epic #1973 Phase 1e)
+  - New `zeph-sanitizer` crate at Layer 2 with 6 core modules: `exfiltration`, `guardrail`, `memory_validation`, `pii`, `quarantine`, and lib exports
+  - Extracted 4,337 LOC from `zeph-core/src/sanitizer/` including `ContentSanitizer`, `ExfiltrationGuard`, `PiiFilter`, `MemoryWriteValidator`, `QuarantinedSummarizer`, and guardrail logic
+  - Clean direct imports throughout `zeph-core` and binary crates: `use zeph_sanitizer::*` (no re-export shim pattern)
+  - Feature flag `guardrail` propagated from `zeph-core` to `zeph-sanitizer`
+  - `zeph-core` re-exports all public types from `zeph-sanitizer` preserving existing import paths for downstream consumers
+
 - refactor(experiments): extract experiments logic into new `zeph-experiments` crate (Epic #1973 Phase 1d)
   - New `zeph-experiments` crate at Layer 2 with `ExperimentEngine`, `Evaluator`, `BenchmarkSet`, and all experiment-related types
   - Moved: `ExperimentEngine`, `ExperimentSessionReport`, `Evaluator`, `JudgeOutput`, `CaseScore`, `EvalReport`, `EvalError`, `VariationGenerator`, `GridStep`, `Random`, `Neighborhood`, `ParameterRange`, `SearchSpace`, `ParameterKind`, `Variation`, `VariationValue`, `ExperimentResult`, `ExperimentSource`, `BenchmarkCase`, `BenchmarkSet`, `ConfigSnapshot`, `GenerationOverrides`
