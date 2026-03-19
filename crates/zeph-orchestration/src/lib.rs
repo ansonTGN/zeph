@@ -12,7 +12,6 @@ pub mod planner;
 pub mod router;
 pub mod scheduler;
 
-pub use crate::config::OrchestrationConfig;
 pub use aggregator::{Aggregator, LlmAggregator};
 pub use command::PlanCommand;
 pub use error::OrchestrationError;
