@@ -19,6 +19,68 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  detect-changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      docs-only: ${{ steps.classify.outputs.docs-only }}
+      specs-only: ${{ steps.classify.outputs.specs-only }}
+      run-full-ci: ${{ steps.classify.outputs.run-full-ci }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Filter changed paths
+        uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
+        id: filter
+        with:
+          filters: |
+            docs:
+              - 'book/src/**'
+              - 'docs/**'
+              - '**.md'
+              - '.local/testing/**'
+            specs:
+              - '.local/specs/**'
+            code:
+              - 'crates/**'
+              - 'src/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'build.rs'
+            workflows:
+              - '.github/workflows/**'
+              - '.cargo/**'
+            shell:
+              - 'install/**'
+      - name: Classify changes
+        id: classify
+        run: |
+          DOCS="${{ steps.filter.outputs.docs }}"
+          SPECS="${{ steps.filter.outputs.specs }}"
+          CODE="${{ steps.filter.outputs.code }}"
+          WORKFLOWS="${{ steps.filter.outputs.workflows }}"
+
+          # docs-only: docs or specs changed, nothing that requires building
+          if [[ "$CODE" == "false" && "$WORKFLOWS" == "false" && ("$DOCS" == "true" || "$SPECS" == "true") ]]; then
+            echo "docs-only=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "docs-only=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          # specs-only: specs changed, no code or workflow changes
+          if [[ "$SPECS" == "true" && "$CODE" == "false" && "$WORKFLOWS" == "false" && "$DOCS" == "false" ]]; then
+            echo "specs-only=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "specs-only=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          # run-full-ci: any code, workflow, or shell change triggers full CI
+          if [[ "$CODE" == "true" || "$WORKFLOWS" == "true" ]]; then
+            echo "run-full-ci=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run-full-ci=false" >> "$GITHUB_OUTPUT"
+          fi
+
   cla:
     name: CLA Check
     if: github.event_name == 'pull_request'
@@ -36,6 +98,9 @@ jobs:
 
   lint-shellcheck:
     name: Lint (shellcheck)
+    needs: detect-changes
+    # Run when shell scripts changed, or when doing full CI (workflows changed)
+    if: needs.detect-changes.outputs.run-full-ci == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -47,6 +112,8 @@ jobs:
 
   lint-fmt:
     name: Lint (fmt)
+    needs: detect-changes
+    if: needs.detect-changes.outputs.run-full-ci == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -60,6 +127,8 @@ jobs:
 
   lint-clippy:
     name: Lint (clippy)
+    needs: detect-changes
+    if: needs.detect-changes.outputs.run-full-ci == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -80,6 +149,8 @@ jobs:
 
   build-tests:
     name: Build Tests (${{ matrix.os }})
+    needs: detect-changes
+    if: needs.detect-changes.outputs.run-full-ci == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 25
     strategy:
@@ -117,7 +188,8 @@ jobs:
 
   test:
     name: Test (${{ matrix.os }})
-    needs: [lint-fmt, lint-clippy, build-tests]
+    needs: [detect-changes, lint-fmt, lint-clippy, build-tests]
+    if: needs.detect-changes.outputs.run-full-ci == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     strategy:
@@ -136,7 +208,8 @@ jobs:
 
   integration:
     name: Integration Tests
-    needs: [lint-fmt, lint-clippy, build-tests]
+    needs: [detect-changes, lint-fmt, lint-clippy, build-tests]
+    if: needs.detect-changes.outputs.run-full-ci == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -151,8 +224,8 @@ jobs:
 
   coverage:
     name: Coverage
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [lint-fmt, lint-clippy]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.detect-changes.outputs.run-full-ci == 'true'
+    needs: [detect-changes, lint-fmt, lint-clippy]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -180,7 +253,8 @@ jobs:
 
   docker-build-and-scan:
     name: Docker Build and Security Scan
-    needs: [lint-fmt, lint-clippy, build-tests]
+    needs: [detect-changes, lint-fmt, lint-clippy, build-tests]
+    if: needs.detect-changes.outputs.run-full-ci == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -224,6 +298,8 @@ jobs:
 
   bundle-check:
     name: Bundle Check (${{ matrix.bundle }})
+    needs: detect-changes
+    if: needs.detect-changes.outputs.run-full-ci == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     strategy:
@@ -249,10 +325,26 @@ jobs:
           RUSTC_WRAPPER: sccache
           SCCACHE_GHA_ENABLED: "true"
 
+  validate-specs:
+    name: Validate Specs
+    needs: detect-changes
+    if: needs.detect-changes.outputs.specs-only == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check spec structure
+        run: |
+          echo "Spec files found:"
+          find .local/specs -name "*.md" -type f | sort
+          echo "Total: $(find .local/specs -name "*.md" -type f | wc -l)"
+          # Verify README index exists
+          test -f .local/specs/README.md || (echo "::error::.local/specs/README.md index is missing" && exit 1)
+
   ci-status:
     name: CI Status
     if: always()
-    needs: [cla, lint-shellcheck, lint-fmt, lint-clippy, build-tests, test, integration, coverage, docker-build-and-scan, bundle-check]
+    needs: [cla, lint-shellcheck, lint-fmt, lint-clippy, build-tests, test, integration, coverage, docker-build-and-scan, bundle-check, validate-specs]
     runs-on: ubuntu-latest
     timeout-minutes: 1
     steps:
@@ -269,6 +361,7 @@ jobs:
             "${{ needs.coverage.result }}"
             "${{ needs.docker-build-and-scan.result }}"
             "${{ needs.bundle-check.result }}"
+            "${{ needs.validate-specs.result }}"
           )
           for r in "${results[@]}"; do
             if [[ "$r" != "success" && "$r" != "skipped" ]]; then
