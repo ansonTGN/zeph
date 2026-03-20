@@ -1136,7 +1136,6 @@ pub(crate) fn build_config(state: &WizardState) -> Config {
     config.memory.compression.pruning_strategy = match state.pruning_strategy.as_str() {
         "task_aware" => PruningStrategy::TaskAware,
         "mig" => PruningStrategy::Mig,
-        "task_aware_mig" => PruningStrategy::TaskAwareMig,
         "subgoal" => PruningStrategy::Subgoal,
         "subgoal_mig" => PruningStrategy::SubgoalMig,
         _ => PruningStrategy::Reactive,
@@ -2902,7 +2901,8 @@ mod tests {
     }
 
     #[test]
-    fn build_config_pruning_strategy_task_aware_mig() {
+    fn build_config_pruning_strategy_task_aware_mig_falls_back_to_reactive() {
+        // task_aware_mig is no longer a valid strategy; build_config treats unknown values as reactive.
         let state = WizardState {
             pruning_strategy: "task_aware_mig".into(),
             vault_backend: "env".into(),
@@ -2911,7 +2911,7 @@ mod tests {
         let config = build_config(&state);
         assert_eq!(
             config.memory.compression.pruning_strategy,
-            PruningStrategy::TaskAwareMig
+            PruningStrategy::Reactive
         );
     }
 

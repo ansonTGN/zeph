@@ -527,7 +527,7 @@ pub enum CompressionStrategy {
 ///
 /// When `context-compression` feature is enabled, this replaces the default oldest-first
 /// heuristic with scored eviction.
-#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum PruningStrategy {
     /// Oldest-first eviction — current default behavior.
@@ -539,9 +539,6 @@ pub enum PruningStrategy {
     /// Coarse-to-fine MIG scoring: relevance − redundancy with temporal partitioning.
     /// Requires `context-compression` feature.
     Mig,
-    /// Combined `TaskAware` goal extraction + MIG scoring.
-    /// Requires `context-compression` feature.
-    TaskAwareMig,
     /// Subgoal-aware pruning: tracks the agent's current subgoal via fire-and-forget LLM
     /// extraction and partitions tool outputs into Active/Completed/Outdated tiers (#2022).
     /// Requires `context-compression` feature.
@@ -559,6 +556,15 @@ impl PruningStrategy {
     }
 }
 
+// Route serde deserialization through FromStr so that removed variants (e.g. task_aware_mig)
+// emit a warning and fall back to Reactive instead of hard-erroring when found in TOML configs.
+impl<'de> serde::Deserialize<'de> for PruningStrategy {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        s.parse().map_err(serde::de::Error::custom)
+    }
+}
+
 impl std::str::FromStr for PruningStrategy {
     type Err = String;
 
@@ -567,12 +573,20 @@ impl std::str::FromStr for PruningStrategy {
             "reactive" => Ok(Self::Reactive),
             "task_aware" | "task-aware" => Ok(Self::TaskAware),
             "mig" => Ok(Self::Mig),
-            "task_aware_mig" | "task-aware-mig" => Ok(Self::TaskAwareMig),
+            // task_aware_mig was removed (dead code — was routed to scored path only).
+            // Fall back to Reactive so existing TOML configs do not hard-error on startup.
+            "task_aware_mig" | "task-aware-mig" => {
+                tracing::warn!(
+                    "pruning strategy `task_aware_mig` has been removed; \
+                     falling back to `reactive`. Use `task_aware` or `mig` instead."
+                );
+                Ok(Self::Reactive)
+            }
             "subgoal" => Ok(Self::Subgoal),
             "subgoal_mig" | "subgoal-mig" => Ok(Self::SubgoalMig),
             other => Err(format!(
                 "unknown pruning strategy `{other}`, expected \
-                 reactive|task_aware|mig|task_aware_mig|subgoal|subgoal_mig"
+                 reactive|task_aware|mig|subgoal|subgoal_mig"
             )),
         }
     }
@@ -748,6 +762,57 @@ impl Default for GraphConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Verify that serde deserialization routes through FromStr so that removed variants
+    // (task_aware_mig) fall back to Reactive instead of hard-erroring when found in TOML.
+    #[test]
+    fn pruning_strategy_toml_task_aware_mig_falls_back_to_reactive() {
+        #[derive(serde::Deserialize)]
+        struct Wrapper {
+            #[allow(dead_code)]
+            pruning_strategy: PruningStrategy,
+        }
+        let toml = r#"pruning_strategy = "task_aware_mig""#;
+        let w: Wrapper = toml::from_str(toml).expect("should deserialize without error");
+        assert_eq!(
+            w.pruning_strategy,
+            PruningStrategy::Reactive,
+            "task_aware_mig must fall back to Reactive"
+        );
+    }
+
+    #[test]
+    fn pruning_strategy_toml_round_trip() {
+        #[derive(serde::Deserialize)]
+        struct Wrapper {
+            #[allow(dead_code)]
+            pruning_strategy: PruningStrategy,
+        }
+        for (input, expected) in [
+            ("reactive", PruningStrategy::Reactive),
+            ("task_aware", PruningStrategy::TaskAware),
+            ("mig", PruningStrategy::Mig),
+        ] {
+            let toml = format!(r#"pruning_strategy = "{input}""#);
+            let w: Wrapper = toml::from_str(&toml)
+                .unwrap_or_else(|e| panic!("failed to deserialize `{input}`: {e}"));
+            assert_eq!(w.pruning_strategy, expected, "mismatch for `{input}`");
+        }
+    }
+
+    #[test]
+    fn pruning_strategy_toml_unknown_value_errors() {
+        #[derive(serde::Deserialize)]
+        #[allow(dead_code)]
+        struct Wrapper {
+            pruning_strategy: PruningStrategy,
+        }
+        let toml = r#"pruning_strategy = "nonexistent_strategy""#;
+        assert!(
+            toml::from_str::<Wrapper>(toml).is_err(),
+            "unknown strategy must produce an error"
+        );
+    }
 
     fn deserialize_importance_weight(toml_val: &str) -> Result<SemanticConfig, toml::de::Error> {
         let input = format!("importance_weight = {toml_val}");
