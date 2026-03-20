@@ -106,18 +106,21 @@ impl<C: Channel> Agent<C> {
             "native tool_use: collected tool definitions"
         );
 
-        if let Some(cached) = self.check_response_cache().await? {
-            self.persist_message(Role::Assistant, &cached, &[], false)
-                .await;
-            self.msg
-                .messages
-                .push(Message::from_legacy(Role::Assistant, cached.as_str()));
-            if cached.contains(MAX_TOKENS_TRUNCATION_MARKER) {
-                let _ = self.channel.send_stop_hint(StopHint::MaxTokens).await;
+        let query_embedding = match self.check_response_cache().await? {
+            super::CacheCheckResult::Hit(cached) => {
+                self.persist_message(Role::Assistant, &cached, &[], false)
+                    .await;
+                self.msg
+                    .messages
+                    .push(Message::from_legacy(Role::Assistant, cached.as_str()));
+                if cached.contains(MAX_TOKENS_TRUNCATION_MARKER) {
+                    let _ = self.channel.send_stop_hint(StopHint::MaxTokens).await;
+                }
+                self.channel.flush_chunks().await?;
+                return Ok(());
             }
-            self.channel.flush_chunks().await?;
-            return Ok(());
-        }
+            super::CacheCheckResult::Miss { query_embedding } => query_embedding,
+        };
 
         for iteration in 0..self.tool_orchestrator.max_iterations {
             if *self.lifecycle.shutdown.borrow() {
@@ -136,7 +139,7 @@ impl<C: Channel> Agent<C> {
             };
             // None = continue loop, Some(()) = return Ok, Err = propagate
             if self
-                .process_single_native_turn(defs_for_turn, iteration)
+                .process_single_native_turn(defs_for_turn, iteration, query_embedding.clone())
                 .await?
                 .is_some()
             {
@@ -159,6 +162,7 @@ impl<C: Channel> Agent<C> {
         &mut self,
         tool_defs: &[ToolDefinition],
         iteration: usize,
+        query_embedding: Option<Vec<f32>>,
     ) -> Result<Option<()>, super::super::error::AgentError> {
         self.channel.send_typing().await?;
 
@@ -215,7 +219,8 @@ impl<C: Channel> Agent<C> {
                 let display = self.maybe_redact(&cleaned);
                 self.channel.send(&display).await?;
             }
-            self.store_response_in_cache(&cleaned).await;
+            self.store_response_in_cache(&cleaned, query_embedding)
+                .await;
             self.persist_message(Role::Assistant, &cleaned, &[], false)
                 .await;
             self.msg

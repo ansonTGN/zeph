@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- feat(memory): semantic response caching (#1521) — extend `ResponseCache` with embedding-based similarity lookup alongside exact-match caching; add `get_semantic()`, `put_with_embedding()`, `invalidate_embeddings_for_model()`, and `cleanup()` methods; single embed() call per cache miss via `CacheCheckResult` enum; configurable similarity threshold and max candidates; tool-call responses excluded from semantic store; stale embeddings NULLed on model change (exact-match entries preserved); new config fields: `llm.semantic_cache_enabled`, `llm.semantic_cache_threshold`, `llm.semantic_cache_max_candidates`; env overrides `ZEPH_LLM_SEMANTIC_CACHE_{ENABLED,THRESHOLD,MAX_CANDIDATES}`; DB migration 037
 - feat(memory): add `AnchoredSummary` struct with structured 5-section schema (session_intent, files_modified, decisions_made, open_questions, next_steps) for context compaction; replaces free-form prose when `[memory] structured_summaries = true` (issue #1607)
 - feat(core): structured summarization path in context compaction — applies `chat_typed_erased::<AnchoredSummary>()` for both single-pass and chunked consolidation; falls back to prose on any LLM or validation failure (issue #1607)
 - feat(core): `DebugDumper::dump_anchored_summary()` writes `{N}_anchored-summary.json` with section completeness metrics, total_items, token_estimate, and fallback flag when `--debug-dump` is active (issue #1607)
