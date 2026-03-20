@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Documentation
+
+- Add compaction probe documentation to context engineering guide (#2050)
+
 ### Changed
 
 - docs: document `semantic_cache_max_candidates` and `semantic_cache_threshold` recall-vs-performance tradeoff with detailed doc comments and tuning guidance; add DEBUG-level diagnostic logs for semantic cache lookup lifecycle (candidate count, per-candidate scores, hit/miss verdicts) (#2031)
