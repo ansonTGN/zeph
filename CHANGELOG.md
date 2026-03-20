@@ -38,6 +38,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- test(memory): add corrupted BLOB deserialization tests in semantic cache (#2033) — verify graceful degradation when bytemuck::try_cast_slice fails; 4 tests cover odd-length BLOBs (SizeMismatch), even-but-not-aligned BLOBs (REC-1), empty BLOBs, and mixed corrupt+valid rows; no panics, proper error handling, IEEE 754 NaN safety documented
 - fix(ml): rubato 1.0.1 API upgrade and StreamChunk wrapping for candle provider (#1858) — updated `candle_whisper.rs` resample function for rubato 1.0.1 (SincFixedIn removed, replaced with Async::new_sinc); wrapped ChatStream output in StreamChunk::Content pattern in candle_provider; added audioadapter-buffers dependency (gated on candle feature)
 
 ### Performance
