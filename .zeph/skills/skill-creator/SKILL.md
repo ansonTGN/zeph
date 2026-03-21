@@ -1,7 +1,14 @@
 ---
 name: skill-creator
-description: Create new Agent Skills following the agentskills.io specification. Use when the user asks to create, write, build, or generate a new skill, or asks how to make a SKILL.md file.
+description: >
+  Create new Agent Skills following the agentskills.io specification.
+  Use when the user asks to create, write, build, or generate a new skill,
+  or asks how to make a SKILL.md file, structure a skill directory, or write skill frontmatter.
+  Keywords: create, new, skill, generate, write, build, template, SKILL.md.
 compatibility: Requires write access to skills directory
+metadata:
+  author: zeph
+  version: "1.0"
 ---
 # Skill Creator
 
@@ -61,6 +68,9 @@ Use this template:
 name: <skill-name>
 description: <what it does and when to use it>
 compatibility: <only if environment requirements exist>
+metadata:
+  author: zeph
+  version: "1.0"
 ---
 # <Skill Title>
 
@@ -81,7 +91,7 @@ compatibility: <only if environment requirements exist>
 |-------|-------------|
 | `license` | Skill has specific licensing terms |
 | `compatibility` | Skill requires specific binaries, network, or environment |
-| `metadata` | Extra key-value pairs (author, version) |
+| `metadata` | Extra key-value pairs (author, version, tags) |
 | `allowed-tools` | Pre-approve specific tools (experimental) |
 
 ## Step 6: Validate the skill

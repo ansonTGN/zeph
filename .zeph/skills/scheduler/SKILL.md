@@ -2,16 +2,12 @@
 name: scheduler
 description: >
   Create, cancel, and manage periodic (cron) and one-shot (deferred) background tasks.
-  Use when the user wants to schedule recurring work (daily summaries, cleanups)
-  or run something at a specific time in the future.
-triggers:
-  - "every day at"
-  - "schedule"
-  - "remind me"
-  - "at 3am"
-  - "in 2 hours"
-  - "recurring"
-  - "cancel task"
+  Use when the user wants to schedule recurring work (daily summaries, cleanups),
+  run something at a specific time, set reminders, or manage existing scheduled tasks.
+  Keywords: schedule, cron, timer, remind, recurring, periodic, deferred, at, every, cancel.
+metadata:
+  author: zeph
+  version: "1.0"
 ---
 
 # Scheduler
@@ -55,12 +51,44 @@ tasks at a specific future time, and `cancel_task` to remove a scheduled task.
 {"name": "daily-cleanup"}
 ```
 
-## Cron format
+## Cron Expression Reference
 
 Both standard 5-field (`min hour day month weekday`) and 6-field (`sec min hour day month weekday`)
 expressions are accepted. When 5 fields are given, seconds default to 0.
 
-Built-in kinds: `memory_cleanup`, `skill_refresh`, `health_check`, `update_check`, `custom`.
+### Field ranges
+
+| Field | Position (6-field) | Allowed Values | Special Characters |
+|-------|-------------------|----------------|-------------------|
+| Seconds | 1 | 0-59 | `*` `,` `-` `/` |
+| Minutes | 2 | 0-59 | `*` `,` `-` `/` |
+| Hours | 3 | 0-23 | `*` `,` `-` `/` |
+| Day of Month | 4 | 1-31 | `*` `,` `-` `/` |
+| Month | 5 | 1-12 or JAN-DEC | `*` `,` `-` `/` |
+| Day of Week | 6 | 0-7 or SUN-SAT | `*` `,` `-` `/` |
+
+### Common cron examples
+
+| Expression (6-field) | Meaning |
+|---------------------|---------|
+| `0 0 * * * *` | Every hour at :00 |
+| `0 */15 * * * *` | Every 15 minutes |
+| `0 0 3 * * *` | Daily at 03:00 |
+| `0 30 9 * * MON-FRI` | Weekdays at 09:30 |
+| `0 0 2 * * SUN` | Every Sunday at 02:00 |
+| `0 0 0 1 * *` | First day of every month at midnight |
+| `0 0 8,12,18 * * *` | At 08:00, 12:00, and 18:00 daily |
+
+### Special characters
+
+- `*` — all values in the field
+- `,` — list separator (e.g. `MON,WED,FRI`)
+- `-` — range (e.g. `9-17` for hours 9 through 17)
+- `/` — step (e.g. `*/15` for every 15 units, `0/30` for 0 and 30)
+
+## Built-in Kinds
+
+`memory_cleanup`, `skill_refresh`, `health_check`, `update_check`, `custom`.
 
 For `custom` kind, the `task` field controls what happens at execution time.
 At the scheduled moment it is injected as `Execute the following scheduled task now: <task>` into the agent turn.
@@ -85,7 +113,7 @@ At the scheduled moment it is injected as `Execute the following scheduled task 
 **Rule:** if the user says "remind me to X", use pattern 1 (`Remind the user to X`).
 If the user says "do X at time", use pattern 2 (`X`).
 
-## run_at formats
+## run_at Formats
 
 `run_at` accepts any of the following (must resolve to a future time):
 
@@ -96,7 +124,7 @@ If the user says "do X at time", use pattern 2 (`X`).
 | Relative shorthand | `+2m`, `+1h`, `+30s`, `+1d`, `+1h30m` |
 | Natural language | `in 5 minutes`, `in 2 hours`, `today 14:00`, `tomorrow 09:30` |
 
-## Validation rules
+## Validation Rules
 
 - `run_at` must resolve to a future time.
 - `cron` must be a valid 5 or 6-field cron expression.

@@ -29,17 +29,30 @@ Zeph supports two skill matching backends:
 
 | Skill | Description |
 |-------|-------------|
-| `api-request` | HTTP API requests using curl — GET, POST, PUT, DELETE with headers and JSON |
-| `docker` | Docker container operations — build, run, ps, logs, compose |
-| `file-ops` | File system operations — list, search, read, and analyze files |
-| `git` | Git version control — status, log, diff, commit, branch management |
-| `mcp-generate` | Generate MCP-to-skill bridges for external tool servers |
-| `setup-guide` | Configuration reference — LLM providers, memory, tools, and operating modes |
+| `api-request` | HTTP API requests using curl — GET, POST, PUT, PATCH, DELETE with headers, auth, and JSON |
+| `archive` | Create, extract, list, and convert compressed archives (tar, zip, gzip, 7z, zstd) |
+| `code-analysis` | LSP-based code analysis via mcpls — hover, definitions, references, diagnostics |
+| `cron` | Schedule recurring and one-time tasks using cron, crontab, at, and launchd |
+| `database` | Query and manage SQLite, PostgreSQL, and MySQL databases from the CLI |
+| `docker` | Docker container and image management — build, run, compose, volumes, networks |
+| `file-ops` | File system operations — list, search, read, compare, and analyze files |
+| `git` | Git version control — status, log, diff, commit, branch, merge, rebase, stash |
+| `github` | GitHub CLI (gh) — issues, pull requests, releases, workflows, search, API |
+| `json-yaml` | Parse, query, transform, validate, and convert JSON and YAML data with jq/fy |
+| `network` | Network diagnostics — ping, traceroute, DNS lookup, port scanning, SSL inspection |
+| `process-management` | Monitor, manage, and control system processes — ps, kill, jobs, systemctl |
+| `qdrant` | Manage Qdrant vector database — collections, points, search, filters, snapshots |
+| `regex` | Write, test, and debug regular expressions across programming languages |
+| `rust-agent-handoff` | Handoff protocol for Rust multi-agent development system |
+| `scheduler` | Create, cancel, and manage periodic (cron) and deferred background tasks |
+| `setup-guide` | Zeph configuration reference — LLM providers, memory, tools, and features |
 | `skill-audit` | Spec compliance and security review of installed skills |
 | `skill-creator` | Create new skills following the agentskills.io specification |
-| `system-info` | System diagnostics — OS, disk, memory, processes, uptime |
+| `ssh-remote` | SSH connections, key management, tunneling, and file transfer (scp/rsync) |
+| `system-info` | System diagnostics — OS, CPU, memory, disk, network, processes, uptime |
+| `text-processing` | Transform, filter, sort, and analyze text with sed, awk, sort, uniq, cut, tr |
 | `web-scrape` | Extract structured data from web pages using CSS selectors |
-| `web-search` | Search the internet for current information |
+| `web-search` | Search the internet for current information via DuckDuckGo API |
 
 ## Creating Custom Skills
 

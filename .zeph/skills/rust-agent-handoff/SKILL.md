@@ -1,6 +1,14 @@
 ---
 name: rust-agent-handoff
-description: Handoff protocol for Rust multi-agent development system. Use when working as rust-architect, rust-developer, rust-testing-engineer, rust-performance-engineer, rust-security-maintenance, rust-code-reviewer, rust-cicd-devops, rust-debugger, or rust-critic. ALWAYS read on agent startup.
+description: >
+  Handoff protocol for Rust multi-agent development system with structured YAML communication.
+  Use when working as rust-architect, rust-developer, rust-testing-engineer,
+  rust-performance-engineer, rust-security-maintenance, rust-code-reviewer,
+  rust-cicd-devops, rust-debugger, or rust-critic. ALWAYS read on agent startup.
+  Keywords: handoff, agent, subagent, workflow, orchestration, yaml, protocol, team.
+metadata:
+  author: zeph
+  version: "1.0"
 ---
 
 # Rust Agent Handoff Protocol
@@ -111,7 +119,7 @@ Start fresh — this is a new task.
 # Ensure TS variable is set (get new timestamp if empty)
 if [ -z "$TS" ]; then
   TS=$(date +%Y-%m-%dT%H-%M-%S)
-  echo "⚠️  TS was empty, generated new timestamp: $TS"
+  echo "TS was empty, generated new timestamp: $TS"
 fi
 
 # Construct handoff id (used BOTH as id field AND filename prefix)
@@ -219,20 +227,20 @@ Each agent has a specific output schema. Read the references file for your agent
 ```
 Parent Agent
     │
-    ├─► Task(rust-architect): "Design user system"
-    │   └─► returns: handoff A
+    ├── Task(rust-architect): "Design user system"
+    │   └── returns: handoff A
     │
-    ├─► Task(rust-developer): "Implement. Handoff: A"
-    │   └─► returns: handoff B
+    ├── Task(rust-developer): "Implement. Handoff: A"
+    │   └── returns: handoff B
     │
-    ├─► Task(rust-testing-engineer): "Add tests. Handoff: B"
-    │   └─► returns: handoff C
+    ├── Task(rust-testing-engineer): "Add tests. Handoff: B"
+    │   └── returns: handoff C
     │
-    ├─► Task(rust-code-reviewer): "Review. Handoff: C"
-    │   └─► returns: handoff D (approved)
+    ├── Task(rust-code-reviewer): "Review. Handoff: C"
+    │   └── returns: handoff D (approved)
     │
-    └─► Task(rust-cicd-devops): "Setup CI. Handoff: D"
-        └─► returns: handoff E (done)
+    └── Task(rust-cicd-devops): "Setup CI. Handoff: D"
+        └── returns: handoff E (done)
 ```
 
 ### Bug Fix Flow
@@ -240,17 +248,17 @@ Parent Agent
 ```
 Parent Agent
     │
-    ├─► Task(rust-debugger): "Investigate crash"
-    │   └─► returns: handoff with root cause
+    ├── Task(rust-debugger): "Investigate crash"
+    │   └── returns: handoff with root cause
     │
-    ├─► Task(rust-developer): "Fix bug. Handoff: ..."
-    │   └─► returns: handoff with fix
+    ├── Task(rust-developer): "Fix bug. Handoff: ..."
+    │   └── returns: handoff with fix
     │
-    ├─► Task(rust-testing-engineer): "Add regression test. Handoff: ..."
-    │   └─► returns: handoff with tests
+    ├── Task(rust-testing-engineer): "Add regression test. Handoff: ..."
+    │   └── returns: handoff with tests
     │
-    └─► Task(rust-code-reviewer): "Review fix. Handoff: ..."
-        └─► returns: approved
+    └── Task(rust-code-reviewer): "Review fix. Handoff: ..."
+        └── returns: approved
 ```
 
 ### Review Iteration
@@ -258,14 +266,14 @@ Parent Agent
 ```
 Parent Agent
     │
-    ├─► Task(rust-code-reviewer): "Review PR"
-    │   └─► returns: changes_requested, issues list
+    ├── Task(rust-code-reviewer): "Review PR"
+    │   └── returns: changes_requested, issues list
     │
-    ├─► Task(rust-developer): "Fix review issues. Handoff: ..."
-    │   └─► returns: fixes applied
+    ├── Task(rust-developer): "Fix review issues. Handoff: ..."
+    │   └── returns: fixes applied
     │
-    └─► Task(rust-code-reviewer): "Re-review. Handoff: ..."
-        └─► returns: approved
+    └── Task(rust-code-reviewer): "Re-review. Handoff: ..."
+        └── returns: approved
 ```
 
 ### Parallel Work Merge
@@ -273,17 +281,17 @@ Parent Agent
 ```
 Parent Agent
     │
-    ├─► Task(rust-architect): "Design API"
-    │   └─► returns: handoff A
+    ├── Task(rust-architect): "Design API"
+    │   └── returns: handoff A
     │
-    ├─► [Parallel] Task(rust-developer): "Implement API. Handoff: A"
+    ├── [Parallel] Task(rust-developer): "Implement API. Handoff: A"
     │   │         Task(rust-testing-engineer): "Design test strategy. Handoff: A"
     │   │
-    │   └─► returns: handoff B (implementation)
+    │   └── returns: handoff B (implementation)
     │       returns: handoff C (test strategy)
     │
-    └─► Task(rust-testing-engineer): "Implement tests. Handoff: [B, C]"
-        └─► parent: [handoff-B-id, handoff-C-id]
+    └── Task(rust-testing-engineer): "Implement tests. Handoff: [B, C]"
+        └── parent: [handoff-B-id, handoff-C-id]
 ```
 
 ## Response Format (Return to Parent)
@@ -325,12 +333,12 @@ Parent agent parses this to decide next step.
 1. **Always write handoff file** before finishing, even if blocked
 2. **Always return handoff path** in your response to parent
 3. **Include acceptance criteria** for recommended next agent
-4. **references file paths** created/modified
+4. **Reference file paths** created/modified
 5. **Keep summaries concise** — details in specific fields
 6. **Read provided handoff(s)** first thing on startup
-7. **Read parent chain** to understand full context (see example below)
+7. **Read parent chain** to understand full context
 8. **Don't assume next agent** — parent decides orchestration
-9. **Multiple parents** — Use array when merging contexts from parallel work or multiple sources
+9. **Multiple parents** — Use array when merging contexts from parallel work
 10. **When reading multiple handoffs** — Synthesize information, note conflicts in your output
 
 ### Reading Parent Chain Example

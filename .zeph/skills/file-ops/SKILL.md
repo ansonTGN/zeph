@@ -1,10 +1,20 @@
 ---
 name: file-ops
-description: File system operations — list directory contents, find files by name or glob pattern, search text inside files, read file contents, analyze file size and type, count lines, compare files with diff.
+description: >-
+  File system operations — list directory contents, find files by name or glob
+  pattern, search text inside files with grep or ripgrep, read and display file
+  contents, analyze file size and type, count lines, compare files with diff,
+  check permissions, and compute checksums. Use when the user asks to locate
+  files, search code, inspect directory trees, diff files, or examine file
+  metadata on Linux, macOS, or Windows.
+metadata:
+  author: zeph
+  version: "1.0"
 ---
 # File Operations
 
-Before running any file system command, detect the user's OS and use the matching reference:
+Before running any file system command, detect the user's OS and load the
+matching reference for platform-specific syntax:
 
 - **Linux** — `references/linux.md` (GNU coreutils, grep, find, ripgrep, fd)
 - **macOS** — `references/macos.md` (BSD find/stat/sed, Spotlight, Homebrew tools)
@@ -71,9 +81,9 @@ Globs are shell-level filename matching patterns. They do NOT use regex syntax.
 ### Brace expansion (bash/zsh only, not POSIX)
 
 `{a,b,c}` expands to multiple alternatives before glob matching:
-- `*.{rs,toml}` → `*.rs *.toml`
-- `{src,tests}/**/*.rs` → `src/**/*.rs tests/**/*.rs`
-- `file.{bak,orig,tmp}` → `file.bak file.orig file.tmp`
+- `*.{rs,toml}` expands to `*.rs *.toml`
+- `{src,tests}/**/*.rs` expands to `src/**/*.rs tests/**/*.rs`
+- `file.{bak,orig,tmp}` expands to `file.bak file.orig file.tmp`
 
 ## Regex patterns for content search
 
@@ -132,10 +142,10 @@ Regex is used for searching _inside_ file contents (grep, ripgrep, Select-String
 ### Escaping special characters
 
 To search for literal `.`, `*`, `+`, `?`, `(`, `)`, `[`, `]`, `{`, `}`, `|`, `^`, `$`, `\` — prefix with backslash:
-- Find `fn()` literally → `fn\(\)`
-- Find `[TODO]` literally → `\[TODO\]`
-- Find `*.rs` literally → `\*\.rs`
-- Find `$HOME` literally → `\$HOME`
+- Find `fn()` literally: `fn\(\)`
+- Find `[TODO]` literally: `\[TODO\]`
+- Find `*.rs` literally: `\*\.rs`
+- Find `$HOME` literally: `\$HOME`
 
 ## Directories to exclude
 
@@ -153,6 +163,35 @@ Common directories that should be excluded from search to avoid noise and improv
 | `vendor/` | Vendored dependencies (Go, PHP, Ruby) |
 | `.idea/`, `.vscode/` | IDE configuration |
 | `coverage/`, `.nyc_output/` | Test coverage reports |
+
+## Workflow
+
+1. Detect the OS (see command above).
+2. Load the matching reference file for platform-specific command syntax.
+3. Identify the operation the user needs (find, search, read, compare, etc.).
+4. Prefer read-only commands. Never modify or delete files unless explicitly asked.
+5. Exclude noisy directories (see table above) from search and find commands.
+6. When results may be large, limit output with `head`, `--max-count`, or depth flags.
+7. Present results concisely: file paths, line numbers, matched content. Summarize counts when listing many files.
+
+## Common workflows
+
+### Find and search combined
+When the user says "find all files containing X", combine file finding with content search:
+1. Use content search tools (ripgrep, grep) which already walk the file tree.
+2. Add file type filters (`-t rust`, `--include '*.py'`) to narrow scope.
+3. Exclude build directories.
+
+### Investigate a codebase
+1. Start with a directory listing to understand project structure.
+2. Look for manifest files (`Cargo.toml`, `package.json`, `pyproject.toml`) to identify the tech stack.
+3. Search for the specific symbol, function, or pattern the user is asking about.
+4. Read the relevant files to provide context around matches.
+
+### Compare files or versions
+1. Determine whether the user wants a side-by-side or unified diff.
+2. Use `diff -u` (Unix) or `Compare-Object` (PowerShell) from the OS reference.
+3. Highlight the key differences in your summary.
 
 ## Available operations
 

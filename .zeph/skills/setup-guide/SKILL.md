@@ -1,6 +1,13 @@
 ---
 name: setup-guide
-description: Zeph configuration reference. Use when the user asks about setup, configuration, environment variables, TOML settings, or how to enable specific features like Telegram, Qdrant, or A2A.
+description: >
+  Zeph configuration reference for LLM providers, memory, tools, channels, and features.
+  Use when the user asks about setup, configuration, environment variables, TOML settings,
+  or how to enable specific features like Telegram, Qdrant, A2A, MCP, Candle, or orchestrator.
+  Keywords: config, setup, install, configure, toml, environment, provider, feature, enable.
+metadata:
+  author: zeph
+  version: "1.0"
 ---
 # Setup Guide
 
@@ -162,7 +169,7 @@ timeout = 30
 GITHUB_PERSONAL_ACCESS_TOKEN = "${GITHUB_PERSONAL_ACCESS_TOKEN}"
 ```
 
-MCP tools are discovered at startup, embedded into Qdrant (`zeph_mcp_tools` collection), and matched per query alongside skills. Tool invocations use ` ```mcp ` fenced blocks with JSON payloads.
+MCP tools are discovered at startup, embedded into Qdrant (`zeph_mcp_tools` collection), and matched per query alongside skills. Tool invocations use `mcp` fenced blocks with JSON payloads.
 
 ## Candle Local Inference
 

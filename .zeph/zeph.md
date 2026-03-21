@@ -5,35 +5,54 @@
 Zeph — Rust AI agent with hybrid inference (Ollama / Claude / OpenAI / HuggingFace via candle),
 skills-first architecture, semantic + graph memory with Qdrant/SQLite, MCP client, A2A/ACP protocol
 support, multi-model orchestration with Thompson Sampling, self-learning skill evolution, TUI
-dashboard, untrusted content isolation, and multi-channel I/O (CLI + Telegram + TUI).
+dashboard, untrusted content isolation, guardrails, policy enforcement, context compression,
+and multi-channel I/O (CLI + Telegram + TUI + Discord + Slack).
 
-Current version: **v0.15.0**. MSRV: **1.88** (Edition 2024, resolver 3).
+Current version: **v0.16.1**. MSRV: **1.88** (Edition 2024, resolver 3).
 
 ## Architecture
 
-Cargo workspace with 14 crates:
+Cargo workspace with 21 crates:
 
 ```
 zeph (binary) — bootstrap, AnyChannel dispatch, vault resolution
-├── zeph-core       — agent loop, config, channel trait, context builder, metrics, vault, redact
-├── zeph-llm        — LlmProvider trait, Ollama + Claude + OpenAI + Candle backends, orchestrator
-├── zeph-skills     — SKILL.md parser, registry, embedding matcher, hot-reload, self-learning
-├── zeph-memory     — SQLite + Qdrant, SemanticMemory orchestrator, graph memory, summarization
-├── zeph-channels   — Telegram adapter (teloxide) with streaming, CLI channel
-├── zeph-tools      — ToolExecutor trait, ShellExecutor, WebScrapeExecutor, CompositeExecutor, audit
-├── zeph-tui        — ratatui-based TUI dashboard with real-time metrics (feature-gated)
-├── zeph-mcp        — MCP client via rmcp, multi-server lifecycle, Qdrant tool registry
-├── zeph-a2a        — A2A protocol client + server, agent discovery, JSON-RPC 2.0
-├── zeph-acp        — Agent Client Protocol: stdio/HTTP+SSE/WebSocket, IDE integration (Zed, VS Code, Helix)
-├── zeph-index      — AST-based code indexing, semantic retrieval, repo map generation
-├── zeph-gateway    — HTTP gateway for webhook ingestion with bearer auth
-└── zeph-scheduler  — cron-based periodic task scheduler with SQLite persistence
+├── zeph-core          — agent loop, config, channel trait, context builder, metrics, redact
+├── zeph-common        — shared types and utilities across crates
+├── zeph-config        — configuration loading, validation, migration
+├── zeph-llm           — LlmProvider trait, Ollama + Claude + OpenAI + Candle + STT backends, orchestrator
+├── zeph-skills        — SKILL.md parser, registry, embedding matcher, hot-reload, self-learning
+├── zeph-memory        — SQLite + Qdrant, SemanticMemory orchestrator, graph memory, summarization
+├── zeph-channels      — Telegram (teloxide), CLI, Discord, Slack channel adapters
+├── zeph-tools         — ToolExecutor trait, ShellExecutor, WebScrapeExecutor, CompositeExecutor, audit
+├── zeph-tui           — ratatui-based TUI dashboard with real-time metrics (feature-gated)
+├── zeph-mcp           — MCP client via rmcp, multi-server lifecycle, Qdrant tool registry
+├── zeph-a2a           — A2A protocol client + server, agent discovery, JSON-RPC 2.0
+├── zeph-acp           — Agent Client Protocol: stdio/HTTP+SSE/WebSocket, IDE integration
+├── zeph-orchestration — DAG task graphs, DagScheduler, LlmPlanner, LlmAggregator, AgentRouter
+├── zeph-sanitizer     — ContentSanitizer pipeline, ExfiltrationGuard, QuarantinedSummarizer
+├── zeph-subagent      — sub-agent lifecycle, scoped tools/skills, transcripts, memory isolation
+├── zeph-vault         — secret storage backends (age, env), zeroization, ZEPH_SECRET_* resolution
+├── zeph-index         — AST-based code indexing, semantic retrieval, repo map generation
+├── zeph-gateway       — HTTP gateway for webhook ingestion with bearer auth
+├── zeph-scheduler     — cron-based periodic task scheduler with SQLite persistence
+└── zeph-experiments   — experimental features behind feature flags
 ```
 
-`zeph-core` orchestrates all leaf crates. Optional (feature-gated): `zeph-a2a`, `zeph-mcp`,
-`zeph-tui`, `zeph-index`, `zeph-gateway`, `zeph-scheduler`, `zeph-acp`. Always-on: `openai`,
-`compatible`, `orchestrator`, `router`, `self-learning`, `qdrant`, `vault-age`, `mcp`.
-Check `[features]` in root `Cargo.toml` for the full feature set.
+`zeph-core` orchestrates all leaf crates. Feature bundles group related flags:
+
+| Bundle | Flags | Use case |
+|--------|-------|----------|
+| `desktop` | tui, scheduler, compression-guidelines, context-compression | Local interactive use |
+| `ide` | acp, acp-http, lsp-context | IDE integration (Zed, VS Code, Helix) |
+| `server` | gateway, a2a, scheduler, otel | Headless / production deployment |
+| `chat` | discord, slack | Chat platform channels |
+| `ml` | candle, pdf, stt | On-device ML inference |
+| `full` | all of the above + experiments, guardrail, policy-enforcer | Development and testing |
+
+Individual flags: `candle`, `metal`, `cuda`, `tui`, `discord`, `slack`, `guardrail`,
+`gateway`, `scheduler`, `otel`, `pdf`, `stt`, `experiments`, `lsp-context`,
+`acp`, `acp-http`, `acp-unstable`, `policy-enforcer`, `context-compression`,
+`compression-guidelines`. Check `[features]` in root `Cargo.toml` for the full set.
 
 ## Key Subsystems
 
@@ -41,22 +60,27 @@ Check `[features]` in root `Cargo.toml` for the full feature set.
   output goal decomposition), `LlmAggregator` (per-task token budget), `AgentRouter` (rule-based
   3-step fallback + inline execution for single-agent setups). `/plan` CLI commands.
 - **Graph memory**: SQLite schema (entities/edges/communities), LLM-powered fire-and-forget
-  extraction, `EntityResolver` (embedding-based + LLM disambiguation), BFS traversal, FTS5 search,
-  label propagation community detection, edge deduplication. Feature flag: `graph-memory`.
+  extraction, `EntityResolver` (embedding-based + LLM disambiguation), SYNAPSE spreading
+  activation retrieval (hop-by-hop decay, lambda=0.85, edge-type filtering, lateral inhibition),
+  BFS traversal, FTS5 search, label propagation community detection, edge deduplication.
+  Feature flag: `graph-memory`.
 - **Untrusted content isolation**: `ContentSanitizer` pipeline (17 injection patterns), source
   boundaries, `QuarantinedSummarizer` (Dual LLM), `ExfiltrationGuard` (image pixel-tracking,
   tool URL validation, memory write suppression). TUI security panel + SEC status bar.
+- **Guardrails**: PII filter (SSN/CC/phone/email redaction), tool rate limiter with circuit
+  breaker, policy enforcer for tool execution governance. Feature flags: `guardrail`,
+  `policy-enforcer`.
 - **ACP**: stdio/HTTP+SSE/WebSocket transports, multi-session with LRU eviction, LSP diagnostics
   injection, model switching, tool call lifecycle, session fork/resume, MCP passthrough.
-  Works in Zed, Helix, VS Code. Feature flag: `acp`.
+  Works in Zed, Helix, VS Code. Feature flags: `acp`, `acp-http`, `lsp-context`.
 - **Self-learning**: `FeedbackDetector` (regex + Jaccard + self-correction signal), Wilson score
   re-ranking, BM25+RRF hybrid search, provider EMA routing, 4-tier trust model, Bayesian re-ranking.
   Positive feedback skips skill rewrite. Always-on via `self-learning` feature.
 - **Thompson Sampling router**: Beta-distribution exploration/exploitation for model selection,
   EMA latency routing.
 - **Context engineering**: deferred tool-pair summaries (pre-computed eagerly, applied lazily at
-  70% context), pruning at 80%, LLM compaction on overflow. `--debug-dump [PATH]` writes numbered
-  LLM request/response/tool-output files.
+  70% context), pruning at 80%, LLM compaction on overflow, context compression (feature-gated).
+  `--debug-dump [PATH]` writes numbered LLM request/response/tool-output files.
 - **Sub-agents**: scoped tools, skills, zero-trust secret delegation, `permission_mode`,
   persistent memory scopes, JSONL transcript storage, lifecycle hooks.
 
@@ -91,17 +115,34 @@ Always use `--features full` for local checks to match CI exactly.
   skills/        — SKILL.md files loaded at startup (default skills directory)
   data/          — SQLite databases, audit logs, tool output
   debug/         — LLM request/response dump files (--debug-dump)
-  agents/        — sub-agent definition files
+  agents/        — sub-agent definition files (01-rust-architect.md .. 09-rust-critic.md)
   zeph.md        — this file (always loaded into system prompt)
 config/
   default.toml   — config reference with all keys and defaults
+  AGENTS.md      — agent role definitions
 src/             — binary entry point
-crates/          — workspace member crates
-docs/src/        — mdBook documentation
+crates/          — workspace member crates (21 crates)
+book/src/        — mdBook documentation
 ```
 
 Skills are loaded from `.zeph/skills/` by default. The watcher monitors this directory for
 hot-reload (500 ms debounce). Override via `[skills] directory = "path"` in config.
+
+### Bundled Skills (23)
+
+| Category | Skills |
+|----------|--------|
+| CLI tools | `api-request`, `docker`, `git`, `github`, `ssh-remote` |
+| Data processing | `json-yaml`, `database`, `text-processing`, `regex` |
+| System | `system-info`, `network`, `process-management`, `cron`, `archive`, `file-ops` |
+| Web | `web-scrape`, `web-search` |
+| Code | `code-analysis` |
+| Zeph internal | `scheduler`, `setup-guide`, `skill-audit`, `skill-creator`, `rust-agent-handoff` |
+
+Skills follow the [agentskills.io specification](https://agentskills.io/specification).
+OS-dependent skills (`system-info`, `file-ops`, `network`, `text-processing`) use
+`references/linux.md`, `references/macos.md`, `references/windows.md` for platform-specific
+commands. YAML operations use `fy` (fast-yaml) CLI, not `yq`.
 
 ## Specifications (MANDATORY)
 
@@ -160,6 +201,7 @@ External protocol specs and research references are in the `## Sources` section 
 - TLS: `rustls` everywhere — never introduce `openssl-sys`
 - `deny.toml` enforces license allowlist and advisory database
 - Avoid `serde_yaml` / `serde_yml` (RUSTSEC-2025-0068) — use `serde_norway` for YAML
+- YAML tooling: always use `fy` (fast-yaml CLI) for validation, formatting, and conversion
 
 ## Development Rules
 
@@ -168,6 +210,7 @@ When adding new functionality, always provide all applicable integration points:
 2. CLI subcommand or argument for management
 3. TUI command palette entry or `/` input command
 4. Interactive configuration wizard (`--init`) update
+5. Config migration (`--migrate-config`) step for new/renamed parameters
 
 Any background TUI operation **must** show a visible spinner with a short status message
 (e.g., `Searching memory...`, `Executing tool: shell`, `Connecting to MCP server...`).
@@ -209,8 +252,8 @@ responsibility, not an optional extra.
   level), anticipate it and pre-fill rather than asking.
 - Calibrate verbosity: if the user often asks for more concise or more detailed output, adjust
   the default for this session and persist it via `memory_save`.
-- Use graph memory (entity extraction, community detection) to build a richer model of the
-  project's concepts and their relationships — surface this model proactively when relevant.
+- Use graph memory (entity extraction, SYNAPSE spreading activation) to build a richer model of
+  the project's concepts and their relationships — surface this model proactively when relevant.
 
 ### Measure your own quality
 

@@ -1,7 +1,14 @@
 ---
 name: skill-audit
-description: Audit installed skills for specification compliance and security issues. Use when the user asks to review, audit, check, or validate skills, or asks about skill safety and quality.
+description: >
+  Audit installed skills for agentskills.io specification compliance and security issues.
+  Use when the user asks to review, audit, check, validate, or lint skills,
+  or asks about skill safety, quality, and spec conformance.
+  Keywords: audit, review, check, validate, lint, security, compliance, quality.
 compatibility: Requires access to skills directory
+metadata:
+  author: zeph
+  version: "1.0"
 ---
 # Skill Audit
 
