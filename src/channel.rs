@@ -214,7 +214,7 @@ mod tests {
     use super::*;
     use zeph_channels::AnyChannel;
     use zeph_channels::CliChannel;
-    use zeph_core::channel::{Channel, StopHint, ToolOutputEvent, ToolStartEvent};
+    use zeph_core::channel::{Channel, StopHint, ToolStartEvent};
 
     fn make_app_channel() -> AppChannel {
         AppChannel::Standard(AnyChannel::Cli(CliChannel::new()))
@@ -261,6 +261,7 @@ mod tests {
     #[tokio::test]
     #[cfg(not(target_os = "windows"))]
     async fn app_channel_forwards_all_channel_methods() {
+        use zeph_core::channel::ToolOutputEvent;
         let mut ch = make_app_channel();
         // 1. recv — skipped (blocks on stdin)
         // 2. try_recv
