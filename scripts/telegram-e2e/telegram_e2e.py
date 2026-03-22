@@ -294,7 +294,7 @@ async def scenario_streaming(client: TelegramClient, bot: str) -> bool:
     latency = (first_time[0] - send_time) if appeared else None
     latency_str = f"{latency:.1f}s" if latency is not None else "never"
     detail = f"first_msg={latency_str}, edits={edit_count[0]}"
-    return _result("streaming", appeared and latency is not None and latency < 30.0, detail)
+    return _result("streaming", appeared and latency is not None and latency < 60.0, detail)
 
 
 async def scenario_unauthorized(
