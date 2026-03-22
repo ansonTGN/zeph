@@ -97,29 +97,34 @@ jobs:
 
       - name: Write Zeph config
         if: steps.secrets-check.outputs.skip == 'false'
-        env:
-          ZEPH_TELEGRAM_TEST_TOKEN: ${{ secrets.ZEPH_TELEGRAM_TEST_TOKEN }}
         run: |
           mkdir -p .local/config .local/testing/data .local/testing/debug
           cp config/telegram-test.toml .local/config/telegram-test.toml
-          # Patch allowed_users and use env-backend token for CI (no vault available)
+          # Switch vault to env backend (no age vault available in CI)
           sed -i 's|token = { vault = "ZEPH_TELEGRAM_TEST_TOKEN" }|token = { env = "ZEPH_TELEGRAM_TEST_TOKEN" }|' \
-            .local/config/telegram-test.toml
-          sed -i 's|allowed_users = \["your_test_username"\]|allowed_users = ["${{ secrets.TELEGRAM_TEST_ACCOUNT_USERNAME }}"]|' \
             .local/config/telegram-test.toml
           sed -i 's|backend = "age"|backend = "env"|' \
             .local/config/telegram-test.toml
+          # Patch allowed_users with the test account username
+          sed -i 's|allowed_users = \["your_test_username"\]|allowed_users = ["${{ secrets.TELEGRAM_TEST_ACCOUNT_USERNAME }}"]|' \
+            .local/config/telegram-test.toml
+          echo "--- patched config (allowed_users line) ---"
+          grep "allowed_users" .local/config/telegram-test.toml
 
       - name: Start Zeph (background)
         if: steps.secrets-check.outputs.skip == 'false'
         env:
           ZEPH_TELEGRAM_TEST_TOKEN: ${{ secrets.ZEPH_TELEGRAM_TEST_TOKEN }}
+          ZEPH_OPENAI_API_KEY: ${{ secrets.ZEPH_OPENAI_API_KEY }}
           RUST_LOG: ${{ inputs.debug == 'true' && 'debug' || 'info' }}
         run: |
           ./target/debug/zeph --config .local/config/telegram-test.toml --channel telegram \
-            2>.local/testing/debug/telegram-session.log &
-          # Give the bot 8s to connect and start long-polling
-          sleep 8
+            >.local/testing/debug/telegram-session.log 2>&1 &
+          echo "Zeph PID: $!"
+          # Wait for bot to connect and start long-polling
+          sleep 12
+          echo "--- last 20 lines of bot log ---"
+          tail -20 .local/testing/debug/telegram-session.log || true
 
       - name: Run E2E scenarios
         if: steps.secrets-check.outputs.skip == 'false'
@@ -128,15 +133,16 @@ jobs:
           TG_API_HASH: ${{ secrets.TELEGRAM_TEST_API_HASH }}
           TG_BOT_USERNAME: ${{ secrets.TELEGRAM_TEST_BOT_USERNAME }}
           TG_SESSION_PATH: .local/testing/test_session.session
+          PYTHONUNBUFFERED: "1"
         run: |
           EXTRA_FLAGS=""
           if [ "${{ inputs.no_reset }}" = "true" ]; then
             EXTRA_FLAGS="--no-reset"
           fi
-          python3 scripts/telegram-e2e/telegram_e2e.py $EXTRA_FLAGS
+          python3 -u scripts/telegram-e2e/telegram_e2e.py $EXTRA_FLAGS
 
-      - name: Upload debug log on failure
-        if: failure()
+      - name: Upload debug log
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: telegram-session-log
