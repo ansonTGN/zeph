@@ -22,6 +22,9 @@ auto_update_check = false
 
 [llm]
 provider = "openai"
+base_url = "https://api.openai.com/v1"
+model = "gpt-4o-mini"
+embedding_model = "text-embedding-3-small"
 
 [llm.openai]
 base_url = "https://api.openai.com/v1"
