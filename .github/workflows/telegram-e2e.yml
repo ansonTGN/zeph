@@ -54,14 +54,14 @@ jobs:
       - name: Check secrets
         id: secrets-check
         env:
-          TOKEN: ${{ secrets.ZEPH_TELEGRAM_TEST_TOKEN }}
+          TOKEN: ${{ secrets.ZEPH_TELEGRAM_TOKEN }}
           API_ID: ${{ secrets.TELEGRAM_TEST_API_ID }}
           API_HASH: ${{ secrets.TELEGRAM_TEST_API_HASH }}
           SESSION: ${{ secrets.TELEGRAM_TEST_SESSION }}
           BOT_USERNAME: ${{ secrets.TELEGRAM_TEST_BOT_USERNAME }}
         run: |
           missing=()
-          [ -z "$TOKEN" ]       && missing+=(ZEPH_TELEGRAM_TEST_TOKEN)
+          [ -z "$TOKEN" ]       && missing+=(ZEPH_TELEGRAM_TOKEN)
           [ -z "$API_ID" ]      && missing+=(TELEGRAM_TEST_API_ID)
           [ -z "$API_HASH" ]    && missing+=(TELEGRAM_TEST_API_HASH)
           [ -z "$SESSION" ]     && missing+=(TELEGRAM_TEST_SESSION)
@@ -101,7 +101,7 @@ jobs:
           mkdir -p .local/config .local/testing/data .local/testing/debug
           cp config/telegram-test.toml .local/config/telegram-test.toml
           # Switch vault to env backend (no age vault available in CI)
-          sed -i 's|token = { vault = "ZEPH_TELEGRAM_TEST_TOKEN" }|token = { env = "ZEPH_TELEGRAM_TEST_TOKEN" }|' \
+          sed -i 's|token = { vault = "ZEPH_TELEGRAM_TOKEN" }|token = { env = "ZEPH_TELEGRAM_TOKEN" }|' \
             .local/config/telegram-test.toml
           sed -i 's|backend = "age"|backend = "env"|' \
             .local/config/telegram-test.toml
@@ -114,7 +114,7 @@ jobs:
       - name: Start Zeph (background)
         if: steps.secrets-check.outputs.skip == 'false'
         env:
-          ZEPH_TELEGRAM_TEST_TOKEN: ${{ secrets.ZEPH_TELEGRAM_TEST_TOKEN }}
+          ZEPH_TELEGRAM_TOKEN: ${{ secrets.ZEPH_TELEGRAM_TOKEN }}
           ZEPH_OPENAI_API_KEY: ${{ secrets.ZEPH_OPENAI_API_KEY }}
           RUST_LOG: ${{ inputs.debug == 'true' && 'debug' || 'info' }}
         run: |

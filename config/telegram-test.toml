@@ -4,18 +4,16 @@
 #   cp config/telegram-test.toml .local/config/telegram-test.toml
 #
 # Then store the bot token in the vault:
-#   cargo run --features full -- vault set ZEPH_TELEGRAM_TEST_TOKEN '<TOKEN>'
+#   cargo run --features full -- vault set ZEPH_TELEGRAM_TOKEN '<TOKEN>'
 #
 # Run Zeph with this config:
-#   cargo run --features full -- --config .local/config/telegram-test.toml --channel telegram \
+#   cargo run --features full -- --config .local/config/telegram-test.toml \
 #       2>.local/testing/debug/telegram-session.log
 #
 # Notes:
-#   - The bot token is obtained from @BotFather on the Telegram Test DC.
-#     Connect to Test DC in Telegram (test.t.me or via a test-mode client),
-#     find @BotFather, run /newbot. The token is valid only on Test DC.
+#   - The bot token is obtained from @BotFather on the production Telegram.
 #   - allowed_users must contain the Telegram username of the Telethon test account
-#     created with setup_tg_test_account.py.
+#     created with get_session.py.
 
 [agent]
 name = "ZephTest"
@@ -38,8 +36,8 @@ sqlite_path = ".local/testing/data/zeph-telegram-test.db"
 history_limit = 50
 
 [telegram]
-# Token from @BotFather on Telegram Test DC (NOT production BotFather)
-token = { vault = "ZEPH_TELEGRAM_TEST_TOKEN" }
+# Token from @BotFather — stored in vault under ZEPH_TELEGRAM_TOKEN
+token = { vault = "ZEPH_TELEGRAM_TOKEN" }
 # Replace with the Telegram username of your test account (created by setup_tg_test_account.py)
 allowed_users = ["your_test_username"]
 
