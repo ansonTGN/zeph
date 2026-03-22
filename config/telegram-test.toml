@@ -22,6 +22,8 @@ auto_update_check = false
 
 [llm]
 provider = "openai"
+
+[llm.openai]
 base_url = "https://api.openai.com/v1"
 model = "gpt-4o-mini"
 max_tokens = 4096
