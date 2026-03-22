@@ -32,13 +32,10 @@ from typing import Optional
 
 try:
     from telethon import TelegramClient, events
+    from telethon.sessions import StringSession
 except ImportError:
     print("telethon not installed. Run: pip install telethon", file=sys.stderr)
     sys.exit(1)
-
-# Telegram Test DC server (isolated from production)
-TEST_DC_HOST = "149.154.167.40"
-TEST_DC_PORT = 443
 
 # Minimal valid 1×1 white PNG used as a document with no text to trigger
 # the empty-message filter in TelegramChannel (text="" && attachments=[])
@@ -330,25 +327,30 @@ async def scenario_unauthorized(
 # Entry point
 # ---------------------------------------------------------------------------
 
+def _load_session(path: str):
+    """Load a Telethon session from a file.
+
+    Supports both StringSession (plain text string written by get_session.py)
+    and legacy SQLite file sessions.
+    """
+    try:
+        with open(path) as f:
+            content = f.read().strip()
+        if content:
+            return StringSession(content)
+    except (FileNotFoundError, UnicodeDecodeError):
+        pass
+    # Fall back to SQLite file session (strip .session suffix — Telethon appends it)
+    return path.removesuffix(".session")
+
+
 async def _run(args: argparse.Namespace) -> int:
-    session = args.session.removesuffix(".session")
-    client = TelegramClient(
-        session,
-        args.api_id,
-        args.api_hash,
-        server=(TEST_DC_HOST, TEST_DC_PORT),
-    )
+    client = TelegramClient(_load_session(args.session), args.api_id, args.api_hash)
     await client.start()
 
     client2: Optional[TelegramClient] = None
     if args.session2:
-        session2 = args.session2.removesuffix(".session")
-        client2 = TelegramClient(
-            session2,
-            args.api_id,
-            args.api_hash,
-            server=(TEST_DC_HOST, TEST_DC_PORT),
-        )
+        client2 = TelegramClient(_load_session(args.session2), args.api_id, args.api_hash)
         await client2.start()
 
     bot = args.bot_username

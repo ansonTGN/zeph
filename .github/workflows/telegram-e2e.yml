@@ -3,44 +3,102 @@ name: telegram-e2e
 # Runs Telethon-based E2E tests against the Zeph Telegram channel on Test DC.
 # Gated by repository secrets — skipped automatically when secrets are absent.
 # Runs only on push to main (not on PRs) to avoid flakiness from external services.
+#
+# Re-running only failed scenarios: use GitHub's native "Re-run failed jobs"
+# button — the single job structure means the whole suite re-runs atomically,
+# which is correct because Telegram state (conversation history, /reset) is
+# shared across scenarios.
 
 on:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      debug:
+        description: "Enable extra logging (RUST_LOG=debug)"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      no_reset:
+        description: "Skip /reset before running scenarios (preserves prior conversation state)"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+# Prevent concurrent runs against the same bot — Telegram state is shared.
+concurrency:
+  group: telegram-e2e
+  cancel-in-progress: false
 
 jobs:
   telegram-e2e:
     name: Telegram E2E (Test DC)
     runs-on: ubuntu-latest
-    # Skip if the required secrets are not configured in the repository
-    if: >
-      secrets.ZEPH_TELEGRAM_TEST_TOKEN != '' &&
-      secrets.TELEGRAM_TEST_API_ID != '' &&
-      secrets.TELEGRAM_TEST_API_HASH != '' &&
-      secrets.TELEGRAM_TEST_SESSION != '' &&
-      secrets.TELEGRAM_TEST_BOT_USERNAME != ''
+    timeout-minutes: 20
+    # Skip if the required secrets are not configured in the repository.
+    # secrets context is not available in `if:` expressions; use an env-var
+    # sentinel written in a preceding step instead (see "Check secrets" step).
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check secrets
+        id: secrets-check
+        env:
+          TOKEN: ${{ secrets.ZEPH_TELEGRAM_TEST_TOKEN }}
+          API_ID: ${{ secrets.TELEGRAM_TEST_API_ID }}
+          API_HASH: ${{ secrets.TELEGRAM_TEST_API_HASH }}
+          SESSION: ${{ secrets.TELEGRAM_TEST_SESSION }}
+          BOT_USERNAME: ${{ secrets.TELEGRAM_TEST_BOT_USERNAME }}
+        run: |
+          missing=()
+          [ -z "$TOKEN" ]       && missing+=(ZEPH_TELEGRAM_TEST_TOKEN)
+          [ -z "$API_ID" ]      && missing+=(TELEGRAM_TEST_API_ID)
+          [ -z "$API_HASH" ]    && missing+=(TELEGRAM_TEST_API_HASH)
+          [ -z "$SESSION" ]     && missing+=(TELEGRAM_TEST_SESSION)
+          [ -z "$BOT_USERNAME" ] && missing+=(TELEGRAM_TEST_BOT_USERNAME)
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "Skipping: required secrets not configured: ${missing[*]}"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Set up Python
+        if: steps.secrets-check.outputs.skip == 'false'
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
 
       - name: Install Telethon
+        if: steps.secrets-check.outputs.skip == 'false'
         run: pip install -r scripts/telegram-e2e/requirements.txt
 
       - name: Restore Telethon session
-        # TELEGRAM_TEST_SESSION is the base64-encoded content of test_session.session
+        if: steps.secrets-check.outputs.skip == 'false'
+        # TELEGRAM_TEST_SESSION is the StringSession string produced by get_session.py
         run: |
           mkdir -p .local/testing
-          echo "${{ secrets.TELEGRAM_TEST_SESSION }}" | base64 -d > .local/testing/test_session.session
+          echo "${{ secrets.TELEGRAM_TEST_SESSION }}" > .local/testing/test_session.session
 
       - name: Build Zeph (telegram feature)
+        if: steps.secrets-check.outputs.skip == 'false'
         run: cargo build --features full --bin zeph
 
       - name: Write Zeph config
+        if: steps.secrets-check.outputs.skip == 'false'
         env:
           ZEPH_TELEGRAM_TEST_TOKEN: ${{ secrets.ZEPH_TELEGRAM_TEST_TOKEN }}
         run: |
@@ -55,8 +113,10 @@ jobs:
             .local/config/telegram-test.toml
 
       - name: Start Zeph (background)
+        if: steps.secrets-check.outputs.skip == 'false'
         env:
           ZEPH_TELEGRAM_TEST_TOKEN: ${{ secrets.ZEPH_TELEGRAM_TEST_TOKEN }}
+          RUST_LOG: ${{ inputs.debug == 'true' && 'debug' || 'info' }}
         run: |
           ./target/debug/zeph --config .local/config/telegram-test.toml --channel telegram \
             2>.local/testing/debug/telegram-session.log &
@@ -64,12 +124,18 @@ jobs:
           sleep 8
 
       - name: Run E2E scenarios
+        if: steps.secrets-check.outputs.skip == 'false'
         env:
           TG_API_ID: ${{ secrets.TELEGRAM_TEST_API_ID }}
           TG_API_HASH: ${{ secrets.TELEGRAM_TEST_API_HASH }}
           TG_BOT_USERNAME: ${{ secrets.TELEGRAM_TEST_BOT_USERNAME }}
           TG_SESSION_PATH: .local/testing/test_session.session
-        run: python3 scripts/telegram-e2e/telegram_e2e.py
+        run: |
+          EXTRA_FLAGS=""
+          if [ "${{ inputs.no_reset }}" = "true" ]; then
+            EXTRA_FLAGS="--no-reset"
+          fi
+          python3 scripts/telegram-e2e/telegram_e2e.py $EXTRA_FLAGS
 
       - name: Upload debug log on failure
         if: failure()
