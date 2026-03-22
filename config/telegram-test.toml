@@ -36,9 +36,8 @@ sqlite_path = ".local/testing/data/zeph-telegram-test.db"
 history_limit = 50
 
 [telegram]
-# Token from @BotFather — stored in vault under ZEPH_TELEGRAM_TOKEN
-token = { vault = "ZEPH_TELEGRAM_TOKEN" }
-# Replace with the Telegram username of your test account (created by setup_tg_test_account.py)
+# Token is injected via ZEPH_TELEGRAM_TOKEN env var (no token field needed in config).
+# Replace with the Telegram username of your test account (created by get_session.py).
 allowed_users = ["your_test_username"]
 
 [tools]
