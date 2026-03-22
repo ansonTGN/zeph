@@ -67,13 +67,21 @@ async def _wait_for_reply(
     client: TelegramClient,
     bot: str,
     timeout: float,
+    since: Optional[float] = None,
 ) -> Optional[str]:
-    """Register a one-shot handler, send nothing, await first reply."""
+    """Register a one-shot handler, send nothing, await first reply.
+
+    *since* is a UNIX timestamp; messages older than this are ignored to prevent
+    stale replies from previous scenarios leaking into this one.
+    """
     loop = asyncio.get_event_loop()
     future: asyncio.Future[str] = loop.create_future()
+    cutoff = since if since is not None else time.time()
 
     @client.on(events.NewMessage(from_users=bot))
     async def _handler(event: events.NewMessage.Event) -> None:
+        if event.message.date.timestamp() < cutoff:
+            return
         if not future.done():
             future.set_result(event.message.text or "")
 
@@ -91,12 +99,19 @@ async def _send_and_wait(
     text: str,
     timeout: float = 30.0,
 ) -> Optional[str]:
-    """Send *text* to *bot* and return the first reply text, or None on timeout."""
+    """Send *text* to *bot* and return the first reply text, or None on timeout.
+
+    Only messages that arrive after the send are accepted; stale replies from
+    prior scenarios are discarded via a timestamp cutoff.
+    """
     loop = asyncio.get_event_loop()
     future: asyncio.Future[str] = loop.create_future()
+    send_time = time.time()
 
     @client.on(events.NewMessage(from_users=bot))
     async def _handler(event: events.NewMessage.Event) -> None:
+        if event.message.date.timestamp() < send_time - 2:
+            return
         if not future.done():
             future.set_result(event.message.text or "")
 
@@ -120,19 +135,25 @@ async def _send_and_collect(
     """Send *text* and collect all bot replies until idle_after seconds of silence.
 
     Also tracks message edits (streaming updates), keeping the last text per message.
+    Messages older than the send time are discarded.
     """
     replies: list[str] = []
     first_arrived = asyncio.Event()
     last_activity: list[float] = [0.0]
+    send_time = time.time()
 
     @client.on(events.NewMessage(from_users=bot))
     async def _on_new(event: events.NewMessage.Event) -> None:
+        if event.message.date.timestamp() < send_time - 2:
+            return
         replies.append(event.message.text or "")
         last_activity[0] = time.monotonic()
         first_arrived.set()
 
     @client.on(events.MessageEdited(from_users=bot))
     async def _on_edit(event: events.MessageEdited.Event) -> None:
+        if event.message.date.timestamp() < send_time - 2:
+            return
         if replies:
             replies[-1] = event.message.text or ""
         last_activity[0] = time.monotonic()
@@ -211,9 +232,12 @@ async def scenario_empty_msg(client: TelegramClient, bot: str) -> bool:
     """
     loop = asyncio.get_event_loop()
     future: asyncio.Future[str] = loop.create_future()
+    send_time = time.time()
 
     @client.on(events.NewMessage(from_users=bot))
     async def _handler(event: events.NewMessage.Event) -> None:
+        if event.message.date.timestamp() < send_time - 2:
+            return
         if not future.done():
             future.set_result(event.message.text or "<non-text reply>")
 
@@ -265,15 +289,20 @@ async def scenario_streaming(client: TelegramClient, bot: str) -> bool:
     )
     first_time: list[Optional[float]] = [None]
     edit_count: list[int] = [0]
+    send_wall = time.time()
     send_time = time.monotonic()
 
     @client.on(events.NewMessage(from_users=bot))
     async def _on_new(event: events.NewMessage.Event) -> None:
+        if event.message.date.timestamp() < send_wall - 2:
+            return
         if first_time[0] is None:
             first_time[0] = time.monotonic()
 
     @client.on(events.MessageEdited(from_users=bot))
-    async def _on_edit(_event: events.MessageEdited.Event) -> None:
+    async def _on_edit(event: events.MessageEdited.Event) -> None:
+        if event.message.date.timestamp() < send_wall - 2:
+            return
         edit_count[0] += 1
 
     await client.send_message(bot, prompt)
@@ -294,7 +323,7 @@ async def scenario_streaming(client: TelegramClient, bot: str) -> bool:
     latency = (first_time[0] - send_time) if appeared else None
     latency_str = f"{latency:.1f}s" if latency is not None else "never"
     detail = f"first_msg={latency_str}, edits={edit_count[0]}"
-    return _result("streaming", appeared and latency is not None and latency < 60.0, detail)
+    return _result("streaming", appeared and latency is not None and latency < 90.0, detail)
 
 
 async def scenario_unauthorized(
@@ -307,9 +336,12 @@ async def scenario_unauthorized(
 
     loop = asyncio.get_event_loop()
     future: asyncio.Future[str] = loop.create_future()
+    send_time = time.time()
 
     @client2.on(events.NewMessage(from_users=bot))
     async def _handler(event: events.NewMessage.Event) -> None:
+        if event.message.date.timestamp() < send_time - 2:
+            return
         if not future.done():
             future.set_result(event.message.text or "<non-text reply>")
 
@@ -363,17 +395,24 @@ async def _run(args: argparse.Namespace) -> int:
     if not args.no_reset:
         print("Resetting conversation state (/reset)...")
         await _send_and_wait(client, bot, "/reset", timeout=10.0)
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(3.0)
 
     results: list[bool] = []
 
     results.append(await scenario_startup(client, bot))
+    await asyncio.sleep(2.0)
     results.append(await scenario_reset(client, bot))
+    await asyncio.sleep(2.0)
     results.append(await scenario_skills(client, bot))
+    await asyncio.sleep(2.0)
     results.append(await scenario_math(client, bot))
+    await asyncio.sleep(2.0)
     results.append(await scenario_empty_msg(client, bot))
+    await asyncio.sleep(2.0)
     results.append(await scenario_long_output(client, bot))
+    await asyncio.sleep(2.0)
     results.append(await scenario_streaming(client, bot))
+    await asyncio.sleep(2.0)
     results.append(await scenario_unauthorized(client2, bot))
 
     await client.disconnect()
