@@ -52,7 +52,7 @@ jobs:
       - uses: taiki-e/install-action@9786bf093d06fe2c715bc12b6ff3b97a491cab4f # nextest
         if: steps.secrets-check.outputs.skip == 'false'
 
-      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d4
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         if: steps.secrets-check.outputs.skip == 'false'
 
       - name: Run OpenAI ignored tests
