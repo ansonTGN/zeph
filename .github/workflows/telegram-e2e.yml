@@ -100,9 +100,7 @@ jobs:
         run: |
           mkdir -p .local/config .local/testing/data .local/testing/debug
           cp config/telegram-test.toml .local/config/telegram-test.toml
-          # Switch vault to env backend (no age vault available in CI)
-          sed -i 's|token = { vault = "ZEPH_TELEGRAM_TOKEN" }|token = { env = "ZEPH_TELEGRAM_TOKEN" }|' \
-            .local/config/telegram-test.toml
+          # Switch vault backend to env — vault will read ZEPH_* vars from environment
           sed -i 's|backend = "age"|backend = "env"|' \
             .local/config/telegram-test.toml
           # Patch allowed_users with the test account username
