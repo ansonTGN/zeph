@@ -1,0 +1,72 @@
+name: openai-integration
+
+# Runs ignored OpenAI integration tests that require a live API key.
+# Manual-only: consumes OpenAI API tokens, so not triggered on push.
+
+on:
+  workflow_dispatch:
+    inputs:
+      debug:
+        description: "Enable verbose test output (--no-capture)"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: openai-integration
+  cancel-in-progress: false
+
+jobs:
+  openai-integration:
+    name: OpenAI Integration Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check secrets
+        id: secrets-check
+        env:
+          API_KEY: ${{ secrets.ZEPH_OPENAI_API_KEY }}
+        run: |
+          if [ -z "$API_KEY" ]; then
+            echo "Skipping: ZEPH_OPENAI_API_KEY not configured"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.secrets-check.outputs.skip == 'false'
+
+      - uses: taiki-e/install-action@9786bf093d06fe2c715bc12b6ff3b97a491cab4f # nextest
+        if: steps.secrets-check.outputs.skip == 'false'
+
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d4
+        if: steps.secrets-check.outputs.skip == 'false'
+
+      - name: Run OpenAI ignored tests
+        if: steps.secrets-check.outputs.skip == 'false'
+        env:
+          ZEPH_OPENAI_API_KEY: ${{ secrets.ZEPH_OPENAI_API_KEY }}
+        run: |
+          EXTRA=""
+          if [ "${{ inputs.debug }}" = "true" ]; then
+            EXTRA="--no-capture"
+          fi
+          cargo nextest run \
+            --config-file .github/nextest.toml \
+            --workspace \
+            --features full \
+            --run-ignored ignored-only \
+            $EXTRA
