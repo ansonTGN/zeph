@@ -66,8 +66,8 @@ jobs:
           fi
           cargo nextest run \
             --config-file .github/nextest.toml \
-            --package zeph-llm \
+            --workspace \
             --features full \
             --run-ignored ignored-only \
-            -E 'test(openai)' \
+            -E 'package(zeph-llm) and test(openai)' \
             $EXTRA
