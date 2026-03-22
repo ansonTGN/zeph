@@ -118,7 +118,7 @@ jobs:
           ZEPH_OPENAI_API_KEY: ${{ secrets.ZEPH_OPENAI_API_KEY }}
           RUST_LOG: ${{ inputs.debug == 'true' && 'debug' || 'info' }}
         run: |
-          ./target/debug/zeph --config .local/config/telegram-test.toml --channel telegram \
+          ./target/debug/zeph --config .local/config/telegram-test.toml \
             >.local/testing/debug/telegram-session.log 2>&1 &
           echo "Zeph PID: $!"
           # Wait for bot to connect and start long-polling
