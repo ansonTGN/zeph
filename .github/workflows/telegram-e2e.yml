@@ -73,6 +73,23 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        if: steps.secrets-check.outputs.skip == 'false'
+
+      # Cache cargo registry/git sources only (no target dir — sccache handles compilation).
+      # Uses the same key structure as CI so the populated registry cache is shared.
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        if: steps.secrets-check.outputs.skip == 'false'
+        with:
+          cache-targets: "false"
+          shared-key: "telegram-e2e"
+
+      # sccache caches per-crate compilation results in GHA cache.
+      # telegram-e2e uses --profile ci (same as CI lint/build jobs) so sccache
+      # entries built by CI are reused here, making reruns nearly instant.
+      - uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
+        if: steps.secrets-check.outputs.skip == 'false'
+
       - name: Set up Python
         if: steps.secrets-check.outputs.skip == 'false'
         uses: actions/setup-python@v5
@@ -93,7 +110,10 @@ jobs:
 
       - name: Build Zeph (telegram feature)
         if: steps.secrets-check.outputs.skip == 'false'
-        run: cargo build --features full --bin zeph
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
+        run: cargo build --profile ci --features full --bin zeph
 
       - name: Write Zeph config
         if: steps.secrets-check.outputs.skip == 'false'
@@ -116,7 +136,7 @@ jobs:
           ZEPH_OPENAI_API_KEY: ${{ secrets.ZEPH_OPENAI_API_KEY }}
           RUST_LOG: ${{ inputs.debug == 'true' && 'debug' || 'info' }}
         run: |
-          ./target/debug/zeph --config .local/config/telegram-test.toml \
+          ./target/ci/zeph --config .local/config/telegram-test.toml \
             >.local/testing/debug/telegram-session.log 2>&1 &
           echo "Zeph PID: $!"
           # Wait for bot to connect and start long-polling

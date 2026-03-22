@@ -46,7 +46,7 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
         if: steps.secrets-check.outputs.skip == 'false'
 
       - uses: taiki-e/install-action@9786bf093d06fe2c715bc12b6ff3b97a491cab4f # nextest
@@ -54,11 +54,19 @@ jobs:
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         if: steps.secrets-check.outputs.skip == 'false'
+        with:
+          cache-targets: "false"
+          shared-key: "openai-integration"
+
+      - uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
+        if: steps.secrets-check.outputs.skip == 'false'
 
       - name: Run OpenAI ignored tests
         if: steps.secrets-check.outputs.skip == 'false'
         env:
           ZEPH_OPENAI_API_KEY: ${{ secrets.ZEPH_OPENAI_API_KEY }}
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
         run: |
           EXTRA=""
           if [ "${{ inputs.debug }}" = "true" ]; then
@@ -66,6 +74,7 @@ jobs:
           fi
           cargo nextest run \
             --config-file .github/nextest.toml \
+            --cargo-profile ci \
             --workspace \
             --features full \
             --run-ignored ignored-only \
