@@ -1,8 +1,8 @@
 name: telegram-e2e
 
-# Runs Telethon-based E2E tests against the Zeph Telegram channel on Test DC.
-# Gated by repository secrets — skipped automatically when secrets are absent.
-# Runs only on push to main (not on PRs) to avoid flakiness from external services.
+# Runs Telethon-based E2E tests against the Zeph Telegram channel.
+# Manual-only: consumes LLM API tokens, so not triggered on push.
+# Builds Zeph from source on each run.
 #
 # Re-running only failed scenarios: use GitHub's native "Re-run failed jobs"
 # button — the single job structure means the whole suite re-runs atomically,
@@ -10,8 +10,6 @@ name: telegram-e2e
 # shared across scenarios.
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
     inputs:
       debug:
