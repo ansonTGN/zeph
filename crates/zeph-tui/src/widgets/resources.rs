@@ -193,6 +193,63 @@ mod tests {
     }
 
     #[test]
+    fn resources_shows_embedding_model_when_set() {
+        let metrics = MetricsSnapshot {
+            embedding_model: "nomic-embed-text".into(),
+            ..MetricsSnapshot::default()
+        };
+        let output = render_to_string(35, 30, |frame, area| {
+            super::render(&metrics, frame, area);
+        });
+        assert!(
+            output.contains("Embed: nomic-embed-text"),
+            "resources panel must contain embedding model; got: {output:?}"
+        );
+    }
+
+    #[test]
+    fn resources_omits_embedding_model_when_empty() {
+        let metrics = MetricsSnapshot::default();
+        let output = render_to_string(35, 30, |frame, area| {
+            super::render(&metrics, frame, area);
+        });
+        assert!(
+            !output.contains("Embed:"),
+            "resources panel must not contain Embed: when embedding_model is empty; got: {output:?}"
+        );
+    }
+
+    #[test]
+    fn resources_shows_token_budget_with_compaction_threshold_none() {
+        let metrics = MetricsSnapshot {
+            token_budget: Some(200_000),
+            ..MetricsSnapshot::default()
+        };
+        let output = render_to_string(35, 30, |frame, area| {
+            super::render(&metrics, frame, area);
+        });
+        assert!(
+            output.contains("Budget: 200000"),
+            "resources panel must show token budget; got: {output:?}"
+        );
+    }
+
+    #[test]
+    fn resources_shows_self_learning_flag() {
+        let metrics = MetricsSnapshot {
+            self_learning_enabled: true,
+            ..MetricsSnapshot::default()
+        };
+        let output = render_to_string(35, 30, |frame, area| {
+            super::render(&metrics, frame, area);
+        });
+        assert!(
+            output.contains("Learning: ON"),
+            "resources panel must show 'Learning: ON' when self_learning_enabled; got: {output:?}"
+        );
+    }
+
+    #[test]
     fn resources_with_full_infra() {
         let metrics = MetricsSnapshot {
             provider_name: "claude".into(),

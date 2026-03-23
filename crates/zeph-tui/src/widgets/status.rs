@@ -11,6 +11,7 @@ use crate::app::{App, InputMode};
 use crate::metrics::MetricsSnapshot;
 use crate::theme::Theme;
 
+#[allow(clippy::too_many_lines)]
 pub fn render(app: &App, metrics: &MetricsSnapshot, frame: &mut Frame, area: Rect) {
     let theme = Theme::default();
 
@@ -36,8 +37,14 @@ pub fn render(app: &App, metrics: &MetricsSnapshot, frame: &mut Frame, area: Rec
 
     let filter_segment = build_filter_segment(metrics);
 
+    let channel_segment = if metrics.active_channel.is_empty() {
+        String::new()
+    } else {
+        format!(" | ch:{}", metrics.active_channel)
+    };
+
     let main_text = format!(
-        " [{mode}]{model}{plan_mode_segment} | Skills: {active}/{total} | Tokens: {tok}{qdrant_segment}{filter_segment}",
+        " [{mode}]{model}{channel_segment}{plan_mode_segment} | Skills: {active}/{total} | Tokens: {tok}{qdrant_segment}{filter_segment}",
         model = if metrics.model_name.is_empty() {
             String::new()
         } else {
@@ -267,6 +274,56 @@ mod tests {
         assert!(
             output.contains("1 blocked"),
             "expected blocked count in status bar"
+        );
+    }
+
+    #[test]
+    fn status_bar_shows_channel_when_active_channel_set() {
+        use tokio::sync::mpsc;
+
+        use crate::app::App;
+        use crate::metrics::MetricsSnapshot;
+        use crate::test_utils::render_to_string;
+
+        let (user_tx, _) = mpsc::channel(1);
+        let (_, agent_rx) = mpsc::channel(1);
+        let app = App::new(user_tx, agent_rx);
+        let metrics = MetricsSnapshot {
+            active_channel: "tui".into(),
+            ..MetricsSnapshot::default()
+        };
+
+        let output = render_to_string(120, 1, |frame, area| {
+            super::render(&app, &metrics, frame, area);
+        });
+        assert!(
+            output.contains("ch:tui"),
+            "expected ch:tui in status bar; got: {output:?}"
+        );
+    }
+
+    #[test]
+    fn status_bar_shows_model_name_when_set() {
+        use tokio::sync::mpsc;
+
+        use crate::app::App;
+        use crate::metrics::MetricsSnapshot;
+        use crate::test_utils::render_to_string;
+
+        let (user_tx, _) = mpsc::channel(1);
+        let (_, agent_rx) = mpsc::channel(1);
+        let app = App::new(user_tx, agent_rx);
+        let metrics = MetricsSnapshot {
+            model_name: "claude-sonnet-4-6".into(),
+            ..MetricsSnapshot::default()
+        };
+
+        let output = render_to_string(140, 1, |frame, area| {
+            super::render(&app, &metrics, frame, area);
+        });
+        assert!(
+            output.contains("claude-sonnet-4-6"),
+            "expected model name in status bar; got: {output:?}"
         );
     }
 
