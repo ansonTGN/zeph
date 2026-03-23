@@ -596,33 +596,56 @@ impl ToolExecutor for FileExecutor {
 /// sandbox check inside `validate_path`.
 fn normalize_path(path: &Path) -> PathBuf {
     use std::path::Component;
+    // On Windows, paths may have a drive prefix (e.g. `D:` or `\\?\D:`).
+    // We track it separately so that `RootDir` (the `\` after the drive letter)
+    // does not accidentally clear the prefix from the stack.
+    let mut prefix: Option<std::ffi::OsString> = None;
     let mut stack: Vec<std::ffi::OsString> = Vec::new();
     for component in path.components() {
         match component {
             Component::CurDir => {}
             Component::ParentDir => {
-                stack.pop();
+                // Never pop the sentinel "/" root entry.
+                if stack.last().is_some_and(|s| s != "/") {
+                    stack.pop();
+                }
             }
             Component::Normal(name) => stack.push(name.to_owned()),
             Component::RootDir => {
-                stack.clear();
-                stack.push(std::ffi::OsString::from("/"));
+                if prefix.is_none() {
+                    // Unix absolute path: treat "/" as the root sentinel.
+                    stack.clear();
+                    stack.push(std::ffi::OsString::from("/"));
+                }
+                // On Windows, RootDir follows the drive Prefix and is just the
+                // path separator — the prefix is already recorded, so skip it.
             }
-            Component::Prefix(prefix) => {
+            Component::Prefix(p) => {
                 stack.clear();
-                stack.push(prefix.as_os_str().to_owned());
+                prefix = Some(p.as_os_str().to_owned());
             }
         }
     }
-    let mut result = PathBuf::new();
-    for (i, part) in stack.iter().enumerate() {
-        if i == 0 && part == "/" {
-            result.push("/");
-        } else {
+    if let Some(drive) = prefix {
+        // Windows: reconstruct "DRIVE:\" (absolute) then append normal components.
+        let mut s = drive.to_string_lossy().into_owned();
+        s.push('\\');
+        let mut result = PathBuf::from(s);
+        for part in &stack {
             result.push(part);
         }
+        result
+    } else {
+        let mut result = PathBuf::new();
+        for (i, part) in stack.iter().enumerate() {
+            if i == 0 && part == "/" {
+                result.push("/");
+            } else {
+                result.push(part);
+            }
+        }
+        result
     }
-    result
 }
 
 /// Canonicalize a path by walking up to the nearest existing ancestor.
