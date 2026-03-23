@@ -101,7 +101,7 @@ jobs:
     name: Publish to crates.io
     needs: [build-binaries]
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 60
     environment: release
     permissions:
       id-token: write
@@ -128,6 +128,7 @@ jobs:
           registry-token: ${{ steps.auth.outputs.token }}
           ignore-unpublished-changes: true
           publish-delay: 15000
+          no-verify: true
 
   create-release:
     name: Create GitHub Release
