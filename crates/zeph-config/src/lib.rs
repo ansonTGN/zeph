@@ -56,10 +56,9 @@ pub use memory::{
     SessionsConfig, SidequestConfig, VectorBackend,
 };
 pub use providers::{
-    CandleConfig, CascadeClassifierMode, CascadeConfig, CloudLlmConfig, CompatibleConfig,
-    GeminiConfig, GenerationParams, LlmConfig, MAX_TOKENS_CAP, OllamaConfig, OpenAiConfig,
-    OrchestratorConfig, OrchestratorProviderConfig, ProviderKind, RouterConfig,
-    RouterStrategyConfig, SttConfig,
+    CandleConfig, CandleInlineConfig, CascadeClassifierMode, CascadeConfig, GenerationParams,
+    LlmConfig, LlmRoutingStrategy, MAX_TOKENS_CAP, ProviderEntry, ProviderKind, RouterConfig,
+    RouterStrategyConfig, SttConfig, validate_pool,
 };
 pub use providers::{default_stt_language, default_stt_model, default_stt_provider};
 pub use rate_limit::RateLimitConfig;

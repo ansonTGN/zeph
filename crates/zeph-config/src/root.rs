@@ -22,7 +22,7 @@ use crate::memory::{
     SessionsConfig, SidequestConfig, TierConfig, VectorBackend,
 };
 use crate::providers::{
-    LlmConfig, ProviderKind, get_default_embedding_model, get_default_response_cache_ttl_secs,
+    LlmConfig, get_default_embedding_model, get_default_response_cache_ttl_secs,
     get_default_router_ema_alpha, get_default_router_reorder_interval,
 };
 use crate::security::TrustConfig;
@@ -130,20 +130,12 @@ impl Default for Config {
                 tool_filter: crate::agent::ToolFilterConfig::default(),
             },
             llm: LlmConfig {
-                provider: ProviderKind::Ollama,
-                base_url: "http://localhost:11434".into(),
-                model: "qwen3:8b".into(),
+                providers: Vec::new(),
+                routing: crate::providers::LlmRoutingStrategy::None,
+                routes: std::collections::HashMap::new(),
                 embedding_model: get_default_embedding_model(),
-                cloud: None,
-                ollama: None,
-                openai: None,
-                gemini: None,
                 candle: None,
-                orchestrator: None,
-                compatible: None,
-                router: None,
                 stt: None,
-                vision_model: None,
                 response_cache_enabled: false,
                 response_cache_ttl_secs: get_default_response_cache_ttl_secs(),
                 semantic_cache_enabled: false,
@@ -152,6 +144,7 @@ impl Default for Config {
                 router_ema_enabled: false,
                 router_ema_alpha: get_default_router_ema_alpha(),
                 router_reorder_interval: get_default_router_reorder_interval(),
+                router: None,
                 instruction_file: None,
                 summary_model: None,
                 summary_provider: None,

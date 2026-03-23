@@ -28,14 +28,6 @@ fn default_embedding_model() -> String {
     "qwen3-embedding".into()
 }
 
-fn default_gemini_max_tokens() -> u32 {
-    8192
-}
-
-fn default_gemini_base_url() -> String {
-    "https://generativelanguage.googleapis.com".to_owned()
-}
-
 fn default_candle_source() -> String {
     "huggingface".into()
 }
@@ -136,9 +128,7 @@ pub enum ProviderKind {
     OpenAi,
     Gemini,
     Candle,
-    Orchestrator,
     Compatible,
-    Router,
 }
 
 impl ProviderKind {
@@ -150,9 +140,7 @@ impl ProviderKind {
             Self::OpenAi => "openai",
             Self::Gemini => "gemini",
             Self::Candle => "candle",
-            Self::Orchestrator => "orchestrator",
             Self::Compatible => "compatible",
-            Self::Router => "router",
         }
     }
 }
@@ -165,30 +153,24 @@ impl std::fmt::Display for ProviderKind {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct LlmConfig {
-    pub provider: ProviderKind,
-    pub base_url: String,
-    pub model: String,
-    #[serde(default = "default_embedding_model")]
+    /// Provider pool. First entry is default unless one is marked `default = true`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub providers: Vec<ProviderEntry>,
+
+    /// Routing strategy for multi-provider configs.
+    #[serde(default, skip_serializing_if = "is_routing_none")]
+    pub routing: LlmRoutingStrategy,
+
+    /// Task-based routes (only used when `routing = "task"`).
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub routes: std::collections::HashMap<String, Vec<String>>,
+
+    #[serde(default = "default_embedding_model_opt")]
     pub embedding_model: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cloud: Option<CloudLlmConfig>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub openai: Option<OpenAiConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub gemini: Option<GeminiConfig>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub candle: Option<CandleConfig>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub orchestrator: Option<OrchestratorConfig>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub compatible: Option<Vec<CompatibleConfig>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub router: Option<RouterConfig>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ollama: Option<OllamaConfig>,
+    #[serde(default)]
     pub stt: Option<SttConfig>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub vision_model: Option<String>,
     #[serde(default)]
     pub response_cache_enabled: bool,
     #[serde(default = "default_response_cache_ttl_secs")]
@@ -223,6 +205,9 @@ pub struct LlmConfig {
     pub router_ema_alpha: f64,
     #[serde(default = "default_router_reorder_interval")]
     pub router_reorder_interval: u64,
+    /// Routing configuration for Thompson/Cascade strategies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub router: Option<RouterConfig>,
     /// Provider-specific instruction file to inject into the system prompt.
     /// Merged with `agent.instruction_files` at startup.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -233,9 +218,54 @@ pub struct LlmConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary_model: Option<String>,
     /// Structured provider config for summarization. Takes precedence over `summary_model`.
-    /// Same format as `[llm.orchestrator.providers.*]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub summary_provider: Option<OrchestratorProviderConfig>,
+    pub summary_provider: Option<ProviderEntry>,
+}
+
+fn default_embedding_model_opt() -> String {
+    default_embedding_model()
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_routing_none(s: &LlmRoutingStrategy) -> bool {
+    *s == LlmRoutingStrategy::None
+}
+
+impl LlmConfig {
+    /// Effective provider kind for the primary (first/default) provider in the pool.
+    #[must_use]
+    pub fn effective_provider(&self) -> ProviderKind {
+        self.providers
+            .first()
+            .map_or(ProviderKind::Ollama, |e| e.provider_type)
+    }
+
+    /// Effective base URL for the primary provider.
+    #[must_use]
+    pub fn effective_base_url(&self) -> &str {
+        self.providers
+            .first()
+            .and_then(|e| e.base_url.as_deref())
+            .unwrap_or("http://localhost:11434")
+    }
+
+    /// Effective model for the primary provider.
+    #[must_use]
+    pub fn effective_model(&self) -> &str {
+        self.providers
+            .first()
+            .and_then(|e| e.model.as_deref())
+            .unwrap_or("qwen3:8b")
+    }
+
+    /// Validate that the config uses the new `[[llm.providers]]` format.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ConfigError::Validation` when no providers are configured.
+    pub fn check_legacy_format(&self) -> Result<(), crate::error::ConfigError> {
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -250,89 +280,7 @@ pub struct SttConfig {
     pub base_url: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-pub struct CloudLlmConfig {
-    pub model: String,
-    pub max_tokens: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thinking: Option<ThinkingConfig>,
-    /// Enable server-side context compaction (Claude API compact-2026-01-12 beta).
-    /// When true, the Claude API automatically summarizes long conversations.
-    /// Client-side compaction is skipped when this is active.
-    #[serde(default)]
-    pub server_compaction: bool,
-    /// Enable 1M token extended context window for Claude Opus 4.6 and Sonnet 4.6.
-    /// When enabled, injects `anthropic-beta: context-1m-2025-08-07` header.
-    /// NOTE: tokens above 200K use long-context pricing (see Anthropic docs).
-    #[serde(default)]
-    pub enable_extended_context: bool,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct OllamaConfig {
-    /// Enable native `tool_use` / function calling for compatible models (e.g. llama3.1, qwen2.5).
-    #[serde(default)]
-    pub tool_use: bool,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct OpenAiConfig {
-    pub base_url: String,
-    pub model: String,
-    pub max_tokens: u32,
-    #[serde(default)]
-    pub embedding_model: Option<String>,
-    #[serde(default)]
-    pub reasoning_effort: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct GeminiConfig {
-    /// Gemini model name, e.g. `gemini-2.0-flash`.
-    pub model: String,
-    /// Maximum output tokens.
-    #[serde(default = "default_gemini_max_tokens")]
-    pub max_tokens: u32,
-    /// API base URL. Default: `https://generativelanguage.googleapis.com`.
-    /// Can be overridden for proxies or Vertex AI.
-    #[serde(default = "default_gemini_base_url")]
-    pub base_url: String,
-    /// Embedding model name, e.g. `text-embedding-004`.
-    /// When set, `supports_embeddings()` returns true.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub embedding_model: Option<String>,
-    /// Thinking level for Gemini 3+ models: minimal, low, medium, high.
-    /// For Gemini 2.5 models use `thinking_budget` instead.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thinking_level: Option<GeminiThinkingLevel>,
-    /// Thinking token budget for Gemini 2.5 models (0 = disable, -1 = dynamic, 0–32768).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thinking_budget: Option<i32>,
-    /// Include thinking summaries in the response (default: false).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub include_thoughts: Option<bool>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct CompatibleConfig {
-    pub name: String,
-    pub base_url: String,
-    pub model: String,
-    pub max_tokens: u32,
-    #[serde(default)]
-    pub embedding_model: Option<String>,
-    /// Optional API key set directly in config. When absent, falls back to
-    /// `ZEPH_COMPATIBLE_<NAME>_API_KEY` vault secret. For local endpoints
-    /// (localhost / private networks) neither is required.
-    #[serde(default)]
-    pub api_key: Option<String>,
-}
-
-/// Routing strategy selection for `[llm.router]` config.
-///
-/// EMA and Thompson config fields are split across `RouterConfig` and `LlmConfig`
-/// for historical reasons. `RouterConfig.strategy` is the single dispatch point;
-/// the `LlmConfig.router_ema_*` fields only take effect when `strategy = "ema"`.
+/// Routing strategy selection for multi-provider routing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RouterStrategyConfig {
@@ -345,10 +293,9 @@ pub enum RouterStrategyConfig {
     Cascade,
 }
 
+/// Routing configuration for multi-provider setups.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RouterConfig {
-    /// Ordered list of provider names to route across. Cost order for cascade: cheapest first.
-    pub chain: Vec<String>,
     /// Routing strategy: `"ema"` (default), `"thompson"`, or `"cascade"`.
     #[serde(default)]
     pub strategy: RouterStrategyConfig,
@@ -491,7 +438,7 @@ pub struct CandleConfig {
     pub generation: GenerationParams,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GenerationParams {
     #[serde(default = "default_temperature")]
     pub temperature: f64,
@@ -532,35 +479,537 @@ impl Default for GenerationParams {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-pub struct OrchestratorConfig {
-    pub default: String,
-    pub embed: String,
-    #[serde(default)]
-    pub providers: std::collections::HashMap<String, OrchestratorProviderConfig>,
-    #[serde(default)]
-    pub routes: std::collections::HashMap<String, Vec<String>>,
-    /// How long (in seconds) a failed provider is bypassed before being retried.
-    /// Defaults to 300 seconds (5 minutes) when unset.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub failure_ttl_secs: Option<u64>,
+// ─── Unified config types ─────────────────────────────────────────────────────
+
+/// Routing strategy for the `[[llm.providers]]` pool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LlmRoutingStrategy {
+    /// Single provider or first-in-pool (default).
+    #[default]
+    None,
+    /// Exponential moving average latency-aware ordering.
+    Ema,
+    /// Thompson Sampling with Beta distributions.
+    Thompson,
+    /// Cascade: try cheapest provider first, escalate on degenerate output.
+    Cascade,
+    /// Task-based routing using `[llm.routes]` map.
+    Task,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-pub struct OrchestratorProviderConfig {
-    #[serde(rename = "type")]
-    pub provider_type: String,
+/// Inline candle config for use inside `ProviderEntry`.
+/// Re-uses the generation params from `CandleConfig`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CandleInlineConfig {
+    #[serde(default = "default_candle_source")]
+    pub source: String,
     #[serde(default)]
-    pub model: Option<String>,
-    #[serde(default)]
-    pub base_url: Option<String>,
-    #[serde(default)]
-    pub embedding_model: Option<String>,
+    pub local_path: String,
     #[serde(default)]
     pub filename: Option<String>,
+    #[serde(default = "default_chat_template")]
+    pub chat_template: String,
+    #[serde(default = "default_candle_device")]
+    pub device: String,
     #[serde(default)]
-    pub device: Option<String>,
-    /// Provider-specific instruction file to inject into the system prompt.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding_repo: Option<String>,
+    #[serde(default)]
+    pub generation: GenerationParams,
+}
+
+impl Default for CandleInlineConfig {
+    fn default() -> Self {
+        Self {
+            source: default_candle_source(),
+            local_path: String::new(),
+            filename: None,
+            chat_template: default_chat_template(),
+            device: default_candle_device(),
+            embedding_repo: None,
+            generation: GenerationParams::default(),
+        }
+    }
+}
+
+/// Unified provider entry: one struct replaces `CloudLlmConfig`, `OpenAiConfig`,
+/// `GeminiConfig`, `OllamaConfig`, `CompatibleConfig`, and `OrchestratorProviderConfig`.
+///
+/// Provider-specific fields use `#[serde(default)]` and are ignored by backends
+/// that do not use them (flat-union pattern).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct ProviderEntry {
+    /// Required: provider backend type.
+    #[serde(rename = "type")]
+    pub provider_type: ProviderKind,
+
+    /// Optional name for multi-provider configs. Auto-generated from type if absent.
+    #[serde(default)]
+    pub name: Option<String>,
+
+    /// Model identifier. Required for most types.
+    #[serde(default)]
+    pub model: Option<String>,
+
+    /// API base URL. Each type has its own default.
+    #[serde(default)]
+    pub base_url: Option<String>,
+
+    /// Max output tokens.
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
+
+    /// Embedding model. When set, this provider supports `embed()` calls.
+    #[serde(default)]
+    pub embedding_model: Option<String>,
+
+    /// Mark this entry as the embedding provider (handles `embed()` calls).
+    #[serde(default)]
+    pub embed: bool,
+
+    /// Mark this entry as the default chat provider (overrides position-based default).
+    #[serde(default)]
+    pub default: bool,
+
+    // --- Claude-specific ---
+    #[serde(default)]
+    pub thinking: Option<ThinkingConfig>,
+    #[serde(default)]
+    pub server_compaction: bool,
+    #[serde(default)]
+    pub enable_extended_context: bool,
+
+    // --- OpenAI-specific ---
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
+
+    // --- Gemini-specific ---
+    #[serde(default)]
+    pub thinking_level: Option<GeminiThinkingLevel>,
+    #[serde(default)]
+    pub thinking_budget: Option<i32>,
+    #[serde(default)]
+    pub include_thoughts: Option<bool>,
+
+    // --- Ollama-specific ---
+    #[serde(default)]
+    pub tool_use: bool,
+
+    // --- Compatible-specific: optional inline api_key ---
+    #[serde(default)]
+    pub api_key: Option<String>,
+
+    // --- Candle-specific ---
+    #[serde(default)]
+    pub candle: Option<CandleInlineConfig>,
+
+    // --- Vision ---
+    #[serde(default)]
+    pub vision_model: Option<String>,
+
+    /// Provider-specific instruction file.
+    #[serde(default)]
     pub instruction_file: Option<std::path::PathBuf>,
+}
+
+impl Default for ProviderEntry {
+    fn default() -> Self {
+        Self {
+            provider_type: ProviderKind::Ollama,
+            name: None,
+            model: None,
+            base_url: None,
+            max_tokens: None,
+            embedding_model: None,
+            embed: false,
+            default: false,
+            thinking: None,
+            server_compaction: false,
+            enable_extended_context: false,
+            reasoning_effort: None,
+            thinking_level: None,
+            thinking_budget: None,
+            include_thoughts: None,
+            tool_use: false,
+            api_key: None,
+            candle: None,
+            vision_model: None,
+            instruction_file: None,
+        }
+    }
+}
+
+impl ProviderEntry {
+    /// Resolve the effective name: explicit `name` field or type string.
+    #[must_use]
+    pub fn effective_name(&self) -> String {
+        self.name
+            .clone()
+            .unwrap_or_else(|| self.provider_type.as_str().to_owned())
+    }
+
+    /// Validate this entry for cross-field consistency.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ConfigError` when a fatal invariant is violated (e.g. compatible provider
+    /// without a name).
+    pub fn validate(&self) -> Result<(), crate::error::ConfigError> {
+        use crate::error::ConfigError;
+
+        // B2: compatible provider MUST have name set.
+        if self.provider_type == ProviderKind::Compatible && self.name.is_none() {
+            return Err(ConfigError::Validation(
+                "[[llm.providers]] entry with type=\"compatible\" must set `name`".into(),
+            ));
+        }
+
+        // B1: warn on irrelevant fields.
+        match self.provider_type {
+            ProviderKind::Ollama => {
+                if self.thinking.is_some() {
+                    tracing::warn!(
+                        provider = self.effective_name(),
+                        "field `thinking` is only used by Claude providers"
+                    );
+                }
+                if self.reasoning_effort.is_some() {
+                    tracing::warn!(
+                        provider = self.effective_name(),
+                        "field `reasoning_effort` is only used by OpenAI providers"
+                    );
+                }
+                if self.thinking_level.is_some() || self.thinking_budget.is_some() {
+                    tracing::warn!(
+                        provider = self.effective_name(),
+                        "fields `thinking_level`/`thinking_budget` are only used by Gemini providers"
+                    );
+                }
+            }
+            ProviderKind::Claude => {
+                if self.reasoning_effort.is_some() {
+                    tracing::warn!(
+                        provider = self.effective_name(),
+                        "field `reasoning_effort` is only used by OpenAI providers"
+                    );
+                }
+                if self.thinking_level.is_some() || self.thinking_budget.is_some() {
+                    tracing::warn!(
+                        provider = self.effective_name(),
+                        "fields `thinking_level`/`thinking_budget` are only used by Gemini providers"
+                    );
+                }
+                if self.tool_use {
+                    tracing::warn!(
+                        provider = self.effective_name(),
+                        "field `tool_use` is only used by Ollama providers"
+                    );
+                }
+            }
+            ProviderKind::OpenAi => {
+                if self.thinking.is_some() {
+                    tracing::warn!(
+                        provider = self.effective_name(),
+                        "field `thinking` is only used by Claude providers"
+                    );
+                }
+                if self.thinking_level.is_some() || self.thinking_budget.is_some() {
+                    tracing::warn!(
+                        provider = self.effective_name(),
+                        "fields `thinking_level`/`thinking_budget` are only used by Gemini providers"
+                    );
+                }
+                if self.tool_use {
+                    tracing::warn!(
+                        provider = self.effective_name(),
+                        "field `tool_use` is only used by Ollama providers"
+                    );
+                }
+            }
+            ProviderKind::Gemini => {
+                if self.thinking.is_some() {
+                    tracing::warn!(
+                        provider = self.effective_name(),
+                        "field `thinking` is only used by Claude providers"
+                    );
+                }
+                if self.reasoning_effort.is_some() {
+                    tracing::warn!(
+                        provider = self.effective_name(),
+                        "field `reasoning_effort` is only used by OpenAI providers"
+                    );
+                }
+                if self.tool_use {
+                    tracing::warn!(
+                        provider = self.effective_name(),
+                        "field `tool_use` is only used by Ollama providers"
+                    );
+                }
+            }
+            _ => {}
+        }
+
+        Ok(())
+    }
+}
+
+/// Validate a pool of `ProviderEntry` items.
+///
+/// # Errors
+///
+/// Returns `ConfigError` for fatal validation failures:
+/// - Empty pool
+/// - Duplicate names
+/// - Multiple entries marked `default = true`
+/// - Individual entry validation errors
+pub fn validate_pool(entries: &[ProviderEntry]) -> Result<(), crate::error::ConfigError> {
+    use crate::error::ConfigError;
+    use std::collections::HashSet;
+
+    if entries.is_empty() {
+        return Err(ConfigError::Validation(
+            "at least one LLM provider must be configured in [[llm.providers]]".into(),
+        ));
+    }
+
+    let default_count = entries.iter().filter(|e| e.default).count();
+    if default_count > 1 {
+        return Err(ConfigError::Validation(
+            "only one [[llm.providers]] entry can be marked `default = true`".into(),
+        ));
+    }
+
+    let mut seen_names: HashSet<String> = HashSet::new();
+    for entry in entries {
+        let name = entry.effective_name();
+        if !seen_names.insert(name.clone()) {
+            return Err(ConfigError::Validation(format!(
+                "duplicate provider name \"{name}\" in [[llm.providers]]"
+            )));
+        }
+        entry.validate()?;
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ollama_entry() -> ProviderEntry {
+        ProviderEntry {
+            provider_type: ProviderKind::Ollama,
+            name: Some("ollama".into()),
+            model: Some("qwen3:8b".into()),
+            ..Default::default()
+        }
+    }
+
+    fn claude_entry() -> ProviderEntry {
+        ProviderEntry {
+            provider_type: ProviderKind::Claude,
+            name: Some("claude".into()),
+            model: Some("claude-sonnet-4-6".into()),
+            max_tokens: Some(8192),
+            ..Default::default()
+        }
+    }
+
+    // ─── ProviderEntry::validate ─────────────────────────────────────────────
+
+    #[test]
+    fn validate_ollama_valid() {
+        assert!(ollama_entry().validate().is_ok());
+    }
+
+    #[test]
+    fn validate_claude_valid() {
+        assert!(claude_entry().validate().is_ok());
+    }
+
+    #[test]
+    fn validate_compatible_without_name_errors() {
+        let entry = ProviderEntry {
+            provider_type: ProviderKind::Compatible,
+            name: None,
+            ..Default::default()
+        };
+        let err = entry.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("compatible"),
+            "error should mention compatible: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_compatible_with_name_ok() {
+        let entry = ProviderEntry {
+            provider_type: ProviderKind::Compatible,
+            name: Some("my-proxy".into()),
+            base_url: Some("http://localhost:8080".into()),
+            model: Some("gpt-4o".into()),
+            max_tokens: Some(4096),
+            ..Default::default()
+        };
+        assert!(entry.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_openai_valid() {
+        let entry = ProviderEntry {
+            provider_type: ProviderKind::OpenAi,
+            name: Some("openai".into()),
+            model: Some("gpt-4o".into()),
+            max_tokens: Some(4096),
+            ..Default::default()
+        };
+        assert!(entry.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_gemini_valid() {
+        let entry = ProviderEntry {
+            provider_type: ProviderKind::Gemini,
+            name: Some("gemini".into()),
+            model: Some("gemini-2.0-flash".into()),
+            ..Default::default()
+        };
+        assert!(entry.validate().is_ok());
+    }
+
+    // ─── validate_pool ───────────────────────────────────────────────────────
+
+    #[test]
+    fn validate_pool_empty_errors() {
+        let err = validate_pool(&[]).unwrap_err();
+        assert!(err.to_string().contains("at least one"), "{err}");
+    }
+
+    #[test]
+    fn validate_pool_single_entry_ok() {
+        assert!(validate_pool(&[ollama_entry()]).is_ok());
+    }
+
+    #[test]
+    fn validate_pool_duplicate_names_errors() {
+        let a = ollama_entry();
+        let b = ollama_entry(); // same effective name "ollama"
+        let err = validate_pool(&[a, b]).unwrap_err();
+        assert!(err.to_string().contains("duplicate"), "{err}");
+    }
+
+    #[test]
+    fn validate_pool_multiple_defaults_errors() {
+        let mut a = ollama_entry();
+        let mut b = claude_entry();
+        a.default = true;
+        b.default = true;
+        let err = validate_pool(&[a, b]).unwrap_err();
+        assert!(err.to_string().contains("default"), "{err}");
+    }
+
+    #[test]
+    fn validate_pool_two_different_providers_ok() {
+        assert!(validate_pool(&[ollama_entry(), claude_entry()]).is_ok());
+    }
+
+    #[test]
+    fn validate_pool_propagates_entry_error() {
+        let bad = ProviderEntry {
+            provider_type: ProviderKind::Compatible,
+            name: None, // invalid: compatible without name
+            ..Default::default()
+        };
+        assert!(validate_pool(&[bad]).is_err());
+    }
+
+    // ─── LlmConfig::check_legacy_format ──────────────────────────────────────
+
+    // Parse a complete TOML snippet that includes the [llm] header.
+    fn parse_llm(toml: &str) -> LlmConfig {
+        #[derive(serde::Deserialize)]
+        struct Wrapper {
+            llm: LlmConfig,
+        }
+        toml::from_str::<Wrapper>(toml).unwrap().llm
+    }
+
+    #[test]
+    fn check_legacy_format_new_format_ok() {
+        let cfg = parse_llm(
+            r#"
+[llm]
+
+[[llm.providers]]
+type = "ollama"
+model = "qwen3:8b"
+"#,
+        );
+        assert!(cfg.check_legacy_format().is_ok());
+    }
+
+    #[test]
+    fn check_legacy_format_empty_providers_no_legacy_ok() {
+        // No providers, no legacy fields — passes (empty [llm] is acceptable here)
+        let cfg = parse_llm("[llm]\n");
+        assert!(cfg.check_legacy_format().is_ok());
+    }
+
+    // ─── LlmConfig::effective_* helpers ──────────────────────────────────────
+
+    #[test]
+    fn effective_provider_falls_back_to_ollama_when_no_providers() {
+        let cfg = parse_llm("[llm]\n");
+        assert_eq!(cfg.effective_provider(), ProviderKind::Ollama);
+    }
+
+    #[test]
+    fn effective_provider_reads_from_providers_first() {
+        let cfg = parse_llm(
+            r#"
+[llm]
+
+[[llm.providers]]
+type = "claude"
+model = "claude-sonnet-4-6"
+"#,
+        );
+        assert_eq!(cfg.effective_provider(), ProviderKind::Claude);
+    }
+
+    #[test]
+    fn effective_model_reads_from_providers_first() {
+        let cfg = parse_llm(
+            r#"
+[llm]
+
+[[llm.providers]]
+type = "ollama"
+model = "qwen3:8b"
+"#,
+        );
+        assert_eq!(cfg.effective_model(), "qwen3:8b");
+    }
+
+    #[test]
+    fn effective_base_url_default_when_absent() {
+        let cfg = parse_llm("[llm]\n");
+        assert_eq!(cfg.effective_base_url(), "http://localhost:11434");
+    }
+
+    #[test]
+    fn effective_base_url_from_providers_entry() {
+        let cfg = parse_llm(
+            r#"
+[llm]
+
+[[llm.providers]]
+type = "ollama"
+base_url = "http://myhost:11434"
+"#,
+        );
+        assert_eq!(cfg.effective_base_url(), "http://myhost:11434");
+    }
 }

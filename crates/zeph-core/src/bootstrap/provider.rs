@@ -31,97 +31,10 @@ use zeph_llm::openai::OpenAiProvider;
 use zeph_llm::router::cascade::ClassifierMode;
 use zeph_llm::router::{CascadeRouterConfig, RouterProvider};
 
-use crate::config::{Config, ProviderKind};
+use crate::config::{Config, LlmRoutingStrategy, ProviderEntry, ProviderKind};
 
 pub fn create_provider(config: &Config) -> Result<AnyProvider, BootstrapError> {
-    match config.llm.provider {
-        ProviderKind::Ollama | ProviderKind::Claude => {
-            create_named_provider(config.llm.provider.as_str(), config)
-        }
-        ProviderKind::OpenAi => create_named_provider("openai", config),
-        ProviderKind::Gemini => create_named_provider("gemini", config),
-        ProviderKind::Compatible => create_named_provider("compatible", config),
-        #[cfg(feature = "candle")]
-        ProviderKind::Candle => {
-            let candle_cfg = config.llm.candle.as_ref().ok_or_else(|| {
-                BootstrapError::Provider(
-                    "llm.candle config section required for candle provider".into(),
-                )
-            })?;
-            let source = match candle_cfg.source.as_str() {
-                "local" => zeph_llm::candle_provider::loader::ModelSource::Local {
-                    path: std::path::PathBuf::from(&candle_cfg.local_path),
-                },
-                _ => zeph_llm::candle_provider::loader::ModelSource::HuggingFace {
-                    repo_id: config.llm.model.clone(),
-                    filename: candle_cfg.filename.clone(),
-                },
-            };
-            build_candle_provider(source, candle_cfg, &candle_cfg.device)
-        }
-        ProviderKind::Orchestrator => {
-            let orch = build_orchestrator(config)?;
-            Ok(AnyProvider::Orchestrator(Box::new(orch)))
-        }
-        ProviderKind::Router => {
-            let router_cfg = config.llm.router.as_ref().ok_or_else(|| {
-                BootstrapError::Provider(
-                    "llm.router config section required for router provider".into(),
-                )
-            })?;
-
-            let mut providers = Vec::new();
-            for name in &router_cfg.chain {
-                match create_named_provider(name, config) {
-                    Ok(p) => providers.push(p),
-                    Err(e) => {
-                        tracing::warn!(
-                            provider = name.as_str(),
-                            error = %e,
-                            "skipping router chain provider (will initialize on demand if needed)"
-                        );
-                    }
-                }
-            }
-            if providers.is_empty() {
-                return Err(BootstrapError::Provider(format!(
-                    "router chain is empty: none of [{}] could be initialized",
-                    router_cfg.chain.join(", ")
-                )));
-            }
-            let router = if router_cfg.strategy == crate::config::RouterStrategyConfig::Thompson {
-                let state_path = router_cfg
-                    .thompson_state_path
-                    .as_deref()
-                    .map(std::path::Path::new);
-                RouterProvider::new(providers).with_thompson(state_path)
-            } else if router_cfg.strategy == crate::config::RouterStrategyConfig::Cascade {
-                let cascade_cfg = router_cfg.cascade.clone().unwrap_or_default();
-                let router_cascade_cfg = build_cascade_router_config(&cascade_cfg, config);
-                RouterProvider::new(providers).with_cascade(router_cascade_cfg)
-            } else if config.llm.router_ema_enabled {
-                let raw_alpha = config.llm.router_ema_alpha;
-                let alpha = raw_alpha.clamp(f64::MIN_POSITIVE, 1.0);
-                if (alpha - raw_alpha).abs() > f64::EPSILON {
-                    tracing::warn!(
-                        raw_alpha,
-                        clamped = alpha,
-                        "router_ema_alpha out of range [MIN_POSITIVE, 1.0], clamped"
-                    );
-                }
-                RouterProvider::new(providers).with_ema(alpha, config.llm.router_reorder_interval)
-            } else {
-                RouterProvider::new(providers)
-            };
-            // Apply reputation scoring if enabled (works with any strategy except Cascade).
-            let router = apply_reputation_if_enabled(router, router_cfg);
-            Ok(AnyProvider::Router(Box::new(router)))
-        }
-        #[cfg(not(feature = "candle"))]
-        ProviderKind::Candle => Err(BootstrapError::Provider(
-            "candle feature is not enabled".into(),
-        )),
-    }
+    create_provider_from_pool(config)
 }
 
 fn build_cascade_router_config(
@@ -192,312 +105,61 @@ fn build_cascade_router_config(
     }
 }
 
-fn named_ollama(config: &Config) -> AnyProvider {
-    let tool_use = config.llm.ollama.as_ref().is_some_and(|c| c.tool_use);
-    let mut provider = OllamaProvider::new(
-        &config.llm.base_url,
-        config.llm.model.clone(),
-        config.llm.embedding_model.clone(),
-    )
-    .with_tool_use(tool_use);
-    if let Some(ref vm) = config.llm.vision_model {
-        provider = provider.with_vision_model(vm.clone());
-    }
-    AnyProvider::Ollama(provider)
-}
-
-fn named_claude(config: &Config) -> Result<AnyProvider, BootstrapError> {
-    let cloud = config.llm.cloud.as_ref().ok_or_else(|| {
-        BootstrapError::Provider("llm.cloud config section required for Claude provider".into())
-    })?;
-    let api_key = config
-        .secrets
-        .claude_api_key
-        .as_ref()
-        .ok_or_else(|| BootstrapError::Provider("ZEPH_CLAUDE_API_KEY not found in vault".into()))?
-        .expose()
-        .to_owned();
-    let provider = ClaudeProvider::new(api_key, cloud.model.clone(), cloud.max_tokens)
-        .with_client(llm_client(config.timeouts.llm_request_timeout_secs))
-        .with_extended_context(cloud.enable_extended_context)
-        .with_thinking_opt(cloud.thinking.clone())
-        .map_err(|e| BootstrapError::Provider(format!("invalid thinking config: {e}")))?
-        .with_server_compaction(cloud.server_compaction);
-    Ok(AnyProvider::Claude(provider))
-}
-
-fn named_openai(config: &Config) -> Result<AnyProvider, BootstrapError> {
-    let openai_cfg = config.llm.openai.as_ref().ok_or_else(|| {
-        BootstrapError::Provider("llm.openai config section required for OpenAI provider".into())
-    })?;
-    let api_key = config
-        .secrets
-        .openai_api_key
-        .as_ref()
-        .ok_or_else(|| BootstrapError::Provider("ZEPH_OPENAI_API_KEY not found in vault".into()))?
-        .expose()
-        .to_owned();
-    Ok(AnyProvider::OpenAi(
-        OpenAiProvider::new(
-            api_key,
-            openai_cfg.base_url.clone(),
-            openai_cfg.model.clone(),
-            openai_cfg.max_tokens,
-            openai_cfg.embedding_model.clone(),
-            openai_cfg.reasoning_effort.clone(),
-        )
-        .with_client(llm_client(config.timeouts.llm_request_timeout_secs)),
-    ))
-}
-
-fn named_gemini(config: &Config) -> Result<AnyProvider, BootstrapError> {
-    let gemini_cfg = config.llm.gemini.as_ref().ok_or_else(|| {
-        BootstrapError::Provider("llm.gemini config section required for Gemini provider".into())
-    })?;
-    let api_key = config
-        .secrets
-        .gemini_api_key
-        .as_ref()
-        .ok_or_else(|| BootstrapError::Provider("ZEPH_GEMINI_API_KEY not found in vault".into()))?
-        .expose()
-        .to_owned();
-    let mut provider =
-        GeminiProvider::new(api_key, gemini_cfg.model.clone(), gemini_cfg.max_tokens)
-            .with_base_url(gemini_cfg.base_url.clone())
-            .with_client(llm_client(config.timeouts.llm_request_timeout_secs));
-    if let Some(ref em) = gemini_cfg.embedding_model {
-        provider = provider.with_embedding_model(em.clone());
-    }
-    if let Some(level) = gemini_cfg.thinking_level {
-        provider = provider.with_thinking_level(level);
-    }
-    if let Some(budget) = gemini_cfg.thinking_budget {
-        provider = provider
-            .with_thinking_budget(budget)
-            .map_err(|e| BootstrapError::Provider(e.to_string()))?;
-    }
-    if let Some(include) = gemini_cfg.include_thoughts {
-        provider = provider.with_include_thoughts(include);
-    }
-    Ok(AnyProvider::Gemini(provider))
-}
-
+/// Look up a provider entry from the pool by name (exact match on `effective_name()`) or type.
+///
+/// Used by quarantine, guardrail, judge, and experiment eval model resolution.
 pub fn create_named_provider(name: &str, config: &Config) -> Result<AnyProvider, BootstrapError> {
-    match name {
-        "ollama" => Ok(named_ollama(config)),
-        "claude" => named_claude(config),
-        "openai" => named_openai(config),
-        "gemini" => named_gemini(config),
-        other => {
-            if let Some(entries) = &config.llm.compatible {
-                let entry = if other == "compatible" {
-                    entries.first()
-                } else {
-                    entries.iter().find(|e| e.name == other)
-                };
-                if let Some(entry) = entry {
-                    let has_key = entry.api_key.is_some()
-                        || config.secrets.compatible_api_keys.contains_key(&entry.name)
-                        || is_local_endpoint(&entry.base_url);
-                    if !has_key {
-                        return Err(BootstrapError::Provider(format!(
-                            "ZEPH_COMPATIBLE_{}_API_KEY required for '{}' \
-                             (set api_key in config, vault secret, or use a local endpoint)",
-                            entry.name.to_uppercase(),
-                            entry.name
-                        )));
-                    }
-                    // Resolve key: config field > vault secret > empty for local.
-                    let api_key = entry.api_key.clone().unwrap_or_else(|| {
-                        config
-                            .secrets
-                            .compatible_api_keys
-                            .get(&entry.name)
-                            .map(|s| s.expose().to_owned()) // lgtm[rust/cleartext-logging]
-                            .unwrap_or_default()
-                    });
-                    return Ok(AnyProvider::Compatible(CompatibleProvider::new(
-                        entry.name.clone(),
-                        api_key,
-                        entry.base_url.clone(),
-                        entry.model.clone(),
-                        entry.max_tokens,
-                        entry.embedding_model.clone(),
-                    )));
-                }
-            }
-            Err(BootstrapError::Provider(format!(
-                "unknown provider: {other}"
-            )))
-        }
-    }
+    let entry = config
+        .llm
+        .providers
+        .iter()
+        .find(|e| e.effective_name() == name || e.provider_type.as_str() == name)
+        .ok_or_else(|| {
+            BootstrapError::Provider(format!("provider '{name}' not found in [[llm.providers]]"))
+        })?;
+    build_provider_from_entry(entry, config)
 }
 
 /// Create an `AnyProvider` for use as the summarization provider.
 ///
 /// `model_spec` format (set via `[llm] summary_model`):
-/// - `ollama/<model>` — Ollama at the configured `base_url`, e.g. `ollama/qwen3:1.7b`
-/// - `claude` or `claude/<model>` — Claude API; requires `ZEPH_CLAUDE_API_KEY`
-/// - `openai` or `openai/<model>` — OpenAI-compatible API; requires `ZEPH_OPENAI_API_KEY`
-/// - `compatible/<name>` — named entry from `[[llm.compatible]]`
-/// - `candle` — local candle model (requires `[llm.candle]` config; feature-gated)
+/// - `<name>` — looks up a provider by name in `[[llm.providers]]`
+/// - `ollama/<model>` — Ollama shorthand: uses the ollama provider from pool with model override
+/// - `claude[/<model>]`, `openai[/<model>]`, `gemini[/<model>]` — type shorthand with optional model
 pub fn create_summary_provider(
     model_spec: &str,
     config: &Config,
 ) -> Result<AnyProvider, BootstrapError> {
-    let (backend, model_override) = if let Some((b, m)) = model_spec.split_once('/') {
-        (b, Some(m))
-    } else {
-        (model_spec, None)
-    };
-
-    match backend {
-        "ollama" => {
-            let model = model_override.ok_or_else(|| {
-                BootstrapError::Provider(
-                    "ollama summary_model requires format 'ollama/<model>'".into(),
-                )
-            })?;
-            Ok(AnyProvider::Ollama(OllamaProvider::new(
-                &config.llm.base_url,
-                model.to_owned(),
-                String::new(),
-            )))
-        }
-        "claude" => summary_claude(model_override, config),
-        "openai" => summary_openai(model_override, config),
-        "gemini" => summary_gemini(model_override, config),
-        "compatible" => {
-            let name = model_override.ok_or_else(|| {
-                BootstrapError::Provider(
-                    "compatible summary_model requires format 'compatible/<name>'".into(),
-                )
-            })?;
-            create_named_provider(name, config)
-        }
-        #[cfg(feature = "candle")]
-        "candle" => {
-            let candle_cfg = config.llm.candle.as_ref().ok_or_else(|| {
-                BootstrapError::Provider(
-                    "llm.candle config section required for candle summary provider".into(),
-                )
-            })?;
-            let source = match candle_cfg.source.as_str() {
-                "local" => zeph_llm::candle_provider::loader::ModelSource::Local {
-                    path: std::path::PathBuf::from(&candle_cfg.local_path),
-                },
-                _ => zeph_llm::candle_provider::loader::ModelSource::HuggingFace {
-                    repo_id: config.llm.model.clone(),
-                    filename: candle_cfg.filename.clone(),
-                },
-            };
-            build_candle_provider(source, candle_cfg, &candle_cfg.device)
-        }
-        _ => Err(BootstrapError::Provider(format!(
-            "unsupported summary_model format: '{model_spec}'. \
-             Supported: ollama/<model>, claude[/<model>], openai[/<model>], \
-             compatible/<name>{candle}",
-            candle = if cfg!(feature = "candle") {
-                ", candle"
-            } else {
-                ""
-            }
-        ))),
+    // Try direct name lookup first (e.g. "claude", "my-openai").
+    if let Some(entry) = config
+        .llm
+        .providers
+        .iter()
+        .find(|e| e.effective_name() == model_spec || e.provider_type.as_str() == model_spec)
+    {
+        return build_provider_from_entry(entry, config);
     }
-}
 
-fn summary_claude(
-    model_override: Option<&str>,
-    config: &Config,
-) -> Result<AnyProvider, BootstrapError> {
-    let api_key = config
-        .secrets
-        .claude_api_key
-        .as_ref()
-        .ok_or_else(|| {
-            BootstrapError::Provider(
-                "ZEPH_CLAUDE_API_KEY required for claude summary provider".into(),
-            )
-        })?
-        .expose()
-        .to_owned();
-    let cloud = config.llm.cloud.as_ref();
-    let model = model_override
-        .map(str::to_owned)
-        .or_else(|| cloud.map(|c| c.model.clone()))
-        .unwrap_or_else(|| "claude-haiku-4-5-20251001".to_owned());
-    // Cap summary max_tokens at 4096 — summaries are short.
-    let max_tokens = cloud.map_or(4096, |c| c.max_tokens.min(4096));
-    // Extended context intentionally skipped: summaries are short by design and the
-    // 1M window adds unnecessary cost.
-    let provider = ClaudeProvider::new(api_key, model, max_tokens)
-        .with_client(llm_client(config.timeouts.llm_request_timeout_secs));
-    Ok(AnyProvider::Claude(provider))
-}
+    // Handle `type/model` shorthand: override the model on a matching provider.
+    if let Some(((_, model), entry)) = model_spec.split_once('/').and_then(|(b, m)| {
+        config
+            .llm
+            .providers
+            .iter()
+            .find(|e| e.provider_type.as_str() == b || e.effective_name() == b)
+            .map(|e| ((b, m), e))
+    }) {
+        let mut cloned = entry.clone();
+        cloned.model = Some(model.to_owned());
+        // Cap summary max_tokens at 4096 — summaries are short.
+        cloned.max_tokens = Some(cloned.max_tokens.unwrap_or(4096).min(4096));
+        return build_provider_from_entry(&cloned, config);
+    }
 
-fn summary_openai(
-    model_override: Option<&str>,
-    config: &Config,
-) -> Result<AnyProvider, BootstrapError> {
-    let api_key = config
-        .secrets
-        .openai_api_key
-        .as_ref()
-        .ok_or_else(|| {
-            BootstrapError::Provider(
-                "ZEPH_OPENAI_API_KEY required for openai summary provider".into(),
-            )
-        })?
-        .expose()
-        .to_owned();
-    let openai_cfg = config.llm.openai.as_ref();
-    let base_url = openai_cfg.map_or_else(
-        || "https://api.openai.com/v1".to_owned(),
-        |c| c.base_url.clone(),
-    );
-    let model = model_override
-        .map(str::to_owned)
-        .or_else(|| openai_cfg.map(|c| c.model.clone()))
-        .unwrap_or_else(|| "gpt-4o-mini".to_owned());
-    let max_tokens = openai_cfg.map_or(4096, |c| c.max_tokens);
-    Ok(AnyProvider::OpenAi(
-        OpenAiProvider::new(api_key, base_url, model, max_tokens, None, None)
-            .with_client(llm_client(config.timeouts.llm_request_timeout_secs)),
-    ))
-}
-
-fn summary_gemini(
-    model_override: Option<&str>,
-    config: &Config,
-) -> Result<AnyProvider, BootstrapError> {
-    let api_key = config
-        .secrets
-        .gemini_api_key
-        .as_ref()
-        .ok_or_else(|| {
-            BootstrapError::Provider(
-                "ZEPH_GEMINI_API_KEY required for gemini summary provider".into(),
-            )
-        })?
-        .expose()
-        .to_owned();
-    let gemini_cfg = config.llm.gemini.as_ref();
-    let model = model_override
-        .map(str::to_owned)
-        .or_else(|| gemini_cfg.map(|c| c.model.clone()))
-        .unwrap_or_else(|| "gemini-2.0-flash".to_owned());
-    let max_tokens = gemini_cfg.map_or(4096, |c| c.max_tokens.min(4096));
-    let base_url = gemini_cfg.map_or_else(
-        || "https://generativelanguage.googleapis.com".to_owned(),
-        |c| c.base_url.clone(),
-    );
-    // thinking_level intentionally not wired here: summary provider uses a
-    // capped max_tokens budget and is not expected to run thinking models.
-    Ok(AnyProvider::Gemini(
-        GeminiProvider::new(api_key, model, max_tokens)
-            .with_base_url(base_url)
-            .with_client(llm_client(config.timeouts.llm_request_timeout_secs)),
-    ))
+    Err(BootstrapError::Provider(format!(
+        "summary_model '{model_spec}' not found in [[llm.providers]]. \
+         Use a provider name or 'type/model' shorthand (e.g. 'ollama/qwen3:1.7b')."
+    )))
 }
 
 #[cfg(feature = "candle")]
@@ -567,451 +229,329 @@ fn build_candle_provider(
     .map_err(|e| BootstrapError::Provider(e.to_string()))
 }
 
-/// Create an `AnyProvider` from a structured provider config (`OrchestratorProviderConfig`).
+/// Build an `AnyProvider` from a unified `ProviderEntry` (new `[[llm.providers]]` format).
 ///
-/// Mirrors the per-entry creation logic in `build_orchestrator` but returns `AnyProvider`
-/// so the result can be used outside the orchestrator context (e.g. as a summary provider).
-pub fn create_provider_from_config(
-    pcfg: &crate::config::OrchestratorProviderConfig,
+/// All provider-specific fields come from `entry`; the global `config` is used only for
+/// secrets and timeout settings.
+///
+/// # Errors
+///
+/// Returns `BootstrapError::Provider` when a required secret is missing or an entry is
+/// misconfigured (e.g. compatible provider without a name).
+#[allow(clippy::too_many_lines)]
+pub fn build_provider_from_entry(
+    entry: &ProviderEntry,
     config: &Config,
 ) -> Result<AnyProvider, BootstrapError> {
-    match pcfg.provider_type.as_str() {
-        "ollama" => {
-            let base_url = pcfg.base_url.as_deref().unwrap_or(&config.llm.base_url);
-            let model = pcfg.model.as_deref().unwrap_or(&config.llm.model);
-            let embed = pcfg
+    match entry.provider_type {
+        ProviderKind::Ollama => {
+            let base_url = entry
+                .base_url
+                .as_deref()
+                .unwrap_or("http://localhost:11434");
+            let model = entry.model.as_deref().unwrap_or("qwen3:8b").to_owned();
+            let embed = entry
                 .embedding_model
                 .clone()
                 .unwrap_or_else(|| config.llm.embedding_model.clone());
-            Ok(AnyProvider::Ollama(OllamaProvider::new(
-                base_url,
-                model.to_owned(),
-                embed,
-            )))
+            let tool_use = entry.tool_use;
+            let mut provider = OllamaProvider::new(base_url, model, embed).with_tool_use(tool_use);
+            if let Some(ref vm) = entry.vision_model {
+                provider = provider.with_vision_model(vm.clone());
+            }
+            Ok(AnyProvider::Ollama(provider))
         }
-        "claude" => pcfg_claude(pcfg, config),
-        "openai" => pcfg_openai(pcfg, config),
-        "gemini" => pcfg_gemini(pcfg, config),
-        "compatible" => {
-            let name = pcfg.model.as_deref().ok_or_else(|| {
-                BootstrapError::Provider(
-                    "compatible provider requires 'model' set to the entry name".into(),
-                )
-            })?;
-            create_named_provider(name, config)
-        }
-        #[cfg(feature = "candle")]
-        "candle" => {
-            let candle_cfg = config.llm.candle.as_ref().ok_or_else(|| {
-                BootstrapError::Provider(
-                    "llm.candle config section required for candle provider".into(),
-                )
-            })?;
-            let source = match candle_cfg.source.as_str() {
-                "local" => zeph_llm::candle_provider::loader::ModelSource::Local {
-                    path: std::path::PathBuf::from(&candle_cfg.local_path),
-                },
-                _ => zeph_llm::candle_provider::loader::ModelSource::HuggingFace {
-                    repo_id: pcfg
-                        .model
-                        .clone()
-                        .unwrap_or_else(|| config.llm.model.clone()),
-                    filename: candle_cfg.filename.clone(),
-                },
-            };
-            let device_pref = pcfg.device.as_deref().unwrap_or(&candle_cfg.device);
-            build_candle_provider(source, candle_cfg, device_pref)
-        }
-        other => Err(BootstrapError::Provider(format!(
-            "unknown provider type: '{other}'"
-        ))),
-    }
-}
-
-fn pcfg_claude(
-    pcfg: &crate::config::OrchestratorProviderConfig,
-    config: &Config,
-) -> Result<AnyProvider, BootstrapError> {
-    let api_key = config
-        .secrets
-        .claude_api_key
-        .as_ref()
-        .ok_or_else(|| {
-            BootstrapError::Provider("ZEPH_CLAUDE_API_KEY required for claude provider".into())
-        })?
-        .expose()
-        .to_owned();
-    let cloud = config.llm.cloud.as_ref();
-    let model = pcfg
-        .model
-        .as_deref()
-        .or_else(|| cloud.map(|c| c.model.as_str()))
-        .unwrap_or("claude-haiku-4-5-20251001");
-    let max_tokens = cloud.map_or(4096, |c| c.max_tokens);
-    let enable_extended_context = cloud.is_some_and(|c| c.enable_extended_context);
-    let provider = ClaudeProvider::new(api_key, model.to_owned(), max_tokens)
-        .with_client(llm_client(config.timeouts.llm_request_timeout_secs))
-        .with_extended_context(enable_extended_context);
-    Ok(AnyProvider::Claude(provider))
-}
-
-fn pcfg_openai(
-    pcfg: &crate::config::OrchestratorProviderConfig,
-    config: &Config,
-) -> Result<AnyProvider, BootstrapError> {
-    let api_key = config
-        .secrets
-        .openai_api_key
-        .as_ref()
-        .ok_or_else(|| {
-            BootstrapError::Provider("ZEPH_OPENAI_API_KEY required for openai provider".into())
-        })?
-        .expose()
-        .to_owned();
-    let openai_cfg = config.llm.openai.as_ref();
-    let base_url = pcfg
-        .base_url
-        .clone()
-        .or_else(|| openai_cfg.map(|c| c.base_url.clone()))
-        .unwrap_or_else(|| "https://api.openai.com/v1".to_owned());
-    let model = pcfg
-        .model
-        .as_deref()
-        .or_else(|| openai_cfg.map(|c| c.model.as_str()))
-        .unwrap_or("gpt-4o-mini");
-    let max_tokens = openai_cfg.map_or(4096, |c| c.max_tokens);
-    let embed = pcfg
-        .embedding_model
-        .clone()
-        .or_else(|| openai_cfg.and_then(|c| c.embedding_model.clone()));
-    Ok(AnyProvider::OpenAi(
-        OpenAiProvider::new(api_key, base_url, model.to_owned(), max_tokens, embed, None)
-            .with_client(llm_client(config.timeouts.llm_request_timeout_secs)),
-    ))
-}
-
-fn pcfg_gemini(
-    pcfg: &crate::config::OrchestratorProviderConfig,
-    config: &Config,
-) -> Result<AnyProvider, BootstrapError> {
-    let api_key = config
-        .secrets
-        .gemini_api_key
-        .as_ref()
-        .ok_or_else(|| {
-            BootstrapError::Provider("ZEPH_GEMINI_API_KEY required for gemini provider".into())
-        })?
-        .expose()
-        .to_owned();
-    let gemini_cfg = config.llm.gemini.as_ref();
-    let model = pcfg
-        .model
-        .as_deref()
-        .or_else(|| gemini_cfg.map(|c| c.model.as_str()))
-        .unwrap_or("gemini-2.0-flash");
-    let max_tokens = gemini_cfg.map_or(4096, |c| c.max_tokens);
-    let base_url = gemini_cfg.map_or_else(
-        || "https://generativelanguage.googleapis.com".to_owned(),
-        |c| c.base_url.clone(),
-    );
-    let mut provider = GeminiProvider::new(api_key, model.to_owned(), max_tokens)
-        .with_base_url(base_url)
-        .with_client(llm_client(config.timeouts.llm_request_timeout_secs));
-    if let Some(em) = gemini_cfg.and_then(|c| c.embedding_model.as_deref()) {
-        provider = provider.with_embedding_model(em);
-    }
-    if let Some(level) = gemini_cfg.and_then(|c| c.thinking_level) {
-        provider = provider.with_thinking_level(level);
-    }
-    if let Some(budget) = gemini_cfg.and_then(|c| c.thinking_budget) {
-        provider = provider
-            .with_thinking_budget(budget)
-            .map_err(|e| BootstrapError::Provider(e.to_string()))?;
-    }
-    if let Some(include) = gemini_cfg.and_then(|c| c.include_thoughts) {
-        provider = provider.with_include_thoughts(include);
-    }
-    Ok(AnyProvider::Gemini(provider))
-}
-
-#[allow(clippy::too_many_lines)] // multi-provider match dispatch: one arm per backend, cannot be meaningfully split
-fn build_sub_provider(
-    pcfg: &crate::config::OrchestratorProviderConfig,
-    config: &Config,
-) -> Result<zeph_llm::orchestrator::SubProvider, BootstrapError> {
-    use zeph_llm::orchestrator::SubProvider;
-    match pcfg.provider_type.as_str() {
-        "ollama" => {
-            let base_url = pcfg.base_url.as_deref().unwrap_or(&config.llm.base_url);
-            let model = pcfg.model.as_deref().unwrap_or(&config.llm.model);
-            let embed = pcfg
-                .embedding_model
-                .clone()
-                .unwrap_or_else(|| config.llm.embedding_model.clone());
-            Ok(SubProvider::Ollama(OllamaProvider::new(
-                base_url,
-                model.to_owned(),
-                embed,
-            )))
-        }
-        "claude" => {
-            let cloud = config.llm.cloud.as_ref().ok_or_else(|| {
-                BootstrapError::Provider("llm.cloud config required for claude sub-provider".into())
-            })?;
+        ProviderKind::Claude => {
             let api_key = config
                 .secrets
                 .claude_api_key
                 .as_ref()
                 .ok_or_else(|| {
-                    BootstrapError::Provider(
-                        "ZEPH_CLAUDE_API_KEY required for claude sub-provider".into(),
-                    )
+                    BootstrapError::Provider("ZEPH_CLAUDE_API_KEY not found in vault".into())
                 })?
                 .expose()
                 .to_owned();
-            let model = pcfg.model.as_deref().unwrap_or(&cloud.model);
-            let sub = ClaudeProvider::new(api_key, model.to_owned(), cloud.max_tokens)
+            let model = entry
+                .model
+                .clone()
+                .unwrap_or_else(|| "claude-haiku-4-5-20251001".to_owned());
+            let max_tokens = entry.max_tokens.unwrap_or(4096);
+            let provider = ClaudeProvider::new(api_key, model, max_tokens)
                 .with_client(llm_client(config.timeouts.llm_request_timeout_secs))
-                .with_extended_context(cloud.enable_extended_context)
-                .with_thinking_opt(cloud.thinking.clone())
+                .with_extended_context(entry.enable_extended_context)
+                .with_thinking_opt(entry.thinking.clone())
                 .map_err(|e| BootstrapError::Provider(format!("invalid thinking config: {e}")))?
-                .with_server_compaction(cloud.server_compaction);
-            Ok(SubProvider::Claude(sub))
+                .with_server_compaction(entry.server_compaction);
+            Ok(AnyProvider::Claude(provider))
         }
-        "openai" => {
-            let openai_cfg = config.llm.openai.as_ref().ok_or_else(|| {
-                BootstrapError::Provider(
-                    "llm.openai config required for openai sub-provider".into(),
-                )
-            })?;
+        ProviderKind::OpenAi => {
             let api_key = config
                 .secrets
                 .openai_api_key
                 .as_ref()
                 .ok_or_else(|| {
-                    BootstrapError::Provider(
-                        "ZEPH_OPENAI_API_KEY required for openai sub-provider".into(),
-                    )
+                    BootstrapError::Provider("ZEPH_OPENAI_API_KEY not found in vault".into())
                 })?
                 .expose()
                 .to_owned();
-            let base_url = pcfg
+            let base_url = entry
                 .base_url
                 .clone()
-                .unwrap_or_else(|| openai_cfg.base_url.clone());
-            let model = pcfg.model.as_deref().unwrap_or(&openai_cfg.model);
-            let embed = pcfg
-                .embedding_model
+                .unwrap_or_else(|| "https://api.openai.com/v1".to_owned());
+            let model = entry
+                .model
                 .clone()
-                .or_else(|| openai_cfg.embedding_model.clone());
-            Ok(SubProvider::OpenAi(
+                .unwrap_or_else(|| "gpt-4o-mini".to_owned());
+            let max_tokens = entry.max_tokens.unwrap_or(4096);
+            Ok(AnyProvider::OpenAi(
                 OpenAiProvider::new(
                     api_key,
                     base_url,
-                    model.to_owned(),
-                    openai_cfg.max_tokens,
-                    embed,
-                    openai_cfg.reasoning_effort.clone(),
+                    model,
+                    max_tokens,
+                    entry.embedding_model.clone(),
+                    entry.reasoning_effort.clone(),
                 )
                 .with_client(llm_client(config.timeouts.llm_request_timeout_secs)),
             ))
         }
-        "gemini" => {
+        ProviderKind::Gemini => {
             let api_key = config
                 .secrets
                 .gemini_api_key
                 .as_ref()
                 .ok_or_else(|| {
-                    BootstrapError::Provider(
-                        "ZEPH_GEMINI_API_KEY required for gemini sub-provider".into(),
-                    )
+                    BootstrapError::Provider("ZEPH_GEMINI_API_KEY not found in vault".into())
                 })?
                 .expose()
                 .to_owned();
-            let gemini_cfg = config.llm.gemini.as_ref();
-            let model = pcfg
+            let model = entry
                 .model
-                .as_deref()
-                .or_else(|| gemini_cfg.map(|c| c.model.as_str()))
-                .unwrap_or("gemini-2.0-flash");
-            let max_tokens = gemini_cfg.map_or(8192, |c| c.max_tokens);
-            let base_url = gemini_cfg.map_or_else(
-                || "https://generativelanguage.googleapis.com".to_owned(),
-                |c| c.base_url.clone(),
-            );
-            let mut provider = GeminiProvider::new(api_key, model.to_owned(), max_tokens)
+                .clone()
+                .unwrap_or_else(|| "gemini-2.0-flash".to_owned());
+            let max_tokens = entry.max_tokens.unwrap_or(8192);
+            let base_url = entry
+                .base_url
+                .clone()
+                .unwrap_or_else(|| "https://generativelanguage.googleapis.com".to_owned());
+            let mut provider = GeminiProvider::new(api_key, model, max_tokens)
                 .with_base_url(base_url)
                 .with_client(llm_client(config.timeouts.llm_request_timeout_secs));
-            if let Some(level) = gemini_cfg.and_then(|c| c.thinking_level) {
+            if let Some(ref em) = entry.embedding_model {
+                provider = provider.with_embedding_model(em.clone());
+            }
+            if let Some(level) = entry.thinking_level {
                 provider = provider.with_thinking_level(level);
             }
-            if let Some(budget) = gemini_cfg.and_then(|c| c.thinking_budget) {
-                provider = provider.with_thinking_budget(budget).map_err(|e| {
-                    BootstrapError::Provider(format!("invalid thinking_budget: {e}"))
-                })?;
+            if let Some(budget) = entry.thinking_budget {
+                provider = provider
+                    .with_thinking_budget(budget)
+                    .map_err(|e| BootstrapError::Provider(e.to_string()))?;
             }
-            if let Some(include) = gemini_cfg.and_then(|c| c.include_thoughts) {
+            if let Some(include) = entry.include_thoughts {
                 provider = provider.with_include_thoughts(include);
             }
-            Ok(SubProvider::Gemini(provider))
+            Ok(AnyProvider::Gemini(provider))
         }
-        #[cfg(feature = "candle")]
-        "candle" => {
-            let candle_cfg = config.llm.candle.as_ref().ok_or_else(|| {
+        ProviderKind::Compatible => {
+            let name = entry.name.as_deref().ok_or_else(|| {
                 BootstrapError::Provider(
-                    "llm.candle config required for candle sub-provider".into(),
+                    "compatible provider requires 'name' field in [[llm.providers]]".into(),
                 )
             })?;
-            let source = match candle_cfg.source.as_str() {
+            let base_url = entry.base_url.clone().ok_or_else(|| {
+                BootstrapError::Provider(format!(
+                    "compatible provider '{name}' requires 'base_url'"
+                ))
+            })?;
+            let model = entry.model.clone().unwrap_or_default();
+            let api_key = entry.api_key.clone().unwrap_or_else(|| {
+                config
+                    .secrets
+                    .compatible_api_keys
+                    .get(name)
+                    .map(|s| s.expose().to_owned())
+                    .unwrap_or_default()
+            });
+            let max_tokens = entry.max_tokens.unwrap_or(4096);
+            Ok(AnyProvider::Compatible(CompatibleProvider::new(
+                name.to_owned(),
+                api_key,
+                base_url,
+                model,
+                max_tokens,
+                entry.embedding_model.clone(),
+            )))
+        }
+        #[cfg(feature = "candle")]
+        ProviderKind::Candle => {
+            let candle = entry.candle.as_ref().ok_or_else(|| {
+                BootstrapError::Provider(
+                    "candle provider requires 'candle' section in [[llm.providers]]".into(),
+                )
+            })?;
+            let source = match candle.source.as_str() {
                 "local" => zeph_llm::candle_provider::loader::ModelSource::Local {
-                    path: std::path::PathBuf::from(&candle_cfg.local_path),
+                    path: std::path::PathBuf::from(&candle.local_path),
                 },
                 _ => zeph_llm::candle_provider::loader::ModelSource::HuggingFace {
-                    repo_id: pcfg
+                    repo_id: entry
                         .model
                         .clone()
-                        .unwrap_or_else(|| config.llm.model.clone()),
-                    filename: candle_cfg.filename.clone(),
+                        .unwrap_or_else(|| config.llm.effective_model().to_owned()),
+                    filename: candle.filename.clone(),
                 },
             };
-            let device_pref = pcfg.device.as_deref().unwrap_or(&candle_cfg.device);
-            let any = build_candle_provider(source, candle_cfg, device_pref)?;
-            if let AnyProvider::Candle(p) = any {
-                Ok(SubProvider::Candle(p))
-            } else {
-                unreachable!("build_candle_provider always returns AnyProvider::Candle")
+            let candle_cfg_adapter = crate::config::CandleConfig {
+                source: candle.source.clone(),
+                local_path: candle.local_path.clone(),
+                filename: candle.filename.clone(),
+                chat_template: candle.chat_template.clone(),
+                device: candle.device.clone(),
+                embedding_repo: candle.embedding_repo.clone(),
+                generation: candle.generation.clone(),
+            };
+            build_candle_provider(source, &candle_cfg_adapter, &candle.device)
+        }
+        #[cfg(not(feature = "candle"))]
+        ProviderKind::Candle => Err(BootstrapError::Provider(
+            "candle feature is not enabled".into(),
+        )),
+    }
+}
+
+/// Build the primary `AnyProvider` from the new `[[llm.providers]]` pool.
+///
+/// When `[llm] routing` is set to a non-None strategy, all providers in the pool are
+/// initialized and wrapped in a `RouterProvider` with the appropriate strategy.
+/// When routing is `None`, selects the provider marked `default = true` (or the first
+/// entry) and falls back to subsequent entries on initialization failure.
+#[allow(clippy::too_many_lines)]
+fn create_provider_from_pool(config: &Config) -> Result<AnyProvider, BootstrapError> {
+    let pool = &config.llm.providers;
+
+    // Empty pool → default Ollama on localhost.
+    if pool.is_empty() {
+        let base_url = config.llm.effective_base_url();
+        let model = config.llm.effective_model();
+        let embed = &config.llm.embedding_model;
+        return Ok(AnyProvider::Ollama(OllamaProvider::new(
+            base_url,
+            model.to_owned(),
+            embed.clone(),
+        )));
+    }
+
+    match config.llm.routing {
+        LlmRoutingStrategy::None => build_single_provider_from_pool(pool, config),
+        LlmRoutingStrategy::Ema => {
+            let providers = build_all_pool_providers(pool, config)?;
+            let raw_alpha = config.llm.router_ema_alpha;
+            let alpha = raw_alpha.clamp(f64::MIN_POSITIVE, 1.0);
+            if (alpha - raw_alpha).abs() > f64::EPSILON {
+                tracing::warn!(
+                    raw_alpha,
+                    clamped = alpha,
+                    "router_ema_alpha out of range [MIN_POSITIVE, 1.0], clamped"
+                );
+            }
+            Ok(AnyProvider::Router(Box::new(
+                RouterProvider::new(providers).with_ema(alpha, config.llm.router_reorder_interval),
+            )))
+        }
+        LlmRoutingStrategy::Thompson => {
+            let providers = build_all_pool_providers(pool, config)?;
+            let state_path = config
+                .llm
+                .router
+                .as_ref()
+                .and_then(|r| r.thompson_state_path.as_deref())
+                .map(std::path::Path::new);
+            Ok(AnyProvider::Router(Box::new(
+                RouterProvider::new(providers).with_thompson(state_path),
+            )))
+        }
+        LlmRoutingStrategy::Cascade => {
+            let providers = build_all_pool_providers(pool, config)?;
+            let cascade_cfg = config
+                .llm
+                .router
+                .as_ref()
+                .and_then(|r| r.cascade.clone())
+                .unwrap_or_default();
+            let router_cascade_cfg = build_cascade_router_config(&cascade_cfg, config);
+            Ok(AnyProvider::Router(Box::new(
+                RouterProvider::new(providers).with_cascade(router_cascade_cfg),
+            )))
+        }
+        LlmRoutingStrategy::Task => {
+            // Task-based routing is not yet implemented; fall back to single provider.
+            tracing::warn!(
+                "routing = \"task\" is not yet implemented; \
+                 falling back to single provider from pool"
+            );
+            build_single_provider_from_pool(pool, config)
+        }
+    }
+}
+
+/// Initialize all providers in the pool, skipping those that fail with a warning.
+/// Returns an error if no provider could be initialized.
+fn build_all_pool_providers(
+    pool: &[ProviderEntry],
+    config: &Config,
+) -> Result<Vec<AnyProvider>, BootstrapError> {
+    let mut providers = Vec::new();
+    for entry in pool {
+        match build_provider_from_entry(entry, config) {
+            Ok(p) => providers.push(p),
+            Err(e) => {
+                tracing::warn!(
+                    provider = entry.name.as_deref().unwrap_or("?"),
+                    error = %e,
+                    "skipping pool provider during routing initialization"
+                );
             }
         }
-        other => Err(BootstrapError::Provider(format!(
-            "unknown orchestrator sub-provider type: {other}"
-        ))),
     }
+    if providers.is_empty() {
+        return Err(BootstrapError::Provider(
+            "routing enabled but no providers in [[llm.providers]] could be initialized".into(),
+        ));
+    }
+    Ok(providers)
 }
 
-pub fn build_orchestrator(
+/// Pick the default (or first) provider from the pool with fallback on failure.
+fn build_single_provider_from_pool(
+    pool: &[ProviderEntry],
     config: &Config,
-) -> Result<zeph_llm::orchestrator::ModelOrchestrator, BootstrapError> {
-    use std::collections::HashMap;
-    use zeph_llm::orchestrator::{ModelOrchestrator, TaskType};
-
-    let orch_cfg = config.llm.orchestrator.as_ref().ok_or_else(|| {
-        BootstrapError::Provider(
-            "llm.orchestrator config section required for orchestrator provider".into(),
-        )
-    })?;
-
-    let mut providers = HashMap::new();
-    for (name, pcfg) in &orch_cfg.providers {
-        let provider = build_sub_provider(pcfg, config)?;
-        providers.insert(name.clone(), provider);
-    }
-
-    let mut routes = HashMap::new();
-    for (task_str, chain) in &orch_cfg.routes {
-        let task = TaskType::parse_str(task_str);
-        routes.insert(task, chain.clone());
-    }
-
-    let mut orch = ModelOrchestrator::new(
-        routes,
-        providers,
-        orch_cfg.default.clone(),
-        orch_cfg.embed.clone(),
-    )
-    .map_err(|e| BootstrapError::Provider(e.to_string()))?;
-
-    if let Some(ttl) = orch_cfg.failure_ttl_secs {
-        orch = orch.with_failure_ttl(ttl);
-    }
-
-    Ok(orch)
-}
-
-/// Returns `true` if `base_url` points to a local or private-network endpoint
-/// where an API key is typically unnecessary.
-fn is_local_endpoint(base_url: &str) -> bool {
-    // Strip scheme (http:// or https://) then extract host before port/path.
-    let after_scheme = base_url
-        .strip_prefix("https://")
-        .or_else(|| base_url.strip_prefix("http://"))
-        .unwrap_or(base_url);
-    let host = after_scheme
-        .split('/')
-        .next()
-        .and_then(|h| h.split(':').next())
-        .unwrap_or(after_scheme);
-
-    if host.eq_ignore_ascii_case("localhost")
-        || host == "127.0.0.1"
-        || host == "::1"
-        || host == "[::1]"
-    {
-        return true;
-    }
-    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-        return match ip {
-            std::net::IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
-            std::net::IpAddr::V6(v6) => v6.is_loopback(),
-        };
-    }
-    // Hostname suffixes, not file extensions — suppress clippy false positive.
-    #[allow(clippy::case_sensitive_file_extension_comparisons)]
-    {
-        host.ends_with(".local") || host.ends_with(".internal")
-    }
-}
-
-/// Apply reputation scoring to `router` if `[llm.router.reputation]` is enabled.
-///
-/// No-op for Cascade strategy (fixed cost tiers, reputation not used for ordering).
-fn apply_reputation_if_enabled(
-    router: zeph_llm::router::RouterProvider,
-    router_cfg: &crate::config::RouterConfig,
-) -> zeph_llm::router::RouterProvider {
-    let Some(ref rep_cfg) = router_cfg.reputation else {
-        return router;
-    };
-    if !rep_cfg.enabled {
-        return router;
-    }
-    // Cascade uses fixed cost tiers; reputation is not used for ordering.
-    if router_cfg.strategy == crate::config::RouterStrategyConfig::Cascade {
-        tracing::debug!("reputation scoring is not used in cascade mode; skipping");
-        return router;
-    }
-    let state_path = rep_cfg.state_path.as_deref().map(std::path::Path::new);
-    let decay = rep_cfg.decay_factor.clamp(f64::MIN_POSITIVE, 1.0);
-    let weight = rep_cfg.weight.clamp(0.0, 1.0);
-    tracing::info!(
-        decay_factor = decay,
-        weight = weight,
-        min_observations = rep_cfg.min_observations,
-        "reputation scoring enabled"
-    );
-    router.with_reputation(decay, weight, rep_cfg.min_observations, state_path)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn local_endpoints_detected() {
-        assert!(is_local_endpoint("http://localhost:11434/v1"));
-        assert!(is_local_endpoint("http://127.0.0.1:8080"));
-        assert!(is_local_endpoint("https://localhost/api"));
-        assert!(is_local_endpoint("http://192.168.1.100:11434/v1"));
-        assert!(is_local_endpoint("http://10.0.0.5:8000"));
-        assert!(is_local_endpoint("http://172.16.0.1:9090"));
-        assert!(is_local_endpoint("http://myhost.local:11434"));
-        assert!(is_local_endpoint("http://service.internal:8080"));
-    }
-
-    #[test]
-    fn remote_endpoints_not_local() {
-        assert!(!is_local_endpoint("https://api.openai.com/v1"));
-        assert!(!is_local_endpoint("https://api.anthropic.com"));
-        assert!(!is_local_endpoint("http://8.8.8.8:11434"));
-        assert!(!is_local_endpoint("https://my-server.example.com/v1"));
+) -> Result<AnyProvider, BootstrapError> {
+    let primary_idx = pool.iter().position(|e| e.default).unwrap_or(0);
+    let primary = &pool[primary_idx];
+    match build_provider_from_entry(primary, config) {
+        Ok(p) => Ok(p),
+        Err(e) => {
+            let name = primary.name.as_deref().unwrap_or("primary");
+            tracing::warn!(provider = name, error = %e, "primary provider failed, trying next");
+            for (i, entry) in pool.iter().enumerate() {
+                if i == primary_idx {
+                    continue;
+                }
+                match build_provider_from_entry(entry, config) {
+                    Ok(p) => return Ok(p),
+                    Err(e2) => {
+                        tracing::warn!(
+                            provider = entry.name.as_deref().unwrap_or("?"),
+                            error = %e2,
+                            "fallback provider failed"
+                        );
+                    }
+                }
+            }
+            Err(BootstrapError::Provider(format!(
+                "all providers in [[llm.providers]] failed to initialize; first error: {e}"
+            )))
+        }
     }
 }

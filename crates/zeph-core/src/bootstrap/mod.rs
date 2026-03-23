@@ -17,8 +17,8 @@ pub use oauth::VaultCredentialStore;
 #[cfg(feature = "candle")]
 pub use provider::select_device;
 pub use provider::{
-    BootstrapError, build_orchestrator, create_named_provider, create_provider,
-    create_provider_from_config, create_summary_provider,
+    BootstrapError, build_provider_from_entry, create_named_provider, create_provider,
+    create_summary_provider,
 };
 pub use skills::{create_skill_matcher, effective_embedding_model, managed_skills_dir};
 
@@ -82,6 +82,7 @@ impl AppBuilder {
         let config_path = resolve_config_path(config_override);
         let mut config = Config::load(&config_path)?;
         config.validate()?;
+        config.llm.check_legacy_format()?;
 
         let vault_args = parse_vault_args(
             &config,
@@ -426,12 +427,12 @@ impl AppBuilder {
 
     pub fn build_summary_provider(&self) -> Option<AnyProvider> {
         // Structured config takes precedence over the string-based summary_model.
-        if let Some(ref pcfg) = self.config.llm.summary_provider {
-            return match create_provider_from_config(pcfg, &self.config) {
+        if let Some(ref entry) = self.config.llm.summary_provider {
+            return match build_provider_from_entry(entry, &self.config) {
                 Ok(sp) => {
                     tracing::info!(
-                        provider_type = %pcfg.provider_type,
-                        model = ?pcfg.model,
+                        provider_type = ?entry.provider_type,
+                        model = ?entry.model,
                         "summary provider configured via [llm.summary_provider]"
                     );
                     Some(sp)
@@ -543,7 +544,6 @@ impl AppBuilder {
         }
         if learning.judge_model.is_empty() {
             tracing::warn!(
-                provider = ?self.config.llm.provider,
                 "detector_mode=judge but judge_model is empty — primary provider will be used for judging"
             );
             return None;
