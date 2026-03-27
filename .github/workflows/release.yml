@@ -123,12 +123,62 @@ jobs:
         uses: rust-lang/crates-io-auth-action@b7e9a28eded4986ec6b1fa40eeee8f8f165559ec # v1
         id: auth
       - name: Publish crates to crates.io
-        uses: katyo/publish-crates@02cc2f1ad653fb25c7d1ff9eb590a8a50d06186b # v2
-        with:
-          registry-token: ${{ steps.auth.outputs.token }}
-          ignore-unpublished-changes: true
-          publish-delay: 60000
-          no-verify: true
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: |
+          PUBLISH_ORDER=$(python3 -c "
+          import json, subprocess, sys
+          from collections import defaultdict, deque
+
+          meta = json.loads(subprocess.check_output(
+              ['cargo', 'metadata', '--no-deps', '--format-version', '1']
+          ))
+          ws = set(meta['workspace_members'])
+          pkgs = {p['id']: p for p in meta['packages'] if p['id'] in ws}
+          pub_pkgs = {id: p for id, p in pkgs.items() if p.get('publish') != []}
+          name_to_id = {p['name']: p['id'] for p in pub_pkgs.values()}
+
+          in_deg = defaultdict(int)
+          graph = defaultdict(list)
+          for pkg in pub_pkgs.values():
+              for dep in pkg['dependencies']:
+                  if dep['name'] in name_to_id and dep['name'] != pkg['name']:
+                      dep_id = name_to_id[dep['name']]
+                      graph[dep_id].append(pkg['id'])
+                      in_deg[pkg['id']] += 1
+
+          queue = deque(id for id in pub_pkgs if in_deg[id] == 0)
+          order = []
+          while queue:
+              node = queue.popleft()
+              order.append(pub_pkgs[node]['name'])
+              for nxt in graph[node]:
+                  in_deg[nxt] -= 1
+                  if in_deg[nxt] == 0:
+                      queue.append(nxt)
+          print(chr(10).join(order))
+          ")
+
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          FIRST=true
+          for CRATE in $PUBLISH_ORDER; do
+            REMOTE=$(curl -sf "https://crates.io/api/v1/crates/${CRATE}/versions" \
+              -H "User-Agent: zeph-release-ci" \
+              | python3 -c "import sys,json; vs=[v['num'] for v in json.load(sys.stdin).get('versions',[])]; print('yes' if '${VERSION}' in vs else 'no')" 2>/dev/null || echo "no")
+            if [ "$REMOTE" = "yes" ]; then
+              echo "Skipping $CRATE@$VERSION (already published)"
+              continue
+            fi
+
+            if [ "$FIRST" = "false" ]; then
+              echo "Waiting 60s for crates.io sparse index propagation..."
+              sleep 60
+            fi
+            FIRST=false
+
+            echo "Publishing $CRATE@$VERSION..."
+            cargo publish --no-verify -p "$CRATE"
+          done
 
   create-release:
     name: Create GitHub Release
