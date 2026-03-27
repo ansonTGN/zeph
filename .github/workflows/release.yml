@@ -127,7 +127,7 @@ jobs:
         with:
           registry-token: ${{ steps.auth.outputs.token }}
           ignore-unpublished-changes: true
-          publish-delay: 15000
+          publish-delay: 60000
           no-verify: true
 
   create-release:
