@@ -82,6 +82,11 @@ pub enum DetectorMode {
     /// `ExplicitRejection` and `SelfCorrection` bypass the judge (confidence >= `adaptive_high`),
     /// while `AlternativeRequest`, `Repetition`, and regex misses go through it.
     Judge,
+    /// ML model-based detection via `ClassifierBackend`.
+    ///
+    /// Requires `classifiers.enabled = true` and a non-empty `detector_model` field.
+    /// When the backend is unavailable, falls back to regex with a warning.
+    Model,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -112,6 +117,12 @@ pub struct LearningConfig {
     /// Model for the judge detector (e.g. "claude-sonnet-4-6"). Empty = use primary provider.
     #[serde(default)]
     pub judge_model: String,
+    /// `HuggingFace` repo ID for the ML correction detector when `detector_mode = "model"`.
+    ///
+    /// Must be non-empty when `detector_mode = "model"` and `classifiers.enabled = true`.
+    /// When empty or classifiers are disabled, bootstrap falls back to regex with a warning.
+    #[serde(default)]
+    pub detector_model: String,
     /// Regex confidence below this value is treated as "not a correction" — judge not invoked.
     #[serde(default = "default_judge_adaptive_low")]
     pub judge_adaptive_low: f32,
@@ -147,6 +158,7 @@ impl Default for LearningConfig {
             correction_confidence_threshold: default_correction_confidence_threshold(),
             detector_mode: DetectorMode::default(),
             judge_model: String::new(),
+            detector_model: String::new(),
             judge_adaptive_low: default_judge_adaptive_low(),
             judge_adaptive_high: default_judge_adaptive_high(),
             correction_recall_limit: default_correction_recall_limit(),
@@ -156,5 +168,37 @@ impl Default for LearningConfig {
             auto_demote_min_uses: default_auto_demote_min_uses(),
             auto_demote_threshold: default_auto_demote_threshold(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detector_mode_model_serde_roundtrip() {
+        let toml = r#"
+            enabled = true
+            detector_mode = "model"
+            detector_model = "some/model"
+        "#;
+        let config: LearningConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.detector_mode, DetectorMode::Model);
+        assert_eq!(config.detector_model, "some/model");
+        assert!(config.enabled);
+    }
+
+    #[test]
+    fn detector_mode_defaults_to_regex() {
+        let config = LearningConfig::default();
+        assert_eq!(config.detector_mode, DetectorMode::Regex);
+        assert!(config.detector_model.is_empty());
+    }
+
+    #[test]
+    fn detector_mode_judge_roundtrip() {
+        let toml = r#"detector_mode = "judge""#;
+        let config: LearningConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.detector_mode, DetectorMode::Judge);
     }
 }
