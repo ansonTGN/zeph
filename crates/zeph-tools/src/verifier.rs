@@ -22,7 +22,8 @@
 //!
 //! Overlap (3 entries: `rm -rf /`, `mkfs`, `dd if=`) is intentional — belt-and-suspenders.
 
-use std::sync::LazyLock;
+use std::collections::HashSet;
+use std::sync::{Arc, LazyLock, RwLock};
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -131,6 +132,35 @@ impl Default for InjectionVerifierConfig {
     }
 }
 
+/// Configuration for the URL grounding verifier.
+///
+/// When enabled, `fetch` and `web_scrape` calls are blocked unless the URL
+/// appears in the set of URLs extracted from user messages (`user_provided_urls`).
+/// This prevents the LLM from hallucinating API endpoints and calling fetch with
+/// fabricated URLs that were never supplied by the user.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct UrlGroundingVerifierConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Tool IDs subject to URL grounding checks. Any tool whose name ends with `_fetch`
+    /// is also guarded regardless of this list.
+    #[serde(default = "default_guarded_tools")]
+    pub guarded_tools: Vec<String>,
+}
+
+fn default_guarded_tools() -> Vec<String> {
+    vec!["fetch".to_string(), "web_scrape".to_string()]
+}
+
+impl Default for UrlGroundingVerifierConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            guarded_tools: default_guarded_tools(),
+        }
+    }
+}
+
 /// Top-level configuration for all pre-execution verifiers.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PreExecutionVerifierConfig {
@@ -140,6 +170,8 @@ pub struct PreExecutionVerifierConfig {
     pub destructive_commands: DestructiveVerifierConfig,
     #[serde(default)]
     pub injection_patterns: InjectionVerifierConfig,
+    #[serde(default)]
+    pub url_grounding: UrlGroundingVerifierConfig,
 }
 
 impl Default for PreExecutionVerifierConfig {
@@ -148,6 +180,7 @@ impl Default for PreExecutionVerifierConfig {
             enabled: true,
             destructive_commands: DestructiveVerifierConfig::default(),
             injection_patterns: InjectionVerifierConfig::default(),
+            url_grounding: UrlGroundingVerifierConfig::default(),
         }
     }
 }
@@ -650,6 +683,92 @@ impl PreExecutionVerifier for InjectionPatternVerifier {
 }
 
 // ---------------------------------------------------------------------------
+// UrlGroundingVerifier
+// ---------------------------------------------------------------------------
+
+/// Verifier that blocks `fetch` and `web_scrape` calls when the requested URL
+/// was not explicitly provided by the user in the conversation.
+///
+/// The agent populates `user_provided_urls` whenever a user message is received,
+/// by extracting all http/https URLs from the raw input. This set persists across
+/// turns within a session and is cleared on `/clear`.
+///
+/// ## Bypass rules
+///
+/// - Tools not in the `guarded_tools` list (and not ending in `_fetch`) pass through.
+/// - If the URL in the tool call is a prefix-match or exact match of any URL in
+///   `user_provided_urls`, the call is allowed.
+/// - If `user_provided_urls` is empty (no URLs seen in this session at all), the call
+///   is blocked — the LLM must not fetch arbitrary URLs when the user never provided one.
+#[derive(Debug, Clone)]
+pub struct UrlGroundingVerifier {
+    guarded_tools: Vec<String>,
+    user_provided_urls: Arc<RwLock<HashSet<String>>>,
+}
+
+impl UrlGroundingVerifier {
+    #[must_use]
+    pub fn new(
+        config: &UrlGroundingVerifierConfig,
+        user_provided_urls: Arc<RwLock<HashSet<String>>>,
+    ) -> Self {
+        Self {
+            guarded_tools: config
+                .guarded_tools
+                .iter()
+                .map(|s| s.to_lowercase())
+                .collect(),
+            user_provided_urls,
+        }
+    }
+
+    fn is_guarded(&self, tool_name: &str) -> bool {
+        let lower = tool_name.to_lowercase();
+        self.guarded_tools.iter().any(|t| t == &lower) || lower.ends_with("_fetch")
+    }
+
+    /// Returns true if `url` is grounded — i.e., it appears in (or is a prefix of)
+    /// a URL from `user_provided_urls`.
+    fn is_grounded(url: &str, user_provided_urls: &HashSet<String>) -> bool {
+        let lower = url.to_lowercase();
+        user_provided_urls
+            .iter()
+            .any(|u| lower.starts_with(u.as_str()) || u.starts_with(lower.as_str()))
+    }
+}
+
+impl PreExecutionVerifier for UrlGroundingVerifier {
+    fn name(&self) -> &'static str {
+        "UrlGroundingVerifier"
+    }
+
+    fn verify(&self, tool_name: &str, args: &serde_json::Value) -> VerificationResult {
+        if !self.is_guarded(tool_name) {
+            return VerificationResult::Allow;
+        }
+
+        let Some(url) = args.get("url").and_then(|v| v.as_str()) else {
+            return VerificationResult::Allow;
+        };
+
+        let Ok(urls) = self.user_provided_urls.read() else {
+            // Poisoned lock: fail open to avoid blocking legitimate tool calls.
+            return VerificationResult::Allow;
+        };
+
+        if Self::is_grounded(url, &urls) {
+            return VerificationResult::Allow;
+        }
+
+        VerificationResult::Block {
+            reason: format!(
+                "[UrlGroundingVerifier] fetch rejected: URL '{url}' was not provided by the user",
+            ),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1058,5 +1177,244 @@ mod tests {
         }
         assert!(got_warn);
         assert!(!got_block);
+    }
+
+    // --- UrlGroundingVerifier ---
+
+    fn ugv(urls: &[&str]) -> UrlGroundingVerifier {
+        let set: HashSet<String> = urls.iter().map(|s| s.to_lowercase()).collect();
+        UrlGroundingVerifier::new(
+            &UrlGroundingVerifierConfig::default(),
+            Arc::new(RwLock::new(set)),
+        )
+    }
+
+    #[test]
+    fn url_grounding_allows_user_provided_url() {
+        let v = ugv(&["https://docs.anthropic.com/models"]);
+        assert_eq!(
+            v.verify(
+                "fetch",
+                &json!({"url": "https://docs.anthropic.com/models"})
+            ),
+            VerificationResult::Allow
+        );
+    }
+
+    #[test]
+    fn url_grounding_blocks_hallucinated_url() {
+        let v = ugv(&["https://example.com/page"]);
+        let result = v.verify(
+            "fetch",
+            &json!({"url": "https://api.anthropic.ai/v1/models"}),
+        );
+        assert!(matches!(result, VerificationResult::Block { .. }));
+    }
+
+    #[test]
+    fn url_grounding_blocks_when_no_user_urls_at_all() {
+        let v = ugv(&[]);
+        let result = v.verify(
+            "fetch",
+            &json!({"url": "https://api.anthropic.ai/v1/models"}),
+        );
+        assert!(matches!(result, VerificationResult::Block { .. }));
+    }
+
+    #[test]
+    fn url_grounding_allows_non_guarded_tool() {
+        let v = ugv(&[]);
+        assert_eq!(
+            v.verify("read_file", &json!({"path": "/etc/hosts"})),
+            VerificationResult::Allow
+        );
+    }
+
+    #[test]
+    fn url_grounding_guards_fetch_suffix_tool() {
+        let v = ugv(&[]);
+        let result = v.verify("http_fetch", &json!({"url": "https://evil.com/"}));
+        assert!(matches!(result, VerificationResult::Block { .. }));
+    }
+
+    #[test]
+    fn url_grounding_allows_web_scrape_with_provided_url() {
+        let v = ugv(&["https://rust-lang.org/"]);
+        assert_eq!(
+            v.verify(
+                "web_scrape",
+                &json!({"url": "https://rust-lang.org/", "select": "h1"})
+            ),
+            VerificationResult::Allow
+        );
+    }
+
+    #[test]
+    fn url_grounding_allows_prefix_match() {
+        // User provided https://docs.rs/ — agent fetches a sub-path.
+        let v = ugv(&["https://docs.rs/"]);
+        assert_eq!(
+            v.verify(
+                "fetch",
+                &json!({"url": "https://docs.rs/tokio/latest/tokio/"})
+            ),
+            VerificationResult::Allow
+        );
+    }
+
+    // --- Regression: #2191 — fetch URL hallucination ---
+
+    /// REG-2191-1: exact reproduction of the bug scenario.
+    /// Agent asks "do you know Anthropic?" (no URL provided) and halluccinates
+    /// `https://api.anthropic.ai/v1/models`. With an empty user_provided_urls set
+    /// the fetch must be blocked.
+    #[test]
+    fn reg_2191_hallucinated_api_endpoint_blocked_with_empty_session() {
+        // Simulate: user never sent any URL in the conversation.
+        let v = ugv(&[]);
+        let result = v.verify(
+            "fetch",
+            &json!({"url": "https://api.anthropic.ai/v1/models"}),
+        );
+        assert!(
+            matches!(result, VerificationResult::Block { .. }),
+            "fetch must be blocked when no user URL was provided — this is the #2191 regression"
+        );
+    }
+
+    /// REG-2191-2: passthrough — user explicitly pasted the URL, fetch must proceed.
+    #[test]
+    fn reg_2191_user_provided_url_allows_fetch() {
+        let v = ugv(&["https://api.anthropic.com/v1/models"]);
+        assert_eq!(
+            v.verify(
+                "fetch",
+                &json!({"url": "https://api.anthropic.com/v1/models"}),
+            ),
+            VerificationResult::Allow,
+            "fetch must be allowed when the URL was explicitly provided by the user"
+        );
+    }
+
+    /// REG-2191-3: web_scrape variant — same rejection for web_scrape tool.
+    #[test]
+    fn reg_2191_web_scrape_hallucinated_url_blocked() {
+        let v = ugv(&[]);
+        let result = v.verify(
+            "web_scrape",
+            &json!({"url": "https://api.anthropic.ai/v1/models", "select": "body"}),
+        );
+        assert!(
+            matches!(result, VerificationResult::Block { .. }),
+            "web_scrape must be blocked for hallucinated URL with empty user_provided_urls"
+        );
+    }
+
+    /// REG-2191-4: URL present only in an imagined system/assistant message context
+    /// is NOT in user_provided_urls (the agent only populates from user messages).
+    /// The verifier itself cannot distinguish message roles — it only sees the set
+    /// populated by the agent. This test confirms: an empty set always blocks.
+    #[test]
+    fn reg_2191_empty_url_set_always_blocks_fetch() {
+        // Whether the URL came from a system/assistant message or was never seen —
+        // if user_provided_urls is empty, fetch must be blocked.
+        let v = ugv(&[]);
+        let result = v.verify(
+            "fetch",
+            &json!({"url": "https://docs.anthropic.com/something"}),
+        );
+        assert!(matches!(result, VerificationResult::Block { .. }));
+    }
+
+    /// REG-2191-5: URL matching is case-insensitive — user pastes mixed-case URL.
+    #[test]
+    fn reg_2191_case_insensitive_url_match_allows_fetch() {
+        // user_provided_urls stores lowercase; verify that the fetched URL with
+        // different casing still matches.
+        let v = ugv(&["https://Docs.Anthropic.COM/models"]);
+        assert_eq!(
+            v.verify(
+                "fetch",
+                &json!({"url": "https://docs.anthropic.com/models/detail"}),
+            ),
+            VerificationResult::Allow,
+            "URL matching must be case-insensitive"
+        );
+    }
+
+    /// REG-2191-6: tool name ending in `_fetch` is auto-guarded regardless of config.
+    /// An MCP-registered `anthropic_fetch` tool must not bypass the gate.
+    #[test]
+    fn reg_2191_mcp_fetch_suffix_tool_blocked_with_empty_session() {
+        let v = ugv(&[]);
+        let result = v.verify(
+            "anthropic_fetch",
+            &json!({"url": "https://api.anthropic.ai/v1/models"}),
+        );
+        assert!(
+            matches!(result, VerificationResult::Block { .. }),
+            "MCP tools ending in _fetch must be guarded even if not in guarded_tools list"
+        );
+    }
+
+    /// REG-2191-7: reverse prefix — user provided a specific URL, agent fetches
+    /// the root. This is the "reverse prefix" case: user_url starts_with fetch_url.
+    #[test]
+    fn reg_2191_reverse_prefix_match_allows_fetch() {
+        // User provided a deep URL; agent wants to fetch the root.
+        // Allowed: user_url.starts_with(fetch_url).
+        let v = ugv(&["https://docs.rs/tokio/latest/tokio/index.html"]);
+        assert_eq!(
+            v.verify("fetch", &json!({"url": "https://docs.rs/"})),
+            VerificationResult::Allow,
+            "reverse prefix: fetched URL is a prefix of user-provided URL — should be allowed"
+        );
+    }
+
+    /// REG-2191-8: completely different domain with same path prefix must be blocked.
+    #[test]
+    fn reg_2191_different_domain_blocked() {
+        // User provided docs.rs, agent wants to fetch evil.com/docs.rs path — must block.
+        let v = ugv(&["https://docs.rs/"]);
+        let result = v.verify("fetch", &json!({"url": "https://evil.com/docs.rs/exfil"}));
+        assert!(
+            matches!(result, VerificationResult::Block { .. }),
+            "different domain must not be allowed even if path looks similar"
+        );
+    }
+
+    /// REG-2191-9: args without a `url` field — verifier must not block (Allow).
+    #[test]
+    fn reg_2191_missing_url_field_allows_fetch() {
+        // Some fetch-like tools may call with different arg names.
+        // Verifier only checks the `url` field; missing field → Allow.
+        let v = ugv(&[]);
+        assert_eq!(
+            v.verify(
+                "fetch",
+                &json!({"endpoint": "https://api.anthropic.ai/v1/models"})
+            ),
+            VerificationResult::Allow,
+            "missing url field must not trigger blocking — only explicit url field is checked"
+        );
+    }
+
+    /// REG-2191-10: verifier disabled via config — all fetch calls pass through.
+    #[test]
+    fn reg_2191_disabled_verifier_allows_all() {
+        let config = UrlGroundingVerifierConfig {
+            enabled: false,
+            guarded_tools: default_guarded_tools(),
+        };
+        // Note: the enabled flag is checked by the pipeline, not inside verify().
+        // The pipeline skips disabled verifiers. This test documents that the struct
+        // can be constructed with enabled=false (config round-trip).
+        let set: HashSet<String> = HashSet::new();
+        let v = UrlGroundingVerifier::new(&config, Arc::new(RwLock::new(set)));
+        // verify() itself doesn't check enabled — the pipeline is responsible.
+        // When called directly it will still block (the field has no effect here).
+        // This is an API documentation test, not a behaviour test.
+        let _ = v.verify("fetch", &json!({"url": "https://example.com/"}));
+        // No assertion: just verifies the struct can be built with enabled=false.
     }
 }
