@@ -209,15 +209,34 @@ pub fn evolved_weight(retrieval_count: i32, base_confidence: f32) -> f32 {
     (base_confidence * boost_f32).min(1.0)
 }
 
+/// Edge-type weight multipliers for BFS scoring and spreading activation.
+///
+/// Applied as a multiplicative factor on the composite score to reflect the
+/// relative signal quality of each MAGMA edge type during traversal:
+/// - `Causal`: high-signal (cause→effect chains are precise and informative).
+/// - `Semantic`: baseline (default relationship type).
+/// - `Temporal`: slightly lower than semantic (ordering is useful but less precise than causality).
+/// - `Entity`: lowest (structural/identity edges are graph skeleton, not recall signal).
+#[must_use]
+pub fn edge_type_weight(et: EdgeType) -> f32 {
+    match et {
+        EdgeType::Causal => 1.2,
+        EdgeType::Semantic => 1.0, // baseline
+        EdgeType::Temporal => 0.9,
+        EdgeType::Entity => 0.8,
+    }
+}
+
 impl GraphFact {
-    /// Base composite score with A-MEM evolved edge weight.
+    /// Base composite score with A-MEM evolved edge weight and MAGMA edge-type weight.
     ///
-    /// Formula: `entity_match_score * (1 / (1 + hop_distance)) * evolved_weight(retrieval_count, confidence)`
+    /// Formula: `entity_match_score * (1 / (1 + hop_distance)) * evolved_weight(retrieval_count, confidence) * edge_type_weight(edge_type)`
     #[must_use]
     #[allow(clippy::cast_precision_loss)]
     pub fn composite_score(&self) -> f32 {
         let w = evolved_weight(self.retrieval_count, self.confidence);
-        self.entity_match_score * (1.0 / (1.0 + self.hop_distance as f32)) * w
+        let type_w = edge_type_weight(self.edge_type);
+        self.entity_match_score * (1.0 / (1.0 + self.hop_distance as f32)) * w * type_w
     }
 
     /// Composite score with an optional additive temporal recency boost.
@@ -299,6 +318,49 @@ fn parse_sqlite_datetime_to_unix(s: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn edge_type_weight_causal_highest() {
+        assert!(edge_type_weight(EdgeType::Causal) > edge_type_weight(EdgeType::Semantic));
+        assert!(edge_type_weight(EdgeType::Causal) > edge_type_weight(EdgeType::Temporal));
+        assert!(edge_type_weight(EdgeType::Causal) > edge_type_weight(EdgeType::Entity));
+    }
+
+    #[test]
+    fn edge_type_weight_entity_lowest() {
+        assert!(edge_type_weight(EdgeType::Entity) < edge_type_weight(EdgeType::Semantic));
+        assert!(edge_type_weight(EdgeType::Entity) < edge_type_weight(EdgeType::Temporal));
+        assert!(edge_type_weight(EdgeType::Entity) < edge_type_weight(EdgeType::Causal));
+    }
+
+    #[test]
+    fn edge_type_weight_semantic_is_baseline() {
+        assert!((edge_type_weight(EdgeType::Semantic) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn composite_score_causal_higher_than_semantic_same_hop() {
+        let base = GraphFact {
+            entity_name: "A".into(),
+            relation: "rel".into(),
+            target_name: "B".into(),
+            fact: "A rel B".into(),
+            entity_match_score: 1.0,
+            hop_distance: 0,
+            confidence: 1.0,
+            valid_from: None,
+            retrieval_count: 0,
+            edge_type: EdgeType::Semantic,
+        };
+        let causal = GraphFact {
+            edge_type: EdgeType::Causal,
+            ..base.clone()
+        };
+        assert!(
+            causal.composite_score() > base.composite_score(),
+            "causal edge must score higher than semantic at same hop distance"
+        );
+    }
 
     #[test]
     fn edge_type_from_str_all_variants() {
@@ -582,5 +644,55 @@ mod tests {
             parse_sqlite_datetime_to_unix("1970-01-01 00:00:00+05:30"),
             Some(0)
         );
+    }
+
+    #[test]
+    fn edge_type_weight_exact_values() {
+        assert!((edge_type_weight(EdgeType::Causal) - 1.2).abs() < 1e-6);
+        assert!((edge_type_weight(EdgeType::Semantic) - 1.0).abs() < 1e-6);
+        assert!((edge_type_weight(EdgeType::Temporal) - 0.9).abs() < 1e-6);
+        assert!((edge_type_weight(EdgeType::Entity) - 0.8).abs() < 1e-6);
+    }
+
+    #[test]
+    fn composite_score_applies_non_baseline_type_weight() {
+        // With entity_match_score=1.0, hop=0, confidence=1.0, retrieval_count=0:
+        // evolved_weight = 1.0; composite = 1.0 * 1.0 * 1.0 * type_w = type_w.
+        let fact = |et: EdgeType| GraphFact {
+            entity_name: "A".into(),
+            relation: "rel".into(),
+            target_name: "B".into(),
+            fact: "A rel B".into(),
+            entity_match_score: 1.0,
+            hop_distance: 0,
+            confidence: 1.0,
+            valid_from: None,
+            edge_type: et,
+            retrieval_count: 0,
+        };
+        assert!((fact(EdgeType::Causal).composite_score() - 1.2).abs() < 1e-5);
+        assert!((fact(EdgeType::Temporal).composite_score() - 0.9).abs() < 1e-5);
+        assert!((fact(EdgeType::Entity).composite_score() - 0.8).abs() < 1e-5);
+    }
+
+    #[test]
+    fn composite_score_entity_lower_than_temporal_lower_than_causal() {
+        let fact = |et: EdgeType| GraphFact {
+            entity_name: "X".into(),
+            relation: "r".into(),
+            target_name: "Y".into(),
+            fact: "X r Y".into(),
+            entity_match_score: 0.8,
+            hop_distance: 1,
+            confidence: 0.9,
+            valid_from: None,
+            edge_type: et,
+            retrieval_count: 0,
+        };
+        let causal = fact(EdgeType::Causal).composite_score();
+        let temporal = fact(EdgeType::Temporal).composite_score();
+        let entity = fact(EdgeType::Entity).composite_score();
+        assert!(causal > temporal, "causal score must exceed temporal");
+        assert!(temporal > entity, "temporal score must exceed entity");
     }
 }
