@@ -124,6 +124,7 @@ impl std::fmt::Debug for SlackConfig {
 }
 
 #[derive(Deserialize, Serialize)]
+#[allow(clippy::struct_excessive_bools)] // config struct — boolean flags are idiomatic here
 pub struct A2aServerConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -145,6 +146,11 @@ pub struct A2aServerConfig {
     pub max_body_size: usize,
     #[serde(default = "default_drain_timeout_ms")]
     pub drain_timeout_ms: u64,
+    /// When `true`, all requests are rejected with 401 if no `auth_token` is configured.
+    /// Default `false` for backward compatibility — existing deployments without a token
+    /// continue to operate. Set to `true` in production when authentication is mandatory.
+    #[serde(default)]
+    pub require_auth: bool,
 }
 
 impl std::fmt::Debug for A2aServerConfig {
@@ -163,6 +169,7 @@ impl std::fmt::Debug for A2aServerConfig {
             .field("ssrf_protection", &self.ssrf_protection)
             .field("max_body_size", &self.max_body_size)
             .field("drain_timeout_ms", &self.drain_timeout_ms)
+            .field("require_auth", &self.require_auth)
             .finish()
     }
 }
@@ -180,6 +187,7 @@ impl Default for A2aServerConfig {
             ssrf_protection: true,
             max_body_size: default_a2a_max_body(),
             drain_timeout_ms: default_drain_timeout_ms(),
+            require_auth: false,
         }
     }
 }
