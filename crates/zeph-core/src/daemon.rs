@@ -118,6 +118,36 @@ impl DaemonSupervisor {
     }
 }
 
+/// Check whether a process with the given PID is currently alive.
+///
+/// On Unix, uses `kill -0` via a subprocess, which returns success if the process exists
+/// and the current user has permission to signal it.
+/// On non-Unix platforms, always returns `false` (conservatively assumes the process is dead).
+#[must_use]
+pub fn is_process_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        // PIDs on Unix are signed (pid_t = i32); u32::MAX wraps to -1 which would
+        // signal every process, so reject anything that does not fit in a positive i32.
+        let Ok(signed) = i32::try_from(pid) else {
+            return false;
+        };
+        if signed <= 0 {
+            return false;
+        }
+        std::process::Command::new("kill")
+            .args(["-0", &signed.to_string()])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
 /// Write a PID file atomically using `O_CREAT | O_EXCL` to prevent TOCTOU races.
 ///
 /// # Errors
@@ -268,5 +298,20 @@ mod tests {
         assert_eq!(ComponentStatus::Running, ComponentStatus::Running);
         assert_eq!(ComponentStatus::Stopped, ComponentStatus::Stopped);
         assert_ne!(ComponentStatus::Running, ComponentStatus::Stopped);
+    }
+
+    #[test]
+    fn is_process_alive_current_process() {
+        let pid = std::process::id();
+        assert!(is_process_alive(pid), "current process must be alive");
+    }
+
+    #[test]
+    fn is_process_alive_nonexistent_pid() {
+        // u32::MAX is effectively guaranteed to not be a valid running PID.
+        assert!(
+            !is_process_alive(u32::MAX),
+            "PID u32::MAX must not be alive"
+        );
     }
 }
