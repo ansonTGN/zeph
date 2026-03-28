@@ -5,6 +5,10 @@
 
 use crate::scenes::MemScene;
 use crate::types::{MemSceneId, MessageId};
+#[allow(unused_imports)]
+use zeph_db::sql;
+
+use zeph_db::ActiveDialect;
 
 use crate::error::MemoryError;
 
@@ -60,9 +64,9 @@ impl SqliteStore {
         let member_count = i64::try_from(member_ids.len()).unwrap_or(0);
         let mut tx = self.pool.begin().await?;
 
-        let row: (i64,) = sqlx::query_as(
-            "INSERT INTO mem_scenes (label, profile, member_count) VALUES (?, ?, ?) RETURNING id",
-        )
+        let row: (i64,) = sqlx::query_as(sql!(
+            "INSERT INTO mem_scenes (label, profile, member_count) VALUES (?, ?, ?) RETURNING id"
+        ))
         .bind(label)
         .bind(profile)
         .bind(member_count)
@@ -70,14 +74,17 @@ impl SqliteStore {
         .await?;
         let scene_id = row.0;
 
+        let member_sql = format!(
+            "{} INTO mem_scene_members (scene_id, message_id) VALUES (?, ?){}",
+            <ActiveDialect as zeph_db::dialect::Dialect>::INSERT_IGNORE,
+            <ActiveDialect as zeph_db::dialect::Dialect>::CONFLICT_NOTHING,
+        );
         for &msg_id in member_ids {
-            sqlx::query(
-                "INSERT OR IGNORE INTO mem_scene_members (scene_id, message_id) VALUES (?, ?)",
-            )
-            .bind(scene_id)
-            .bind(msg_id.0)
-            .execute(&mut *tx)
-            .await?;
+            sqlx::query(&member_sql)
+                .bind(scene_id)
+                .bind(msg_id.0)
+                .execute(&mut *tx)
+                .await?;
         }
 
         tx.commit().await?;
@@ -90,10 +97,10 @@ impl SqliteStore {
     ///
     /// Returns an error if the `SQLite` query fails.
     pub async fn list_mem_scenes(&self) -> Result<Vec<MemScene>, MemoryError> {
-        let rows: Vec<(i64, String, String, i64, i64, i64)> = sqlx::query_as(
+        let rows: Vec<(i64, String, String, i64, i64, i64)> = sqlx::query_as(sql!(
             "SELECT id, label, profile, member_count, created_at, updated_at \
-             FROM mem_scenes ORDER BY created_at DESC",
-        )
+             FROM mem_scenes ORDER BY created_at DESC"
+        ))
         .fetch_all(&self.pool)
         .await?;
 
@@ -121,11 +128,12 @@ impl SqliteStore {
         &self,
         scene_id: MemSceneId,
     ) -> Result<Vec<MessageId>, MemoryError> {
-        let rows: Vec<(i64,)> =
-            sqlx::query_as("SELECT message_id FROM mem_scene_members WHERE scene_id = ?")
-                .bind(scene_id.0)
-                .fetch_all(&self.pool)
-                .await?;
+        let rows: Vec<(i64,)> = sqlx::query_as(sql!(
+            "SELECT message_id FROM mem_scene_members WHERE scene_id = ?"
+        ))
+        .bind(scene_id.0)
+        .fetch_all(&self.pool)
+        .await?;
 
         Ok(rows.into_iter().map(|(id,)| MessageId(id)).collect())
     }
@@ -136,7 +144,7 @@ impl SqliteStore {
     ///
     /// Returns an error if the `SQLite` delete fails.
     pub async fn reset_mem_scenes(&self) -> Result<u64, MemoryError> {
-        let result = sqlx::query("DELETE FROM mem_scenes")
+        let result = sqlx::query(sql!("DELETE FROM mem_scenes"))
             .execute(&self.pool)
             .await?;
         Ok(result.rows_affected())
@@ -212,7 +220,7 @@ mod tests {
 
         // Promote all to semantic tier.
         for id in &ids {
-            sqlx::query("UPDATE messages SET tier = 'semantic' WHERE id = ?")
+            sqlx::query(sql!("UPDATE messages SET tier = 'semantic' WHERE id = ?"))
                 .bind(id.0)
                 .execute(store.pool())
                 .await
@@ -269,7 +277,7 @@ mod tests {
 
         // Insert directly with distinct created_at values to avoid single-second collision.
         sqlx::query(
-            "INSERT INTO mem_scenes (label, profile, member_count, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+            sql!("INSERT INTO mem_scenes (label, profile, member_count, created_at, updated_at) VALUES (?, ?, ?, ?, ?)"),
         )
         .bind("First")
         .bind("Profile first")
@@ -279,13 +287,13 @@ mod tests {
         .execute(store.pool())
         .await
         .unwrap();
-        let scene1_id: (i64,) = sqlx::query_as("SELECT last_insert_rowid()")
+        let scene1_id: (i64,) = sqlx::query_as(sql!("SELECT last_insert_rowid()"))
             .fetch_one(store.pool())
             .await
             .unwrap();
 
         sqlx::query(
-            "INSERT INTO mem_scenes (label, profile, member_count, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+            sql!("INSERT INTO mem_scenes (label, profile, member_count, created_at, updated_at) VALUES (?, ?, ?, ?, ?)"),
         )
         .bind("Second")
         .bind("Profile second")
@@ -295,24 +303,28 @@ mod tests {
         .execute(store.pool())
         .await
         .unwrap();
-        let scene2_id: (i64,) = sqlx::query_as("SELECT last_insert_rowid()")
+        let scene2_id: (i64,) = sqlx::query_as(sql!("SELECT last_insert_rowid()"))
             .fetch_one(store.pool())
             .await
             .unwrap();
 
         // Link messages to satisfy FK.
-        sqlx::query("INSERT INTO mem_scene_members (scene_id, message_id) VALUES (?, ?)")
-            .bind(scene1_id.0)
-            .bind(ids1[0].0)
-            .execute(store.pool())
-            .await
-            .unwrap();
-        sqlx::query("INSERT INTO mem_scene_members (scene_id, message_id) VALUES (?, ?)")
-            .bind(scene2_id.0)
-            .bind(ids2[0].0)
-            .execute(store.pool())
-            .await
-            .unwrap();
+        sqlx::query(sql!(
+            "INSERT INTO mem_scene_members (scene_id, message_id) VALUES (?, ?)"
+        ))
+        .bind(scene1_id.0)
+        .bind(ids1[0].0)
+        .execute(store.pool())
+        .await
+        .unwrap();
+        sqlx::query(sql!(
+            "INSERT INTO mem_scene_members (scene_id, message_id) VALUES (?, ?)"
+        ))
+        .bind(scene2_id.0)
+        .bind(ids2[0].0)
+        .execute(store.pool())
+        .await
+        .unwrap();
 
         let scenes = store.list_mem_scenes().await.unwrap();
         // "Second" has created_at=2_000_000 > "First" created_at=1_000_000 → Second comes first.

@@ -528,14 +528,13 @@ mod tests {
     use std::sync::Arc;
 
     use chrono::{Duration, Utc};
-    use sqlx::SqlitePool;
     use tokio::sync::mpsc;
     use zeph_scheduler::JobStore;
 
     use super::*;
 
     async fn make_executor() -> (SchedulerExecutor, mpsc::Receiver<SchedulerMessage>) {
-        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
         let store = JobStore::new(pool);
         store.init().await.unwrap();
         let store = Arc::new(store);
@@ -639,7 +638,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_existing_task() {
-        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
         let store = JobStore::new(pool);
         store.init().await.unwrap();
         store
@@ -678,7 +677,7 @@ mod tests {
 
     #[tokio::test]
     async fn duplicate_name_returns_updated_message() {
-        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
         let store = JobStore::new(pool);
         store.init().await.unwrap();
         store
@@ -713,7 +712,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_tasks_with_jobs() {
-        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
         let store = JobStore::new(pool);
         store.init().await.unwrap();
         store
@@ -1004,7 +1003,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_fenced_cancel_task_dispatches() {
-        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
         let store = JobStore::new(pool);
         store.init().await.unwrap();
         store

@@ -2,28 +2,30 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use std::collections::HashMap;
+#[allow(unused_imports)]
+use zeph_db::sql;
 
 use futures::Stream;
-use sqlx::SqlitePool;
+use zeph_db::fts::sanitize_fts_query;
+use zeph_db::{ActiveDialect, DbPool};
 
 use crate::error::MemoryError;
-use crate::sqlite::messages::sanitize_fts5_query;
 use crate::types::MessageId;
 
 use super::types::{Community, Edge, EdgeType, Entity, EntityAlias, EntityType};
 
 pub struct GraphStore {
-    pool: SqlitePool,
+    pool: DbPool,
 }
 
 impl GraphStore {
     #[must_use]
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: DbPool) -> Self {
         Self { pool }
     }
 
     #[must_use]
-    pub fn pool(&self) -> &SqlitePool {
+    pub fn pool(&self) -> &DbPool {
         &self.pool
     }
 
@@ -47,15 +49,15 @@ impl GraphStore {
         summary: Option<&str>,
     ) -> Result<i64, MemoryError> {
         let type_str = entity_type.as_str();
-        let id: i64 = sqlx::query_scalar(
+        let id: i64 = sqlx::query_scalar(sql!(
             "INSERT INTO graph_entities (name, canonical_name, entity_type, summary)
-             VALUES (?1, ?2, ?3, ?4)
+             VALUES (?, ?, ?, ?)
              ON CONFLICT(canonical_name, entity_type) DO UPDATE SET
                name = excluded.name,
                summary = COALESCE(excluded.summary, summary),
-               last_seen_at = datetime('now')
-             RETURNING id",
-        )
+               last_seen_at = CURRENT_TIMESTAMP
+             RETURNING id"
+        ))
         .bind(surface_name)
         .bind(canonical_name)
         .bind(type_str)
@@ -77,9 +79,9 @@ impl GraphStore {
     ) -> Result<Option<Entity>, MemoryError> {
         let type_str = entity_type.as_str();
         let row: Option<EntityRow> = sqlx::query_as(
-            "SELECT id, name, canonical_name, entity_type, summary, first_seen_at, last_seen_at, qdrant_point_id
+            sql!("SELECT id, name, canonical_name, entity_type, summary, first_seen_at, last_seen_at, qdrant_point_id
              FROM graph_entities
-             WHERE canonical_name = ?1 AND entity_type = ?2",
+             WHERE canonical_name = ? AND entity_type = ?"),
         )
         .bind(canonical_name)
         .bind(type_str)
@@ -95,9 +97,9 @@ impl GraphStore {
     /// Returns an error if the database query fails.
     pub async fn find_entity_by_id(&self, entity_id: i64) -> Result<Option<Entity>, MemoryError> {
         let row: Option<EntityRow> = sqlx::query_as(
-            "SELECT id, name, canonical_name, entity_type, summary, first_seen_at, last_seen_at, qdrant_point_id
+            sql!("SELECT id, name, canonical_name, entity_type, summary, first_seen_at, last_seen_at, qdrant_point_id
              FROM graph_entities
-             WHERE id = ?1",
+             WHERE id = ?"),
         )
         .bind(entity_id)
         .fetch_optional(&self.pool)
@@ -115,11 +117,13 @@ impl GraphStore {
         entity_id: i64,
         point_id: &str,
     ) -> Result<(), MemoryError> {
-        sqlx::query("UPDATE graph_entities SET qdrant_point_id = ?1 WHERE id = ?2")
-            .bind(point_id)
-            .bind(entity_id)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query(sql!(
+            "UPDATE graph_entities SET qdrant_point_id = ? WHERE id = ?"
+        ))
+        .bind(point_id)
+        .bind(entity_id)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -155,7 +159,7 @@ impl GraphStore {
         let query = &query[..query.floor_char_boundary(512)];
         // Sanitize input: split on non-alphanumeric characters, filter empty tokens,
         // append '*' to each token for FTS5 prefix matching ("graph" -> "graph*").
-        let sanitized = sanitize_fts5_query(query);
+        let sanitized = sanitize_fts_query(query);
         if sanitized.is_empty() {
             return Ok(vec![]);
         }
@@ -172,32 +176,34 @@ impl GraphStore {
         let limit = i64::try_from(limit)?;
         // bm25(graph_entities_fts, 10.0, 1.0): name column weighted 10x over summary.
         // bm25() returns negative values; ORDER BY ASC puts best matches first.
-        let rows: Vec<EntityRow> = sqlx::query_as(
-            "SELECT DISTINCT e.id, e.name, e.canonical_name, e.entity_type, e.summary,
-                    e.first_seen_at, e.last_seen_at, e.qdrant_point_id
-             FROM graph_entities_fts fts
-             JOIN graph_entities e ON e.id = fts.rowid
-             WHERE graph_entities_fts MATCH ?1
-             UNION
-             SELECT e.id, e.name, e.canonical_name, e.entity_type, e.summary,
-                    e.first_seen_at, e.last_seen_at, e.qdrant_point_id
-             FROM graph_entity_aliases a
-             JOIN graph_entities e ON e.id = a.entity_id
-             WHERE a.alias_name LIKE ?2 ESCAPE '\\' COLLATE NOCASE
-             LIMIT ?3",
-        )
-        .bind(&fts_query)
-        .bind(format!(
-            "%{}%",
-            query
-                .trim()
-                .replace('\\', "\\\\")
-                .replace('%', "\\%")
-                .replace('_', "\\_")
-        ))
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await?;
+        let search_sql = format!(
+            "SELECT DISTINCT e.id, e.name, e.canonical_name, e.entity_type, e.summary, \
+                    e.first_seen_at, e.last_seen_at, e.qdrant_point_id \
+             FROM graph_entities_fts fts \
+             JOIN graph_entities e ON e.id = fts.rowid \
+             WHERE graph_entities_fts MATCH ? \
+             UNION \
+             SELECT e.id, e.name, e.canonical_name, e.entity_type, e.summary, \
+                    e.first_seen_at, e.last_seen_at, e.qdrant_point_id \
+             FROM graph_entity_aliases a \
+             JOIN graph_entities e ON e.id = a.entity_id \
+             WHERE a.alias_name LIKE ? ESCAPE '\\' {} \
+             LIMIT ?",
+            <ActiveDialect as zeph_db::dialect::Dialect>::COLLATE_NOCASE,
+        );
+        let rows: Vec<EntityRow> = sqlx::query_as(&search_sql)
+            .bind(&fts_query)
+            .bind(format!(
+                "%{}%",
+                query
+                    .trim()
+                    .replace('\\', "\\\\")
+                    .replace('%', "\\%")
+                    .replace('_', "\\_")
+            ))
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?;
         rows.into_iter()
             .map(entity_from_row)
             .collect::<Result<Vec<_>, _>>()
@@ -212,6 +218,7 @@ impl GraphStore {
     /// # Errors
     ///
     /// Returns an error if the PRAGMA execution fails.
+    #[cfg(feature = "sqlite")]
     pub async fn checkpoint_wal(&self) -> Result<(), MemoryError> {
         sqlx::query("PRAGMA wal_checkpoint(PASSIVE)")
             .execute(&self.pool)
@@ -219,12 +226,22 @@ impl GraphStore {
         Ok(())
     }
 
+    /// No-op on `PostgreSQL` (WAL management is handled by the server).
+    ///
+    /// # Errors
+    ///
+    /// Never returns an error.
+    #[cfg(feature = "postgres")]
+    pub async fn checkpoint_wal(&self) -> Result<(), MemoryError> {
+        Ok(())
+    }
+
     /// Stream all entities from the database incrementally (true cursor, no full-table load).
     pub fn all_entities_stream(&self) -> impl Stream<Item = Result<Entity, MemoryError>> + '_ {
         use futures::StreamExt as _;
         sqlx::query_as::<_, EntityRow>(
-            "SELECT id, name, canonical_name, entity_type, summary, first_seen_at, last_seen_at, qdrant_point_id
-             FROM graph_entities ORDER BY id ASC",
+            sql!("SELECT id, name, canonical_name, entity_type, summary, first_seen_at, last_seen_at, qdrant_point_id
+             FROM graph_entities ORDER BY id ASC"),
         )
         .fetch(&self.pool)
         .map(|r: Result<EntityRow, sqlx::Error>| {
@@ -240,13 +257,16 @@ impl GraphStore {
     ///
     /// Returns an error if the database query fails.
     pub async fn add_alias(&self, entity_id: i64, alias_name: &str) -> Result<(), MemoryError> {
-        sqlx::query(
-            "INSERT OR IGNORE INTO graph_entity_aliases (entity_id, alias_name) VALUES (?1, ?2)",
-        )
-        .bind(entity_id)
-        .bind(alias_name)
-        .execute(&self.pool)
-        .await?;
+        let insert_alias_sql = format!(
+            "{} INTO graph_entity_aliases (entity_id, alias_name) VALUES (?, ?){}",
+            <ActiveDialect as zeph_db::dialect::Dialect>::INSERT_IGNORE,
+            <ActiveDialect as zeph_db::dialect::Dialect>::CONFLICT_NOTHING,
+        );
+        sqlx::query(&insert_alias_sql)
+            .bind(entity_id)
+            .bind(alias_name)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -263,20 +283,22 @@ impl GraphStore {
         entity_type: EntityType,
     ) -> Result<Option<Entity>, MemoryError> {
         let type_str = entity_type.as_str();
-        let row: Option<EntityRow> = sqlx::query_as(
-            "SELECT e.id, e.name, e.canonical_name, e.entity_type, e.summary,
-                    e.first_seen_at, e.last_seen_at, e.qdrant_point_id
-             FROM graph_entity_aliases a
-             JOIN graph_entities e ON e.id = a.entity_id
-             WHERE a.alias_name = ?1 COLLATE NOCASE
-               AND e.entity_type = ?2
-             ORDER BY e.id ASC
+        let alias_typed_sql = format!(
+            "SELECT e.id, e.name, e.canonical_name, e.entity_type, e.summary, \
+                    e.first_seen_at, e.last_seen_at, e.qdrant_point_id \
+             FROM graph_entity_aliases a \
+             JOIN graph_entities e ON e.id = a.entity_id \
+             WHERE a.alias_name = ? {} \
+               AND e.entity_type = ? \
+             ORDER BY e.id ASC \
              LIMIT 1",
-        )
-        .bind(alias_name)
-        .bind(type_str)
-        .fetch_optional(&self.pool)
-        .await?;
+            <ActiveDialect as zeph_db::dialect::Dialect>::COLLATE_NOCASE,
+        );
+        let row: Option<EntityRow> = sqlx::query_as(&alias_typed_sql)
+            .bind(alias_name)
+            .bind(type_str)
+            .fetch_optional(&self.pool)
+            .await?;
         row.map(entity_from_row).transpose()
     }
 
@@ -289,12 +311,12 @@ impl GraphStore {
         &self,
         entity_id: i64,
     ) -> Result<Vec<EntityAlias>, MemoryError> {
-        let rows: Vec<AliasRow> = sqlx::query_as(
+        let rows: Vec<AliasRow> = sqlx::query_as(sql!(
             "SELECT id, entity_id, alias_name, created_at
              FROM graph_entity_aliases
-             WHERE entity_id = ?1
-             ORDER BY id ASC",
-        )
+             WHERE entity_id = ?
+             ORDER BY id ASC"
+        ))
         .bind(entity_id)
         .fetch_all(&self.pool)
         .await?;
@@ -317,7 +339,7 @@ impl GraphStore {
     ///
     /// Returns an error if the database query fails.
     pub async fn entity_count(&self) -> Result<i64, MemoryError> {
-        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM graph_entities")
+        let count: i64 = sqlx::query_scalar(sql!("SELECT COUNT(*) FROM graph_entities"))
             .fetch_one(&self.pool)
             .await?;
         Ok(count)
@@ -388,15 +410,15 @@ impl GraphStore {
         let confidence = confidence.clamp(0.0, 1.0);
         let edge_type_str = edge_type.as_str();
 
-        let existing: Option<(i64, f64)> = sqlx::query_as(
+        let existing: Option<(i64, f64)> = sqlx::query_as(sql!(
             "SELECT id, confidence FROM graph_edges
-             WHERE source_entity_id = ?1
-               AND target_entity_id = ?2
-               AND relation = ?3
-               AND edge_type = ?4
+             WHERE source_entity_id = ?
+               AND target_entity_id = ?
+               AND relation = ?
+               AND edge_type = ?
                AND valid_to IS NULL
-             LIMIT 1",
-        )
+             LIMIT 1"
+        ))
         .bind(source_entity_id)
         .bind(target_entity_id)
         .bind(relation)
@@ -406,7 +428,7 @@ impl GraphStore {
 
         if let Some((existing_id, stored_conf)) = existing {
             let updated_conf = f64::from(confidence).max(stored_conf);
-            sqlx::query("UPDATE graph_edges SET confidence = ?1 WHERE id = ?2")
+            sqlx::query(sql!("UPDATE graph_edges SET confidence = ? WHERE id = ?"))
                 .bind(updated_conf)
                 .bind(existing_id)
                 .execute(&self.pool)
@@ -415,12 +437,12 @@ impl GraphStore {
         }
 
         let episode_raw: Option<i64> = episode_id.map(|m| m.0);
-        let id: i64 = sqlx::query_scalar(
+        let id: i64 = sqlx::query_scalar(sql!(
             "INSERT INTO graph_edges
              (source_entity_id, target_entity_id, relation, fact, confidence, episode_id, edge_type)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-             RETURNING id",
-        )
+             VALUES (?, ?, ?, ?, ?, ?, ?)
+             RETURNING id"
+        ))
         .bind(source_entity_id)
         .bind(target_entity_id)
         .bind(relation)
@@ -439,10 +461,10 @@ impl GraphStore {
     ///
     /// Returns an error if the database update fails.
     pub async fn invalidate_edge(&self, edge_id: i64) -> Result<(), MemoryError> {
-        sqlx::query(
-            "UPDATE graph_edges SET valid_to = datetime('now'), expired_at = datetime('now')
-             WHERE id = ?1",
-        )
+        sqlx::query(sql!(
+            "UPDATE graph_edges SET valid_to = CURRENT_TIMESTAMP, expired_at = CURRENT_TIMESTAMP
+             WHERE id = ?"
+        ))
         .bind(edge_id)
         .execute(&self.pool)
         .await?;
@@ -497,10 +519,11 @@ impl GraphStore {
             return Ok(Vec::new());
         }
 
-        // Build a parameterized IN clause: (?1, ?2, ..., ?N).
+        // Build a parameterized IN clause: (?, ?, ..., ?).
         // We cannot use sqlx's query_as! macro here because the placeholder count is dynamic.
-        let placeholders: String = (1..=entity_ids.len())
-            .map(|i| format!("?{i}"))
+        // TODO(Phase 2): rewrite_placeholders() does not support format!()-built queries;
+        //   these will need a dedicated multi-placeholder rewriter for PostgreSQL compatibility.
+        let placeholders: String = std::iter::repeat_n("?", entity_ids.len())
             .collect::<Vec<_>>()
             .join(", ");
 
@@ -514,9 +537,7 @@ impl GraphStore {
                    AND (source_entity_id IN ({placeholders}) OR target_entity_id IN ({placeholders}))"
             )
         } else {
-            let type_placeholders: String = (entity_ids.len() + 1
-                ..=entity_ids.len() + edge_types.len())
-                .map(|i| format!("?{i}"))
+            let type_placeholders: String = std::iter::repeat_n("?", edge_types.len())
                 .collect::<Vec<_>>()
                 .join(", ");
             format!(
@@ -530,8 +551,11 @@ impl GraphStore {
             )
         };
 
-        // Bind entity IDs once — ?1..?N are reused for both IN clauses via ?NNN syntax.
+        // Bind entity IDs twice (source IN and target IN clauses) then edge types.
         let mut query = sqlx::query_as::<_, EdgeRow>(&sql);
+        for id in entity_ids {
+            query = query.bind(*id);
+        }
         for id in entity_ids {
             query = query.bind(*id);
         }
@@ -549,14 +573,15 @@ impl GraphStore {
     ///
     /// Returns an error if the database query fails.
     pub async fn edges_for_entity(&self, entity_id: i64) -> Result<Vec<Edge>, MemoryError> {
-        let rows: Vec<EdgeRow> = sqlx::query_as(
+        let rows: Vec<EdgeRow> = sqlx::query_as(sql!(
             "SELECT id, source_entity_id, target_entity_id, relation, fact, confidence,
                     valid_from, valid_to, created_at, expired_at, episode_id, qdrant_point_id,
                     edge_type, retrieval_count, last_retrieved_at
              FROM graph_edges
              WHERE valid_to IS NULL
-               AND (source_entity_id = ?1 OR target_entity_id = ?1)",
-        )
+               AND (source_entity_id = ? OR target_entity_id = ?)"
+        ))
+        .bind(entity_id)
         .bind(entity_id)
         .fetch_all(&self.pool)
         .await?;
@@ -575,15 +600,16 @@ impl GraphStore {
         limit: usize,
     ) -> Result<Vec<Edge>, MemoryError> {
         let limit = i64::try_from(limit)?;
-        let rows: Vec<EdgeRow> = sqlx::query_as(
+        let rows: Vec<EdgeRow> = sqlx::query_as(sql!(
             "SELECT id, source_entity_id, target_entity_id, relation, fact, confidence,
                     valid_from, valid_to, created_at, expired_at, episode_id, qdrant_point_id,
                     edge_type, retrieval_count, last_retrieved_at
              FROM graph_edges
-             WHERE source_entity_id = ?1 OR target_entity_id = ?1
+             WHERE source_entity_id = ? OR target_entity_id = ?
              ORDER BY valid_from DESC
-             LIMIT ?2",
-        )
+             LIMIT ?"
+        ))
+        .bind(entity_id)
         .bind(entity_id)
         .bind(limit)
         .fetch_all(&self.pool)
@@ -601,17 +627,19 @@ impl GraphStore {
         entity_a: i64,
         entity_b: i64,
     ) -> Result<Vec<Edge>, MemoryError> {
-        let rows: Vec<EdgeRow> = sqlx::query_as(
+        let rows: Vec<EdgeRow> = sqlx::query_as(sql!(
             "SELECT id, source_entity_id, target_entity_id, relation, fact, confidence,
                     valid_from, valid_to, created_at, expired_at, episode_id, qdrant_point_id,
                     edge_type, retrieval_count, last_retrieved_at
              FROM graph_edges
              WHERE valid_to IS NULL
-               AND ((source_entity_id = ?1 AND target_entity_id = ?2)
-                 OR (source_entity_id = ?2 AND target_entity_id = ?1))",
-        )
+               AND ((source_entity_id = ? AND target_entity_id = ?)
+                 OR (source_entity_id = ? AND target_entity_id = ?))"
+        ))
         .bind(entity_a)
         .bind(entity_b)
+        .bind(entity_b)
+        .bind(entity_a)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows.into_iter().map(edge_from_row).collect())
@@ -627,15 +655,15 @@ impl GraphStore {
         source_entity_id: i64,
         target_entity_id: i64,
     ) -> Result<Vec<Edge>, MemoryError> {
-        let rows: Vec<EdgeRow> = sqlx::query_as(
+        let rows: Vec<EdgeRow> = sqlx::query_as(sql!(
             "SELECT id, source_entity_id, target_entity_id, relation, fact, confidence,
                     valid_from, valid_to, created_at, expired_at, episode_id, qdrant_point_id,
                     edge_type, retrieval_count, last_retrieved_at
              FROM graph_edges
              WHERE valid_to IS NULL
-               AND source_entity_id = ?1
-               AND target_entity_id = ?2",
-        )
+               AND source_entity_id = ?
+               AND target_entity_id = ?"
+        ))
         .bind(source_entity_id)
         .bind(target_entity_id)
         .fetch_all(&self.pool)
@@ -649,10 +677,11 @@ impl GraphStore {
     ///
     /// Returns an error if the database query fails.
     pub async fn active_edge_count(&self) -> Result<i64, MemoryError> {
-        let count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM graph_edges WHERE valid_to IS NULL")
-                .fetch_one(&self.pool)
-                .await?;
+        let count: i64 = sqlx::query_scalar(sql!(
+            "SELECT COUNT(*) FROM graph_edges WHERE valid_to IS NULL"
+        ))
+        .fetch_one(&self.pool)
+        .await?;
         Ok(count)
     }
 
@@ -663,7 +692,7 @@ impl GraphStore {
     /// Returns an error if the database query fails.
     pub async fn edge_type_distribution(&self) -> Result<Vec<(String, i64)>, MemoryError> {
         let rows: Vec<(String, i64)> = sqlx::query_as(
-            "SELECT edge_type, COUNT(*) FROM graph_edges WHERE valid_to IS NULL GROUP BY edge_type ORDER BY edge_type",
+            sql!("SELECT edge_type, COUNT(*) FROM graph_edges WHERE valid_to IS NULL GROUP BY edge_type ORDER BY edge_type"),
         )
         .fetch_all(&self.pool)
         .await?;
@@ -689,16 +718,16 @@ impl GraphStore {
         fingerprint: Option<&str>,
     ) -> Result<i64, MemoryError> {
         let entity_ids_json = serde_json::to_string(entity_ids)?;
-        let id: i64 = sqlx::query_scalar(
+        let id: i64 = sqlx::query_scalar(sql!(
             "INSERT INTO graph_communities (name, summary, entity_ids, fingerprint)
-             VALUES (?1, ?2, ?3, ?4)
+             VALUES (?, ?, ?, ?)
              ON CONFLICT(name) DO UPDATE SET
                summary = excluded.summary,
                entity_ids = excluded.entity_ids,
                fingerprint = COALESCE(excluded.fingerprint, fingerprint),
-               updated_at = datetime('now')
-             RETURNING id",
-        )
+               updated_at = CURRENT_TIMESTAMP
+             RETURNING id"
+        ))
         .bind(name)
         .bind(summary)
         .bind(entity_ids_json)
@@ -715,9 +744,9 @@ impl GraphStore {
     ///
     /// Returns an error if the database query fails.
     pub async fn community_fingerprints(&self) -> Result<HashMap<String, i64>, MemoryError> {
-        let rows: Vec<(String, i64)> = sqlx::query_as(
-            "SELECT fingerprint, id FROM graph_communities WHERE fingerprint IS NOT NULL",
-        )
+        let rows: Vec<(String, i64)> = sqlx::query_as(sql!(
+            "SELECT fingerprint, id FROM graph_communities WHERE fingerprint IS NOT NULL"
+        ))
         .fetch_all(&self.pool)
         .await?;
         Ok(rows.into_iter().collect())
@@ -729,7 +758,7 @@ impl GraphStore {
     ///
     /// Returns an error if the database query fails.
     pub async fn delete_community_by_id(&self, id: i64) -> Result<(), MemoryError> {
-        sqlx::query("DELETE FROM graph_communities WHERE id = ?1")
+        sqlx::query(sql!("DELETE FROM graph_communities WHERE id = ?"))
             .bind(id)
             .execute(&self.pool)
             .await?;
@@ -745,10 +774,12 @@ impl GraphStore {
     ///
     /// Returns an error if the database query fails.
     pub async fn clear_community_fingerprint(&self, id: i64) -> Result<(), MemoryError> {
-        sqlx::query("UPDATE graph_communities SET fingerprint = NULL WHERE id = ?1")
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query(sql!(
+            "UPDATE graph_communities SET fingerprint = NULL WHERE id = ?"
+        ))
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -765,10 +796,10 @@ impl GraphStore {
         entity_id: i64,
     ) -> Result<Option<Community>, MemoryError> {
         let row: Option<CommunityRow> = sqlx::query_as(
-            "SELECT c.id, c.name, c.summary, c.entity_ids, c.fingerprint, c.created_at, c.updated_at
+            sql!("SELECT c.id, c.name, c.summary, c.entity_ids, c.fingerprint, c.created_at, c.updated_at
              FROM graph_communities c, json_each(c.entity_ids) j
-             WHERE CAST(j.value AS INTEGER) = ?1
-             LIMIT 1",
+             WHERE CAST(j.value AS INTEGER) = ?
+             LIMIT 1"),
         )
         .bind(entity_id)
         .fetch_optional(&self.pool)
@@ -796,11 +827,11 @@ impl GraphStore {
     ///
     /// Returns an error if the database query fails or JSON parsing fails.
     pub async fn all_communities(&self) -> Result<Vec<Community>, MemoryError> {
-        let rows: Vec<CommunityRow> = sqlx::query_as(
+        let rows: Vec<CommunityRow> = sqlx::query_as(sql!(
             "SELECT id, name, summary, entity_ids, fingerprint, created_at, updated_at
              FROM graph_communities
-             ORDER BY id ASC",
-        )
+             ORDER BY id ASC"
+        ))
         .fetch_all(&self.pool)
         .await?;
 
@@ -826,7 +857,7 @@ impl GraphStore {
     ///
     /// Returns an error if the database query fails.
     pub async fn community_count(&self) -> Result<i64, MemoryError> {
-        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM graph_communities")
+        let count: i64 = sqlx::query_scalar(sql!("SELECT COUNT(*) FROM graph_communities"))
             .fetch_one(&self.pool)
             .await?;
         Ok(count)
@@ -841,7 +872,7 @@ impl GraphStore {
     /// Returns an error if the database query fails.
     pub async fn get_metadata(&self, key: &str) -> Result<Option<String>, MemoryError> {
         let val: Option<String> =
-            sqlx::query_scalar("SELECT value FROM graph_metadata WHERE key = ?1")
+            sqlx::query_scalar(sql!("SELECT value FROM graph_metadata WHERE key = ?"))
                 .bind(key)
                 .fetch_optional(&self.pool)
                 .await?;
@@ -854,10 +885,10 @@ impl GraphStore {
     ///
     /// Returns an error if the database query fails.
     pub async fn set_metadata(&self, key: &str, value: &str) -> Result<(), MemoryError> {
-        sqlx::query(
-            "INSERT INTO graph_metadata (key, value) VALUES (?1, ?2)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        )
+        sqlx::query(sql!(
+            "INSERT INTO graph_metadata (key, value) VALUES (?, ?)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+        ))
         .bind(key)
         .bind(value)
         .execute(&self.pool)
@@ -880,14 +911,14 @@ impl GraphStore {
     /// Stream all active (non-invalidated) edges.
     pub fn all_active_edges_stream(&self) -> impl Stream<Item = Result<Edge, MemoryError>> + '_ {
         use futures::StreamExt as _;
-        sqlx::query_as::<_, EdgeRow>(
+        sqlx::query_as::<_, EdgeRow>(sql!(
             "SELECT id, source_entity_id, target_entity_id, relation, fact, confidence,
                     valid_from, valid_to, created_at, expired_at, episode_id, qdrant_point_id,
                     edge_type, retrieval_count, last_retrieved_at
              FROM graph_edges
              WHERE valid_to IS NULL
-             ORDER BY id ASC",
-        )
+             ORDER BY id ASC"
+        ))
         .fetch(&self.pool)
         .map(|r| r.map_err(MemoryError::from).map(edge_from_row))
     }
@@ -913,15 +944,15 @@ impl GraphStore {
         after_id: i64,
         limit: i64,
     ) -> Result<Vec<Edge>, MemoryError> {
-        let rows: Vec<EdgeRow> = sqlx::query_as(
+        let rows: Vec<EdgeRow> = sqlx::query_as(sql!(
             "SELECT id, source_entity_id, target_entity_id, relation, fact, confidence,
                     valid_from, valid_to, created_at, expired_at, episode_id, qdrant_point_id,
                     edge_type, retrieval_count, last_retrieved_at
              FROM graph_edges
-             WHERE valid_to IS NULL AND id > ?1
+             WHERE valid_to IS NULL AND id > ?
              ORDER BY id ASC
-             LIMIT ?2",
-        )
+             LIMIT ?"
+        ))
         .bind(after_id)
         .bind(limit)
         .fetch_all(&self.pool)
@@ -935,11 +966,11 @@ impl GraphStore {
     ///
     /// Returns an error if the database query fails or JSON parsing fails.
     pub async fn find_community_by_id(&self, id: i64) -> Result<Option<Community>, MemoryError> {
-        let row: Option<CommunityRow> = sqlx::query_as(
+        let row: Option<CommunityRow> = sqlx::query_as(sql!(
             "SELECT id, name, summary, entity_ids, fingerprint, created_at, updated_at
              FROM graph_communities
-             WHERE id = ?1",
-        )
+             WHERE id = ?"
+        ))
         .bind(id)
         .fetch_optional(&self.pool)
         .await?;
@@ -966,7 +997,7 @@ impl GraphStore {
     ///
     /// Returns an error if the database query fails.
     pub async fn delete_all_communities(&self) -> Result<(), MemoryError> {
-        sqlx::query("DELETE FROM graph_communities")
+        sqlx::query(sql!("DELETE FROM graph_communities"))
             .execute(&self.pool)
             .await?;
         Ok(())
@@ -985,6 +1016,7 @@ impl GraphStore {
     /// # Errors
     ///
     /// Returns an error if the database query fails.
+    #[allow(clippy::too_many_lines)]
     pub async fn find_entities_ranked(
         &self,
         query: &str,
@@ -1006,7 +1038,7 @@ impl GraphStore {
 
         const FTS5_OPERATORS: &[&str] = &["AND", "OR", "NOT", "NEAR"];
         let query = &query[..query.floor_char_boundary(512)];
-        let sanitized = crate::sqlite::messages::sanitize_fts5_query(query);
+        let sanitized = sanitize_fts_query(query);
         if sanitized.is_empty() {
             return Ok(vec![]);
         }
@@ -1024,37 +1056,39 @@ impl GraphStore {
 
         // UNION ALL with outer ORDER BY preserves FTS5 BM25 ordering through LIMIT.
         // Alias matches get a fixed raw score of 0.5 (below any real BM25 match).
-        let rows: Vec<EntityFtsRow> = sqlx::query_as(
-            "SELECT * FROM (
-                 SELECT e.id, e.name, e.canonical_name, e.entity_type, e.summary,
-                        e.first_seen_at, e.last_seen_at, e.qdrant_point_id,
-                        -bm25(graph_entities_fts, 10.0, 1.0) AS fts_rank
-                 FROM graph_entities_fts fts
-                 JOIN graph_entities e ON e.id = fts.rowid
-                 WHERE graph_entities_fts MATCH ?1
-                 UNION ALL
-                 SELECT e.id, e.name, e.canonical_name, e.entity_type, e.summary,
-                        e.first_seen_at, e.last_seen_at, e.qdrant_point_id,
-                        0.5 AS fts_rank
-                 FROM graph_entity_aliases a
-                 JOIN graph_entities e ON e.id = a.entity_id
-                 WHERE a.alias_name LIKE ?2 ESCAPE '\\' COLLATE NOCASE
-             )
-             ORDER BY fts_rank DESC
-             LIMIT ?3",
-        )
-        .bind(&fts_query)
-        .bind(format!(
-            "%{}%",
-            query
-                .trim()
-                .replace('\\', "\\\\")
-                .replace('%', "\\%")
-                .replace('_', "\\_")
-        ))
-        .bind(limit_i64)
-        .fetch_all(&self.pool)
-        .await?;
+        let ranked_fts_sql = format!(
+            "SELECT * FROM ( \
+                 SELECT e.id, e.name, e.canonical_name, e.entity_type, e.summary, \
+                        e.first_seen_at, e.last_seen_at, e.qdrant_point_id, \
+                        -bm25(graph_entities_fts, 10.0, 1.0) AS fts_rank \
+                 FROM graph_entities_fts fts \
+                 JOIN graph_entities e ON e.id = fts.rowid \
+                 WHERE graph_entities_fts MATCH ? \
+                 UNION ALL \
+                 SELECT e.id, e.name, e.canonical_name, e.entity_type, e.summary, \
+                        e.first_seen_at, e.last_seen_at, e.qdrant_point_id, \
+                        0.5 AS fts_rank \
+                 FROM graph_entity_aliases a \
+                 JOIN graph_entities e ON e.id = a.entity_id \
+                 WHERE a.alias_name LIKE ? ESCAPE '\\\\' {} \
+             ) \
+             ORDER BY fts_rank DESC \
+             LIMIT ?",
+            <ActiveDialect as zeph_db::dialect::Dialect>::COLLATE_NOCASE,
+        );
+        let rows: Vec<EntityFtsRow> = sqlx::query_as(&ranked_fts_sql)
+            .bind(&fts_query)
+            .bind(format!(
+                "%{}%",
+                query
+                    .trim()
+                    .replace('\\', "\\\\")
+                    .replace('%', "\\%")
+                    .replace('_', "\\_")
+            ))
+            .bind(limit_i64)
+            .fetch_all(&self.pool)
+            .await?;
 
         if rows.is_empty() {
             return Ok(vec![]);
@@ -1126,10 +1160,9 @@ impl GraphStore {
 
         let mut all_rows: Vec<(i64, i64, i64)> = Vec::new();
         for chunk in entity_ids.chunks(MAX_BATCH) {
-            let placeholders = chunk
-                .iter()
-                .enumerate()
-                .map(|(i, _)| format!("?{}", i + 1))
+            // TODO(Phase 2): rewrite_placeholders() does not support format!()-built queries;
+            //   these will need a dedicated multi-placeholder rewriter for PostgreSQL compatibility.
+            let placeholders = std::iter::repeat_n("?", chunk.len())
                 .collect::<Vec<_>>()
                 .join(", ");
 
@@ -1211,10 +1244,9 @@ impl GraphStore {
 
         let mut result: HashMap<i64, i64> = HashMap::new();
         for chunk in entity_ids.chunks(MAX_BATCH) {
-            let placeholders = chunk
-                .iter()
-                .enumerate()
-                .map(|(i, _)| format!("?{}", i + 1))
+            // TODO(Phase 2): rewrite_placeholders() does not support format!()-built queries;
+            //   these will need a dedicated multi-placeholder rewriter for PostgreSQL compatibility.
+            let placeholders = std::iter::repeat_n("?", chunk.len())
                 .collect::<Vec<_>>()
                 .join(", ");
 
@@ -1246,11 +1278,10 @@ impl GraphStore {
     /// Returns an error if the database query fails.
     pub async fn record_edge_retrieval(&self, edge_ids: &[i64]) -> Result<(), MemoryError> {
         const MAX_BATCH: usize = 490;
+        // TODO(Phase 2): rewrite_placeholders() does not support format!()-built queries;
+        //   these will need a dedicated multi-placeholder rewriter for PostgreSQL compatibility.
         for chunk in edge_ids.chunks(MAX_BATCH) {
-            let placeholders = chunk
-                .iter()
-                .enumerate()
-                .map(|(i, _)| format!("?{}", i + 1))
+            let placeholders = std::iter::repeat_n("?", chunk.len())
                 .collect::<Vec<_>>()
                 .join(", ");
             let sql = format!(
@@ -1281,13 +1312,13 @@ impl GraphStore {
         decay_lambda: f64,
         interval_secs: u64,
     ) -> Result<usize, MemoryError> {
-        let result = sqlx::query(
+        let result = sqlx::query(sql!(
             "UPDATE graph_edges
-             SET retrieval_count = MAX(CAST(retrieval_count * ?1 AS INTEGER), 0)
+             SET retrieval_count = MAX(CAST(retrieval_count * ? AS INTEGER), 0)
              WHERE valid_to IS NULL
                AND retrieval_count > 0
-               AND (last_retrieved_at IS NULL OR last_retrieved_at < unixepoch('now') - ?2)",
-        )
+               AND (last_retrieved_at IS NULL OR last_retrieved_at < unixepoch('now') - ?)"
+        ))
         .bind(decay_lambda)
         .bind(i64::try_from(interval_secs).unwrap_or(i64::MAX))
         .execute(&self.pool)
@@ -1302,11 +1333,11 @@ impl GraphStore {
     /// Returns an error if the database query fails.
     pub async fn delete_expired_edges(&self, retention_days: u32) -> Result<usize, MemoryError> {
         let days = i64::from(retention_days);
-        let result = sqlx::query(
+        let result = sqlx::query(sql!(
             "DELETE FROM graph_edges
              WHERE expired_at IS NOT NULL
-               AND expired_at < datetime('now', '-' || ?1 || ' days')",
-        )
+               AND expired_at < datetime('now', '-' || ? || ' days')"
+        ))
         .bind(days)
         .execute(&self.pool)
         .await?;
@@ -1320,15 +1351,15 @@ impl GraphStore {
     /// Returns an error if the database query fails.
     pub async fn delete_orphan_entities(&self, retention_days: u32) -> Result<usize, MemoryError> {
         let days = i64::from(retention_days);
-        let result = sqlx::query(
+        let result = sqlx::query(sql!(
             "DELETE FROM graph_entities
              WHERE id NOT IN (
                  SELECT DISTINCT source_entity_id FROM graph_edges WHERE valid_to IS NULL
                  UNION
                  SELECT DISTINCT target_entity_id FROM graph_edges WHERE valid_to IS NULL
              )
-             AND last_seen_at < datetime('now', '-' || ?1 || ' days')",
-        )
+             AND last_seen_at < datetime('now', '-' || ? || ' days')"
+        ))
         .bind(days)
         .execute(&self.pool)
         .await?;
@@ -1350,7 +1381,7 @@ impl GraphStore {
             return Ok(0);
         }
         let excess = current - max;
-        let result = sqlx::query(
+        let result = sqlx::query(sql!(
             "DELETE FROM graph_entities
              WHERE id IN (
                  SELECT e.id
@@ -1363,9 +1394,9 @@ impl GraphStore {
                      FROM graph_edges WHERE valid_to IS NULL GROUP BY target_entity_id
                  ) edge_counts ON e.id = edge_counts.eid
                  ORDER BY COALESCE(edge_counts.cnt, 0) ASC, e.last_seen_at ASC
-                 LIMIT ?1
-             )",
-        )
+                 LIMIT ?
+             )"
+        ))
         .bind(excess)
         .execute(&self.pool)
         .await?;
@@ -1393,26 +1424,31 @@ impl GraphStore {
         // Split into two UNIONed branches to leverage the partial indexes from migration 030:
         //   Branch 1 (active edges):     idx_graph_edges_valid + idx_graph_edges_source/target
         //   Branch 2 (historical edges): idx_graph_edges_src_temporal / idx_graph_edges_tgt_temporal
-        let rows: Vec<EdgeRow> = sqlx::query_as(
+        let rows: Vec<EdgeRow> = sqlx::query_as(sql!(
             "SELECT id, source_entity_id, target_entity_id, relation, fact, confidence,
                     valid_from, valid_to, created_at, expired_at, episode_id, qdrant_point_id,
                     edge_type, retrieval_count, last_retrieved_at
              FROM graph_edges
              WHERE valid_to IS NULL
-               AND valid_from <= ?2
-               AND (source_entity_id = ?1 OR target_entity_id = ?1)
+               AND valid_from <= ?
+               AND (source_entity_id = ? OR target_entity_id = ?)
              UNION ALL
              SELECT id, source_entity_id, target_entity_id, relation, fact, confidence,
                     valid_from, valid_to, created_at, expired_at, episode_id, qdrant_point_id,
                     edge_type, retrieval_count, last_retrieved_at
              FROM graph_edges
              WHERE valid_to IS NOT NULL
-               AND valid_from <= ?2
-               AND valid_to > ?2
-               AND (source_entity_id = ?1 OR target_entity_id = ?1)",
-        )
+               AND valid_from <= ?
+               AND valid_to > ?
+               AND (source_entity_id = ? OR target_entity_id = ?)"
+        ))
+        .bind(timestamp)
+        .bind(entity_id)
         .bind(entity_id)
         .bind(timestamp)
+        .bind(timestamp)
+        .bind(entity_id)
+        .bind(entity_id)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows.into_iter().map(edge_from_row).collect())
@@ -1441,17 +1477,17 @@ impl GraphStore {
         let like_pattern = format!("%{escaped}%");
         let limit = i64::try_from(limit)?;
         let rows: Vec<EdgeRow> = if let Some(rel) = relation {
-            sqlx::query_as(
+            sqlx::query_as(sql!(
                 "SELECT id, source_entity_id, target_entity_id, relation, fact, confidence,
                         valid_from, valid_to, created_at, expired_at, episode_id, qdrant_point_id,
                         edge_type, retrieval_count, last_retrieved_at
                  FROM graph_edges
-                 WHERE source_entity_id = ?1
-                   AND fact LIKE ?2 ESCAPE '\\'
-                   AND relation = ?3
+                 WHERE source_entity_id = ?
+                   AND fact LIKE ? ESCAPE '\\'
+                   AND relation = ?
                  ORDER BY valid_from DESC
-                 LIMIT ?4",
-            )
+                 LIMIT ?"
+            ))
             .bind(source_entity_id)
             .bind(&like_pattern)
             .bind(rel)
@@ -1459,16 +1495,16 @@ impl GraphStore {
             .fetch_all(&self.pool)
             .await?
         } else {
-            sqlx::query_as(
+            sqlx::query_as(sql!(
                 "SELECT id, source_entity_id, target_entity_id, relation, fact, confidence,
                         valid_from, valid_to, created_at, expired_at, episode_id, qdrant_point_id,
                         edge_type, retrieval_count, last_retrieved_at
                  FROM graph_edges
-                 WHERE source_entity_id = ?1
-                   AND fact LIKE ?2 ESCAPE '\\'
+                 WHERE source_entity_id = ?
+                   AND fact LIKE ? ESCAPE '\\'
                  ORDER BY valid_from DESC
-                 LIMIT ?3",
-            )
+                 LIMIT ?"
+            ))
             .bind(source_entity_id)
             .bind(&like_pattern)
             .bind(limit)
@@ -1599,6 +1635,9 @@ impl GraphStore {
             }
             frontier.truncate(MAX_FRONTIER);
             // IDs come from our own DB — no user input, no injection risk.
+            // TODO(Phase 2): rewrite_placeholders() does not support format!()-built queries;
+            //   these will need a dedicated multi-placeholder rewriter for PostgreSQL compatibility.
+            //   The ?NNN syntax is used here to position the timestamp bind after frontier copies.
             let placeholders = frontier
                 .iter()
                 .enumerate()
@@ -1674,6 +1713,9 @@ impl GraphStore {
 
         let n_types = type_strs.len();
         // type_in is constant for the entire BFS — positions ?1..?n_types never change.
+        // TODO(Phase 2): rewrite_placeholders() does not support format!()-built queries;
+        //   these will need a dedicated multi-placeholder rewriter for PostgreSQL compatibility.
+        //   The ?NNN syntax is used here to share type bind positions across frontier iterations.
         let type_in = (1..=n_types)
             .map(|i| format!("?{i}"))
             .collect::<Vec<_>>()
@@ -1778,7 +1820,10 @@ impl GraphStore {
         let n_types = type_strs.len();
         let n_visited = visited_ids.len();
 
-        // Bind order: types first, then visited_ids twice, then optional timestamp
+        // Bind order: types first, then visited_ids twice, then optional timestamp.
+        // TODO(Phase 2): rewrite_placeholders() does not support format!()-built queries;
+        //   these will need a dedicated multi-placeholder rewriter for PostgreSQL compatibility.
+        //   The ?NNN syntax is used here to position the timestamp bind after type and id copies.
         let type_in = (1..=n_types)
             .map(|i| format!("?{i}"))
             .collect::<Vec<_>>()
@@ -1941,15 +1986,18 @@ impl GraphStore {
     ///
     /// Returns an error if the database query fails.
     pub async fn find_entity_by_name(&self, name: &str) -> Result<Vec<Entity>, MemoryError> {
-        let rows: Vec<EntityRow> = sqlx::query_as(
-            "SELECT id, name, canonical_name, entity_type, summary, first_seen_at, last_seen_at, qdrant_point_id
-             FROM graph_entities
-             WHERE name = ?1 COLLATE NOCASE OR canonical_name = ?1 COLLATE NOCASE
+        let find_by_name_sql = format!(
+            "SELECT id, name, canonical_name, entity_type, summary, first_seen_at, last_seen_at, qdrant_point_id \
+             FROM graph_entities \
+             WHERE name = ? {cn} OR canonical_name = ? {cn} \
              LIMIT 5",
-        )
-        .bind(name)
-        .fetch_all(&self.pool)
-        .await?;
+            cn = <ActiveDialect as zeph_db::dialect::Dialect>::COLLATE_NOCASE,
+        );
+        let rows: Vec<EntityRow> = sqlx::query_as(&find_by_name_sql)
+            .bind(name)
+            .bind(name)
+            .fetch_all(&self.pool)
+            .await?;
 
         if !rows.is_empty() {
             return rows.into_iter().map(entity_from_row).collect();
@@ -1970,12 +2018,12 @@ impl GraphStore {
         limit: usize,
     ) -> Result<Vec<(crate::types::MessageId, String)>, MemoryError> {
         let limit = i64::try_from(limit)?;
-        let rows: Vec<(i64, String)> = sqlx::query_as(
+        let rows: Vec<(i64, String)> = sqlx::query_as(sql!(
             "SELECT id, content FROM messages
              WHERE graph_processed = 0
              ORDER BY id ASC
-             LIMIT ?1",
-        )
+             LIMIT ?"
+        ))
         .bind(limit)
         .fetch_all(&self.pool)
         .await?;
@@ -1991,10 +2039,11 @@ impl GraphStore {
     ///
     /// Returns an error if the database query fails.
     pub async fn unprocessed_message_count(&self) -> Result<i64, MemoryError> {
-        let count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE graph_processed = 0")
-                .fetch_one(&self.pool)
-                .await?;
+        let count: i64 = sqlx::query_scalar(sql!(
+            "SELECT COUNT(*) FROM messages WHERE graph_processed = 0"
+        ))
+        .fetch_one(&self.pool)
+        .await?;
         Ok(count)
     }
 
