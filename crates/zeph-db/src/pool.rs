@@ -40,7 +40,7 @@ impl DbConfig {
         }
         #[cfg(feature = "postgres")]
         {
-            Self::connect_postgres(&self.url, self.max_connections).await
+            Self::connect_postgres(&self.url, self.pool_size).await
         }
     }
 
@@ -77,11 +77,24 @@ impl DbConfig {
         let effective_max = max_connections.max(pool_size);
         let pool = SqlitePoolOptions::new()
             .max_connections(effective_max)
+            .min_connections(1)
+            .acquire_timeout(std::time::Duration::from_secs(30))
             .connect_with(opts)
             .await
             .map_err(DbError::Sqlx)?;
 
         crate::migrate::run_migrations(&pool).await?;
+
+        // Restrict file permissions to owner-only on Unix.
+        #[cfg(unix)]
+        if path != ":memory:" {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(metadata) = std::fs::metadata(path) {
+                let mut perms = metadata.permissions();
+                perms.set_mode(0o600);
+                let _ = std::fs::set_permissions(path, perms);
+            }
+        }
 
         // Run a passive WAL checkpoint after migrations to avoid unbounded WAL growth.
         // Skipped for in-memory databases (no WAL file).
@@ -98,6 +111,12 @@ impl DbConfig {
     #[cfg(feature = "postgres")]
     async fn connect_postgres(url: &str, pool_size: u32) -> Result<DbPool, DbError> {
         use sqlx::postgres::PgPoolOptions;
+
+        if !url.contains("sslmode=") {
+            tracing::warn!(
+                "postgres connection string has no sslmode; plaintext connections are allowed"
+            );
+        }
 
         let pool = PgPoolOptions::new()
             .max_connections(pool_size)

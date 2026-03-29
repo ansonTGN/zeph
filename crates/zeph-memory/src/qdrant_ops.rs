@@ -33,6 +33,8 @@ impl QdrantOps {
     /// # Errors
     ///
     /// Returns an error if the Qdrant client cannot be created.
+    // TODO(#2389): add optional `api_key: Option<String>` parameter and wire it via
+    // `.with_api_key()` on the builder once the Qdrant config struct exposes the field.
     pub fn new(url: &str) -> QdrantResult<Self> {
         let client = Qdrant::from_url(url).build().map_err(Box::new)?;
         Ok(Self { client })
@@ -141,8 +143,10 @@ impl QdrantOps {
     ///
     /// Returns an error if the upsert fails.
     pub async fn upsert(&self, collection: &str, points: Vec<PointStruct>) -> QdrantResult<()> {
+        // wait(false): fire-and-forget on the hot path — saves 3-15ms per embedding store call.
+        // Qdrant guarantees eventual consistency; read-your-writes is not required here.
         self.client
-            .upsert_points(UpsertPointsBuilder::new(collection, points).wait(true))
+            .upsert_points(UpsertPointsBuilder::new(collection, points).wait(false))
             .await
             .map_err(Box::new)?;
         Ok(())

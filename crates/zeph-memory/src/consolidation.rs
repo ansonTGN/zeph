@@ -400,7 +400,7 @@ mod tests {
         // msg1 and msg2 should be in the same cluster; orthogonal in its own.
         assert_eq!(clusters.len(), 2);
         let sizes: Vec<usize> = {
-            let mut s: Vec<usize> = clusters.iter().map(|c| c.len()).collect();
+            let mut s: Vec<usize> = clusters.iter().map(Vec::len).collect();
             s.sort_unstable();
             s
         };
@@ -453,7 +453,7 @@ mod tests {
         );
 
         // Verify originals are now marked consolidated.
-        let rows: Vec<(i64,)> = sqlx::query_as(sql!(
+        let rows: Vec<(i64,)> = zeph_db::query_as(sql!(
             "SELECT consolidated FROM messages WHERE id IN (?, ?) ORDER BY id"
         ))
         .bind(m1)
@@ -466,7 +466,7 @@ mod tests {
         assert_eq!(rows[1].0, 1, "source m2 must be marked consolidated");
 
         // Verify join table has entries.
-        let join_count: (i64,) = sqlx::query_as(sql!(
+        let join_count: (i64,) = zeph_db::query_as(sql!(
             "SELECT COUNT(*) FROM memory_consolidation_sources WHERE source_id IN (?, ?)"
         ))
         .bind(m1)
@@ -636,7 +636,7 @@ mod tests {
             .unwrap();
         assert!(!accepted, "empty source list must be rejected");
 
-        let count: (i64,) = sqlx::query_as(sql!("SELECT COUNT(*) FROM messages"))
+        let count: (i64,) = zeph_db::query_as(sql!("SELECT COUNT(*) FROM messages"))
             .fetch_one(store.pool())
             .await
             .unwrap();
@@ -673,8 +673,8 @@ mod tests {
     }
 
     /// #2359: transaction must be rolled back when the first INSERT fails
-    /// (non-existent conversation_id violates FK on messages.conversation_id).
-    /// After the error: memory_consolidation_sources has 0 rows,
+    /// (non-existent `conversation_id` violates FK on `messages.conversation_id`).
+    /// After the error: `memory_consolidation_sources` has 0 rows,
     /// source messages remain consolidated = 0.
     #[tokio::test]
     async fn apply_consolidation_merge_rollback_on_mid_tx_error() {
@@ -696,14 +696,14 @@ mod tests {
 
         // The transaction must have been rolled back: no rows in the join table.
         let join_count: (i64,) =
-            sqlx::query_as(sql!("SELECT COUNT(*) FROM memory_consolidation_sources"))
+            zeph_db::query_as(sql!("SELECT COUNT(*) FROM memory_consolidation_sources"))
                 .fetch_one(store.pool())
                 .await
                 .unwrap();
         assert_eq!(join_count.0, 0, "join table must be empty after rollback");
 
         // Original messages must still be unconsolidated.
-        let rows: Vec<(i64,)> = sqlx::query_as(sql!(
+        let rows: Vec<(i64,)> = zeph_db::query_as(sql!(
             "SELECT consolidated FROM messages WHERE id IN (?, ?) ORDER BY id"
         ))
         .bind(m1)
@@ -716,7 +716,7 @@ mod tests {
         assert_eq!(rows[1].0, 0, "m2 must remain consolidated=0 after rollback");
     }
 
-    /// #2360: only 1 message in DB — embedded.len() < 2 guard fires, all counters stay 0.
+    /// #2360: only 1 message in DB — `embedded.len()` < 2 guard fires, all counters stay 0.
     #[tokio::test]
     async fn run_consolidation_sweep_single_candidate_skips() {
         use zeph_llm::any::AnyProvider;
@@ -750,7 +750,7 @@ mod tests {
         assert_eq!(r.skipped, 0);
     }
 
-    /// #2360: 2 messages + MockProvider returning merge op → assert r.merges == 1.
+    /// #2360: 2 messages + `MockProvider` returning merge op → assert `r.merges` == 1.
     #[tokio::test]
     async fn run_consolidation_sweep_merge_increments_counter() {
         use zeph_llm::any::AnyProvider;
@@ -792,7 +792,7 @@ mod tests {
         assert_eq!(r.skipped, 0);
     }
 
-    /// #2360: 2 messages + MockProvider returning update op → assert r.updates == 1.
+    /// #2360: 2 messages + `MockProvider` returning update op → assert `r.updates` == 1.
     #[tokio::test]
     async fn run_consolidation_sweep_update_increments_counter() {
         use zeph_llm::any::AnyProvider;
@@ -834,8 +834,8 @@ mod tests {
         assert_eq!(r.skipped, 0);
     }
 
-    /// #2360: MockProvider returns merge op with confidence 0.3, threshold is 0.7
-    /// → the op is below threshold and r.skipped == 1.
+    /// #2360: `MockProvider` returns merge op with confidence 0.3, threshold is 0.7
+    /// → the op is below threshold and `r.skipped` == 1.
     #[tokio::test]
     async fn run_consolidation_sweep_skipped_below_threshold() {
         use zeph_llm::any::AnyProvider;
@@ -919,7 +919,7 @@ mod tests {
         assert_eq!(r.updates, 1);
 
         // Verify the consolidated message exists in DB.
-        let consol_rows: Vec<(String, i64)> = sqlx::query_as(sql!(
+        let consol_rows: Vec<(String, i64)> = zeph_db::query_as(sql!(
             "SELECT content, consolidated FROM messages \
              WHERE consolidated = 1 AND content = ?"
         ))
@@ -935,7 +935,7 @@ mod tests {
 
         // Verify source m2 is marked consolidated (m2 was the additional_source_id).
         let source_row: (i64,) =
-            sqlx::query_as(sql!("SELECT consolidated FROM messages WHERE id = ?"))
+            zeph_db::query_as(sql!("SELECT consolidated FROM messages WHERE id = ?"))
                 .bind(m2)
                 .fetch_one(store.pool())
                 .await

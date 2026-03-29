@@ -8,6 +8,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- feat(db): complete database abstraction layer — remove direct `sqlx` dependencies from all 6 consumer crates (`zeph-memory`, `zeph-core`, `zeph-index`, `zeph-mcp`, `zeph-orchestration`, `zeph-scheduler`); all SQL access now routes through `zeph-db` re-exports (#2386)
+- feat(db): fix 8 dynamic `format!()`-built SQL queries in `graph/store/mod.rs` that used SQLite-only `?` placeholders; now use `numbered_placeholder()`/`placeholder_list()` helpers for backend-portable IN clause construction (#2386)
+- feat(db): pool config hardening — SQLite pool gains `min_connections(1)` and `acquire_timeout(30s)`; PostgreSQL `connect()` now correctly uses `pool_size` config field (#2387)
+- feat(db): `insert_edge_typed` wrapped in atomic transaction; `get_vectors` error propagation fixed (was silently swallowing DB errors via `unwrap_or_default()`); Qdrant hot-path upsert switched from `wait(true)` to `wait(false)` (-3–15ms per call) (#2387)
+- feat(db): add `importance_score` index migration (053) to prevent full table scans on messages (#2387)
+- feat(db): fix `sql!` macro doc comment — remove false claim of `LazyLock` caching, document actual `Box::leak` per-call-site behavior (#2387)
+- feat(db): migrate remaining `sqlx::SqlitePool::connect` usages in test code to `zeph_db::sqlx` re-exports; move `sqlx` from `[dependencies]` to `[dev-dependencies]` in root binary (#2388)
+- feat(db): security hardening — warn on postgres connections without `sslmode`; set SQLite file permissions to `0o600` on unix; confirm `sqlx-mysql` excluded (RUSTSEC-2023-0071); add TODO for Qdrant api_key gap (#2389)
+
+### Added
+
+- feat(db): `numbered_placeholder(n)` and `placeholder_list(start, count)` helpers in `zeph-db` for dialect-agnostic dynamic SQL construction (#2386)
+
 - docker: add all missing ZEPH_* env vars to docker-compose.yml and docker-compose.dev.yml (64 vars added, ZEPH_MEMORY_SEMANTIC_RECALL_LIMIT renamed to ZEPH_MEMORY_RECALL_LIMIT)
 - docker: add scripts/check-env-vars.sh drift-prevention script
 
@@ -23,6 +36,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Internal
 
+- refactor(db): Phase 1 sqlx cleanup — remove direct `sqlx` dependency from `zeph-scheduler`, `zeph-orchestration`, `zeph-mcp`, `zeph-index`, and `zeph-core`; all consumers now use `zeph-db` re-exports (`zeph_db::query*`, `zeph_db::SqlxError`, `zeph_db::FromRow`); add `numbered_placeholder(n)` and `placeholder_list(start, count)` helpers to `zeph-db` for backend-portable numbered bind positions; fix 8 dynamic `format!()`-built SQL queries in `graph/store/mod.rs` (BFS, centrality, community IDs, batch edges, entity fetch, mark-processed) to use `placeholder_list`/`numbered_placeholder` instead of SQLite-only `?` literals; add `#[cfg]` dialect guard for `json_each`/`jsonb_array_elements_text` in `entity_community_ids`; re-export `sqlx::query_builder::QueryBuilder` and `sqlx` from `zeph-db` (#2386)
 - feat(memory): A-MAC adaptive admission control — `AdmissionControl` in `zeph-memory::admission` evaluates 5 factors (future utility via LLM, factual confidence via hedging heuristics, semantic novelty via Qdrant top-3 cosine search, temporal recency fixed at 1.0 at write time, content-type prior by role) and rejects messages scoring below a configurable threshold; `remember()` now returns `Result<Option<MessageId>>` and `remember_with_parts()` returns `Result<(Option<MessageId>, bool)>` — `None` means admission rejected, no panic, no silent drop; `unsummarized_count` only incremented when a message is truly persisted; `[memory.admission]` config block added with `enabled`, `threshold`, `fast_path_margin`, `admission_provider`, and `weights` fields; runtime weight normalization eliminates the fragile sum-to-1.0 constraint; `memory_save` tool returns a human-readable rejection message when admission fails (#2317)
 - feat(memory): `MemScene` consolidation — `mem_scenes` and `mem_scene_members` SQLite tables (migration 049) store entity profiles derived from clusters of semantic-tier messages; `start_scene_consolidation_loop()` runs a background sweep on a configurable interval independent of tier promotion; greedy nearest-neighbor cosine clustering groups messages above `scene_similarity_threshold`; LLM generates a short label and 2–3 sentence profile per scene with JSON fallback; `[memory.tiers]` config gains `scene_enabled`, `scene_similarity_threshold`, `scene_batch_size`, `scene_provider` fields (#2332)
 - feat(core): `compress_context` native tool — always available when `context-compression` feature is enabled regardless of `CompressionStrategy`; compresses the current conversation (excluding pinned Knowledge and system messages) via LLM, appends the summary to the Knowledge block, and removes original messages from history; guarded by `Arc<AtomicBool>` concurrency lock in `FocusState` (`try_acquire_compression()` / `release_compression()`); blocked when a focus session is active; `CompressionStrategy::Autonomous` variant added; `compress_provider` field added to `CompressionConfig` (#2218)
