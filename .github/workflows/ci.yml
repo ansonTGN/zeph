@@ -207,7 +207,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        partition: ["1/4", "2/4", "3/4", "4/4"]
+        partition: ["1/5", "2/5", "3/5", "4/5", "5/5"]
     steps:
       - uses: actions/checkout@v6
       - uses: taiki-e/install-action@6ee2d1f3a2f8ca91cc2bf3180c6ec89fb3a109ad # nextest
