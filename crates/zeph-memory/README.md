@@ -13,7 +13,7 @@ Provides durable conversation storage via SQLite and semantic retrieval through 
 
 Recall quality is enhanced by MMR (Maximal Marginal Relevance) re-ranking for result diversity, temporal decay scoring for recency bias, and write-time importance scoring for content-aware ranking. All are configurable via `SemanticConfig`.
 
-Query-aware memory routing (`MemoryRouter` trait, `HeuristicRouter` default) classifies each query as Keyword (SQLite FTS5), Semantic (Qdrant), or Hybrid and dispatches accordingly. Configure via `[memory.routing]`.
+Query-aware memory routing (`MemoryRouter` trait, `HeuristicRouter` default) classifies each query as Keyword (SQLite FTS5), Semantic (Qdrant), or Hybrid and dispatches accordingly. Configure via `[memory.store_routing]` (note: `[memory.routing]` was removed in v0.18.2 — use `[memory.store_routing]` going forward).
 
 Includes a document ingestion subsystem for loading, chunking, and storing user documents (text, Markdown, PDF) into Qdrant for RAG workflows.
 
@@ -62,6 +62,25 @@ Includes a document ingestion subsystem for loading, chunking, and storing user 
 
 **Re-exports:** `MemoryError`, `QdrantOps`, `ConversationId`, `MessageId`, `Document`, `DocumentLoader`, `TextLoader`, `TextSplitter`, `IngestionPipeline`, `Chunk`, `SplitterConfig`, `DocumentError`, `DocumentMetadata`, `PdfLoader` (behind `pdf` feature), `Embeddable`, `EmbeddingRegistry`, `ResponseCache`, `MemorySnapshot`, `TokenCounter`, `UserCorrection`, `FeedbackDetector`, `AnchoredSummary`, `CompactionProbeConfig`, `validate_compaction`
 
+## Breaking changes in v0.18.2
+
+- **`[memory.routing]` removed** — rename to `[memory.store_routing]` in your config. Run `zeph migrate-config --in-place` to upgrade automatically.
+
+## Store routing
+
+`[memory.store_routing]` configures how writes are routed to the appropriate memory backend.
+
+| Config field | Type | Default | Description |
+|---|---|---|---|
+| `strategy` | `"heuristic"` / `"llm"` / `"hybrid"` | `"heuristic"` | Routing decision strategy |
+| `routing_classifier_provider` | string | `""` | Provider name for LLM/hybrid routing (references `[[llm.providers]]`) |
+
+```toml
+[memory.store_routing]
+strategy                    = "hybrid"
+routing_classifier_provider = "fast"
+```
+
 ## A-MAC adaptive admission control
 
 `AdaptiveAdmissionController` (`[memory.admission]`) gates memory writes using a learned relevance threshold. Each candidate message is scored by embedding similarity against recent context; messages below the threshold are dropped before Qdrant upsert, reducing noise in semantic recall.
@@ -72,10 +91,13 @@ The threshold adapts over time: when recall precision drops (detected via probe 
 [memory.admission]
 enabled   = true
 threshold = 0.30   # initial relevance threshold (0.0–1.0)
+goal_conditioned_write = true  # only write when content is relevant to the active goal (A-MAC)
 ```
 
 > [!TIP]
 > Set `threshold = 0.0` to disable filtering while keeping the subsystem active (useful for debugging admission decisions).
+
+When `goal_conditioned_write = true`, each candidate write is additionally scored against the current active goal. Writes that are not relevant to the goal are suppressed even if they pass the similarity threshold.
 
 ### RL admission strategy
 
@@ -287,6 +309,9 @@ lambda = 0.85                       # Decay factor per hop (energy × lambda at 
 max_hops = 3                        # Maximum traversal depth from seed entities
 max_activated = 50                  # Maximum nodes activated before stopping
 timeout_ms = 500                    # Activation timeout to prevent runaway traversal
+
+[memory.graph]
+recall_timeout_ms = 1000            # Timeout for the full graph recall call (default: 1000)
 ```
 
 ## Importance scoring
