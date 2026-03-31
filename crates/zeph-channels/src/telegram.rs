@@ -7,7 +7,10 @@ use crate::markdown::markdown_to_telegram;
 use teloxide::prelude::*;
 use teloxide::types::{BotCommand, ChatAction, MessageId, ParseMode};
 use tokio::sync::mpsc;
-use zeph_core::channel::{Attachment, AttachmentKind, Channel, ChannelError, ChannelMessage};
+use zeph_core::channel::{
+    Attachment, AttachmentKind, Channel, ChannelError, ChannelMessage, ElicitationField,
+    ElicitationFieldType, ElicitationRequest, ElicitationResponse,
+};
 
 const MAX_MESSAGE_LEN: usize = 4096;
 const MAX_IMAGE_BYTES: u32 = 20 * 1024 * 1024;
@@ -501,6 +504,144 @@ impl Channel for TelegramChannel {
             }
         }
     }
+
+    async fn elicit(
+        &mut self,
+        request: ElicitationRequest,
+    ) -> Result<ElicitationResponse, ChannelError> {
+        let timeout = crate::ELICITATION_TIMEOUT;
+
+        self.send(&format!(
+            "*[MCP server '{}' is requesting input]*\n{}\n\n_Reply /cancel to cancel. \
+             Timeout: {}s._",
+            sanitize_markdown(&request.server_name),
+            sanitize_markdown(&request.message),
+            timeout.as_secs(),
+        ))
+        .await?;
+
+        let mut values = serde_json::Map::new();
+        for field in &request.fields {
+            let prompt = build_telegram_field_prompt(field);
+            self.send(&prompt).await?;
+
+            let incoming = match tokio::time::timeout(timeout, self.rx.recv()).await {
+                Ok(Some(msg)) => msg,
+                Ok(None) => {
+                    tracing::warn!(server = request.server_name, "elicitation channel closed");
+                    return Ok(ElicitationResponse::Declined);
+                }
+                Err(_) => {
+                    tracing::warn!(server = request.server_name, "elicitation timed out");
+                    let _ = self
+                        .send("Elicitation timed out — request cancelled.")
+                        .await;
+                    return Ok(ElicitationResponse::Cancelled);
+                }
+            };
+
+            let text = incoming.text.trim().to_owned();
+
+            if text.eq_ignore_ascii_case("/cancel") {
+                let _ = self.send("Elicitation cancelled.").await;
+                return Ok(ElicitationResponse::Cancelled);
+            }
+
+            let Some(value) = coerce_telegram_field(&text, &field.field_type) else {
+                let _ = self
+                    .send(&format!("Invalid value for '{}'. Declining.", field.name))
+                    .await;
+                return Ok(ElicitationResponse::Declined);
+            };
+            values.insert(sanitize_field_key(&field.name), value);
+        }
+
+        Ok(ElicitationResponse::Accepted(serde_json::Value::Object(
+            values,
+        )))
+    }
+}
+
+/// Strip Markdown special characters to prevent injection in Telegram messages.
+fn sanitize_markdown(s: &str) -> String {
+    s.chars()
+        .filter(|c| !matches!(c, '*' | '_' | '[' | ']' | '`' | '\x1b'))
+        .collect()
+}
+
+/// Sanitize a field name for use as a JSON key.
+///
+/// Keeps only alphanumeric characters and underscores to prevent injection via
+/// malicious MCP server field names (e.g. keys with special chars that could
+/// confuse downstream consumers).
+fn sanitize_field_key(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_alphanumeric() || *c == '_')
+        .collect()
+}
+
+fn build_telegram_field_prompt(field: &ElicitationField) -> String {
+    let req = if field.required { " (required)" } else { "" };
+    match &field.field_type {
+        ElicitationFieldType::Boolean => {
+            format!("*{}*{}: Reply *yes* or *no*", field.name, req)
+        }
+        ElicitationFieldType::Enum(opts) => {
+            // Use short numeric indexes to avoid Telegram 64-byte callback_data limit
+            let list: String = opts
+                .iter()
+                .enumerate()
+                .map(|(i, o)| format!("{}: {}", i + 1, sanitize_markdown(o)))
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("*{}*{}: Reply with the number:\n{}", field.name, req, list)
+        }
+        ElicitationFieldType::Integer => {
+            format!("*{}*{}: Reply with an integer", field.name, req)
+        }
+        ElicitationFieldType::Number => {
+            format!("*{}*{}: Reply with a number", field.name, req)
+        }
+        ElicitationFieldType::String => {
+            format!("*{}*{}: Reply with text", field.name, req)
+        }
+    }
+}
+
+fn coerce_telegram_field(text: &str, kind: &ElicitationFieldType) -> Option<serde_json::Value> {
+    match kind {
+        ElicitationFieldType::String => Some(serde_json::Value::String(text.to_owned())),
+        ElicitationFieldType::Boolean => {
+            if text.eq_ignore_ascii_case("yes") || text == "1" {
+                Some(serde_json::Value::Bool(true))
+            } else if text.eq_ignore_ascii_case("no") || text == "0" {
+                Some(serde_json::Value::Bool(false))
+            } else {
+                None
+            }
+        }
+        ElicitationFieldType::Integer => text
+            .parse::<i64>()
+            .ok()
+            .map(|n| serde_json::Value::Number(n.into())),
+        ElicitationFieldType::Number => text
+            .parse::<f64>()
+            .ok()
+            .and_then(|n| serde_json::Number::from_f64(n).map(serde_json::Value::Number)),
+        ElicitationFieldType::Enum(opts) => {
+            // Accept numeric index (1-based) or exact match
+            if let Ok(idx) = text.parse::<usize>()
+                && idx >= 1
+                && idx <= opts.len()
+            {
+                return Some(serde_json::Value::String(opts[idx - 1].clone()));
+            }
+            // Exact match (case-insensitive)
+            opts.iter()
+                .find(|o| o.eq_ignore_ascii_case(text))
+                .map(|o| serde_json::Value::String(o.clone()))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -845,5 +986,94 @@ mod tests {
             "expected edit + at least 1 overflow send, got {}",
             requests.len()
         );
+    }
+
+    // ---------------------------------------------------------------------------
+    // elicit() — happy path, timeout, /cancel, field-key sanitization
+    // All tests that exercise elicit() need the mock server because elicit()
+    // calls self.send() (which calls the Telegram Bot API) before reading rx.
+    // ---------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn elicit_happy_path_string_field_returns_accepted() {
+        let server = MockServer::start().await;
+        let (mut channel, tx) = make_mocked_channel(&server, vec![]).await;
+
+        let request = ElicitationRequest {
+            server_name: "test-server".to_owned(),
+            message: "Please provide your name".to_owned(),
+            fields: vec![ElicitationField {
+                name: "username".to_owned(),
+                description: None,
+                field_type: ElicitationFieldType::String,
+                required: true,
+            }],
+        };
+
+        // Send the answer before calling elicit() so it is buffered in the channel.
+        tx.send(plain_message("alice")).await.unwrap();
+
+        let response = channel.elicit(request).await.unwrap();
+
+        match response {
+            ElicitationResponse::Accepted(val) => {
+                assert_eq!(val["username"], "alice");
+            }
+            other => panic!("expected Accepted, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn elicit_cancel_command_returns_cancelled() {
+        let server = MockServer::start().await;
+        let (mut channel, tx) = make_mocked_channel(&server, vec![]).await;
+
+        let request = ElicitationRequest {
+            server_name: "test-server".to_owned(),
+            message: "Provide a value".to_owned(),
+            fields: vec![ElicitationField {
+                name: "token".to_owned(),
+                description: None,
+                field_type: ElicitationFieldType::String,
+                required: true,
+            }],
+        };
+
+        tx.send(plain_message("/cancel")).await.unwrap();
+
+        let response = channel.elicit(request).await.unwrap();
+        assert!(
+            matches!(response, ElicitationResponse::Cancelled),
+            "expected Cancelled, got {response:?}"
+        );
+    }
+
+    /// Verify the timeout branch of elicit() at the rx level, matching the
+    /// same pattern used in confirm_timeout_logic_denies_on_timeout.
+    #[tokio::test]
+    async fn elicit_timeout_logic_cancels_on_timeout() {
+        tokio::time::pause();
+        let (_tx, mut rx) = mpsc::channel::<IncomingMessage>(1);
+        let timeout_fut = tokio::time::timeout(crate::ELICITATION_TIMEOUT, rx.recv());
+        tokio::time::advance(crate::ELICITATION_TIMEOUT + Duration::from_millis(1)).await;
+        let result = timeout_fut.await;
+        assert!(
+            result.is_err(),
+            "expected Err(Elapsed) for elicitation timeout, got recv result"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // sanitize_field_key — pure unit test (no network)
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn sanitize_field_key_strips_special_chars() {
+        assert_eq!(sanitize_field_key("hello world"), "helloworld");
+        assert_eq!(sanitize_field_key("field-name"), "fieldname");
+        assert_eq!(sanitize_field_key("__ok__"), "__ok__");
+        assert_eq!(sanitize_field_key("a.b.c"), "abc");
+        // Alphanumeric chars and underscores are kept; everything else stripped.
+        assert_eq!(sanitize_field_key("key!@#val"), "keyval");
     }
 }
