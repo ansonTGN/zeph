@@ -40,10 +40,10 @@ ollama pull qwen3:8b && ollama pull qwen3-embedding
 zeph init && zeph
 ```
 
-**Cloud (Claude or OpenAI)**:
+**Cloud (Claude, OpenAI, or Gemini)**:
 
 ```bash
-export ZEPH_CLAUDE_API_KEY=sk-ant-...   # or ZEPH_OPENAI_API_KEY
+export ZEPH_CLAUDE_API_KEY=sk-ant-...   # or ZEPH_OPENAI_API_KEY / ZEPH_GEMINI_API_KEY
 zeph init && zeph
 ```
 
