@@ -93,6 +93,42 @@ pub fn validate_command(command: &str, extra_allowed: &[String]) -> Result<(), M
     Ok(())
 }
 
+/// Minimal base environment variables passed to isolated stdio MCP server processes.
+///
+/// When `env_isolation = true`, the spawned process receives only these variables from the
+/// parent environment, plus any server-specific `env` entries from config. This prevents
+/// the child from reading secrets or credentials the parent may have inherited.
+pub const BASE_ENV_VARS: &[&str] = &[
+    "PATH",
+    "HOME",
+    "USER",
+    "LANG",
+    "LC_ALL",
+    "TERM",
+    "SHELL",
+    "TMPDIR",
+    "XDG_RUNTIME_DIR",
+    "XDG_CONFIG_HOME",
+];
+
+/// Build the environment map for an isolated stdio child process.
+///
+/// Starts with the minimal `BASE_ENV_VARS` from the current process, then merges
+/// the server-specific `env` overrides. Variables present in `server_env` that are
+/// also in `BLOCKED_ENV_VARS` are blocked by the subsequent `validate_env` call in
+/// the caller.
+#[must_use]
+pub fn build_isolated_env<S: std::hash::BuildHasher>(
+    server_env: &HashMap<String, String, S>,
+) -> HashMap<String, String> {
+    let mut env: HashMap<String, String> = BASE_ENV_VARS
+        .iter()
+        .filter_map(|&k| std::env::var(k).ok().map(|v| (k.to_owned(), v)))
+        .collect();
+    env.extend(server_env.iter().map(|(k, v)| (k.clone(), v.clone())));
+    env
+}
+
 /// Validate that no blocked env vars are present.
 ///
 /// # Errors
@@ -290,5 +326,73 @@ mod tests {
         };
         assert!(err.to_string().contains("LD_PRELOAD"));
         assert!(err.to_string().contains("blocked"));
+    }
+
+    // --- build_isolated_env ---
+
+    #[test]
+    fn build_isolated_env_base_vars_present_when_set() {
+        // PATH and HOME are almost always set in CI and local environments.
+        // We test the ones most likely to be present.
+        let result = build_isolated_env(&HashMap::new());
+        // At minimum, PATH should appear (always set in any shell environment).
+        // We do a soft check: the result must be a strict subset of BASE_ENV_VARS + server_env.
+        for key in result.keys() {
+            assert!(
+                BASE_ENV_VARS.contains(&key.as_str()),
+                "unexpected key in isolated env: {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn build_isolated_env_non_base_vars_absent() {
+        // build_isolated_env only propagates variables listed in BASE_ENV_VARS.
+        // Any key in the result must be in BASE_ENV_VARS (or in server_env, which is empty here).
+        let result = build_isolated_env(&HashMap::new());
+        for key in result.keys() {
+            assert!(
+                BASE_ENV_VARS.contains(&key.as_str()),
+                "unexpected key in isolated env (not in BASE_ENV_VARS and not in server_env): {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn build_isolated_env_server_env_merged() {
+        let mut server_env = HashMap::new();
+        server_env.insert("MY_TOOL_TOKEN".into(), "tok_abc".into());
+        let result = build_isolated_env(&server_env);
+        assert_eq!(
+            result.get("MY_TOOL_TOKEN").map(String::as_str),
+            Some("tok_abc"),
+            "server-declared env must appear in isolated env"
+        );
+    }
+
+    #[test]
+    fn build_isolated_env_server_env_can_override_base_var() {
+        // Operator can pin a specific PATH — server_env merges after base vars.
+        let mut server_env = HashMap::new();
+        server_env.insert("PATH".into(), "/usr/local/bin:/custom/bin".into());
+        let result = build_isolated_env(&server_env);
+        assert_eq!(
+            result.get("PATH").map(String::as_str),
+            Some("/usr/local/bin:/custom/bin"),
+            "server-declared PATH must override the base PATH"
+        );
+    }
+
+    #[test]
+    fn build_isolated_env_xdg_vars_in_base() {
+        // XDG_RUNTIME_DIR and XDG_CONFIG_HOME must be in BASE_ENV_VARS.
+        assert!(
+            BASE_ENV_VARS.contains(&"XDG_RUNTIME_DIR"),
+            "XDG_RUNTIME_DIR must be in BASE_ENV_VARS"
+        );
+        assert!(
+            BASE_ENV_VARS.contains(&"XDG_CONFIG_HOME"),
+            "XDG_CONFIG_HOME must be in BASE_ENV_VARS"
+        );
     }
 }

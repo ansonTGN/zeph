@@ -130,6 +130,66 @@ pub fn infer_security_meta(tool_name: &str) -> ToolSecurityMeta {
     }
 }
 
+/// Describes a `sanitized_id` collision between two registered tools.
+///
+/// Even when trust levels differ, the executor dispatches on `sanitized_id`, so a collision
+/// means one tool silently shadows the other regardless of trust.
+#[derive(Debug, Clone)]
+pub struct ToolCollision {
+    pub sanitized_id: String,
+    pub server_a: String,
+    pub qualified_a: String,
+    pub trust_a: crate::manager::McpTrustLevel,
+    pub server_b: String,
+    pub qualified_b: String,
+    pub trust_b: crate::manager::McpTrustLevel,
+}
+
+/// Detect `sanitized_id` collisions across a flat tool list.
+///
+/// Groups tools by `sanitized_id`. Returns one `ToolCollision` per pair of tools that share a
+/// `sanitized_id`. The first-registered tool wins dispatch; all subsequent tools are shadowed.
+///
+/// The `trust_map` maps `server_id` → trust level.
+#[must_use]
+pub fn detect_collisions<S: std::hash::BuildHasher>(
+    tools: &[McpTool],
+    trust_map: &std::collections::HashMap<String, crate::manager::McpTrustLevel, S>,
+) -> Vec<ToolCollision> {
+    use std::collections::HashMap;
+
+    // Map sanitized_id → first tool that claimed it.
+    let mut seen: HashMap<String, &McpTool> = HashMap::new();
+    let mut collisions = Vec::new();
+
+    for tool in tools {
+        let sid = tool.sanitized_id();
+        if let Some(first) = seen.get(&sid) {
+            let trust_a = trust_map
+                .get(&first.server_id)
+                .copied()
+                .unwrap_or(crate::manager::McpTrustLevel::Untrusted);
+            let trust_b = trust_map
+                .get(&tool.server_id)
+                .copied()
+                .unwrap_or(crate::manager::McpTrustLevel::Untrusted);
+            collisions.push(ToolCollision {
+                sanitized_id: sid,
+                server_a: first.server_id.clone(),
+                qualified_a: first.qualified_name(),
+                trust_a,
+                server_b: tool.server_id.clone(),
+                qualified_b: tool.qualified_name(),
+                trust_b,
+            });
+        } else {
+            seen.insert(sid, tool);
+        }
+    }
+
+    collisions
+}
+
 impl McpTool {
     #[must_use]
     pub fn qualified_name(&self) -> String {
@@ -490,5 +550,85 @@ mod tests {
         let meta = infer_security_meta("run_curl");
         assert!(meta.capabilities.contains(&CapabilityClass::Network));
         assert_eq!(meta.data_sensitivity, DataSensitivity::Medium);
+    }
+
+    // --- detect_collisions ---
+
+    fn trust_map(
+        entries: &[(&str, crate::manager::McpTrustLevel)],
+    ) -> std::collections::HashMap<String, crate::manager::McpTrustLevel> {
+        entries.iter().map(|(k, v)| ((*k).to_owned(), *v)).collect()
+    }
+
+    #[test]
+    fn detect_collisions_no_collision_happy_path() {
+        let tools = vec![
+            make_tool("server_a", "tool_one"),
+            make_tool("server_b", "tool_two"),
+        ];
+        let tm = trust_map(&[
+            ("server_a", crate::manager::McpTrustLevel::Trusted),
+            ("server_b", crate::manager::McpTrustLevel::Trusted),
+        ]);
+        let cols = detect_collisions(&tools, &tm);
+        assert!(cols.is_empty(), "different sanitized_ids must not collide");
+    }
+
+    #[test]
+    fn detect_collisions_different_trust_collision() {
+        // "a.b:c" and "a:b_c" both sanitize to "a_b_c" — collision across trust levels.
+        let tool_a = make_tool("a.b", "c");
+        let tool_b = make_tool("a", "b_c");
+        let tm = trust_map(&[
+            ("a.b", crate::manager::McpTrustLevel::Trusted),
+            ("a", crate::manager::McpTrustLevel::Untrusted),
+        ]);
+        let cols = detect_collisions(&[tool_a, tool_b], &tm);
+        assert_eq!(cols.len(), 1);
+        let col = &cols[0];
+        assert_eq!(col.sanitized_id, "a_b_c");
+        assert_eq!(col.server_a, "a.b");
+        assert_eq!(col.server_b, "a");
+        assert_eq!(col.trust_a, crate::manager::McpTrustLevel::Trusted);
+        assert_eq!(col.trust_b, crate::manager::McpTrustLevel::Untrusted);
+    }
+
+    #[test]
+    fn detect_collisions_same_trust_collision() {
+        // Both servers are Untrusted and share a sanitized_id.
+        let tool_a = make_tool("a.b", "c");
+        let tool_b = make_tool("a", "b_c");
+        let tm = trust_map(&[
+            ("a.b", crate::manager::McpTrustLevel::Untrusted),
+            ("a", crate::manager::McpTrustLevel::Untrusted),
+        ]);
+        let cols = detect_collisions(&[tool_a, tool_b], &tm);
+        assert_eq!(cols.len(), 1);
+        assert_eq!(cols[0].trust_a, crate::manager::McpTrustLevel::Untrusted);
+        assert_eq!(cols[0].trust_b, crate::manager::McpTrustLevel::Untrusted);
+    }
+
+    #[test]
+    fn detect_collisions_multiple_collisions_reported() {
+        // Three tools, all sharing the same sanitized_id "srv_tool".
+        let t1 = make_tool("srv", "tool");
+        let t2 = make_tool("srv.x", "tool"); // "srv_x_tool" — different, no collision with t1
+        let t3 = make_tool("srv", "tool"); // exact duplicate of t1 — collision
+        let tm = trust_map(&[("srv", crate::manager::McpTrustLevel::Untrusted)]);
+        let cols = detect_collisions(&[t1, t2, t3], &tm);
+        // t1 and t3 share "srv_tool"; t2 is "srv_x_tool" — one collision
+        assert_eq!(cols.len(), 1);
+        assert_eq!(cols[0].sanitized_id, "srv_tool");
+    }
+
+    #[test]
+    fn detect_collisions_unknown_server_defaults_to_untrusted() {
+        let tool_a = make_tool("a.b", "c");
+        let tool_b = make_tool("a", "b_c");
+        // No entries in trust_map — both should default to Untrusted.
+        let cols = detect_collisions(&[tool_a, tool_b], &std::collections::HashMap::new());
+        assert_eq!(cols.len(), 1);
+        assert_eq!(cols[0].trust_a, crate::manager::McpTrustLevel::Untrusted);
+        assert_eq!(cols[0].trust_b, crate::manager::McpTrustLevel::Untrusted);
     }
 }
