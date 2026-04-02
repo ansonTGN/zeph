@@ -1048,8 +1048,8 @@ mod tests {
         );
     }
 
-    /// Verify the timeout branch of elicit() at the rx level, matching the
-    /// same pattern used in confirm_timeout_logic_denies_on_timeout.
+    /// Verify the timeout branch of `elicit()` at the rx level, matching the
+    /// same pattern used in `confirm_timeout_logic_denies_on_timeout`.
     #[tokio::test]
     async fn elicit_timeout_logic_cancels_on_timeout() {
         tokio::time::pause();
