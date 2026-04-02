@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Add backticks to doc comments in telegram.rs elicitation tests to fix clippy `doc_markdown` warnings (#2549)
+
 ### Removed
 
 - Remove dead `ModelOrchestrator` and related `LlmRoutingStrategy::Task` code superseded by `RouterProvider` (#2540)
