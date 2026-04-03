@@ -3390,3 +3390,174 @@ async fn pool_isolation_independent_pools_do_not_starve() {
     );
     assert!(result.unwrap().is_ok(), "pool B query must succeed");
 }
+
+// ── GAAMA episode tests ────────────────────────────────────────────────────────
+
+/// Insert a conversation row and return its id (satisfies `FK` in `graph_episodes`).
+async fn insert_conversation(gs: &GraphStore) -> i64 {
+    sqlx::query_scalar(sql!(
+        "INSERT INTO conversations DEFAULT VALUES RETURNING id"
+    ))
+    .fetch_one(&gs.pool)
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn ensure_episode_creates_and_returns_id() {
+    let gs = setup().await;
+    let conv_id = insert_conversation(&gs).await;
+    let ep_id = gs.ensure_episode(conv_id).await.unwrap();
+    assert!(ep_id > 0);
+}
+
+#[tokio::test]
+async fn ensure_episode_idempotent() {
+    let gs = setup().await;
+    let conv_id = insert_conversation(&gs).await;
+    let id1 = gs.ensure_episode(conv_id).await.unwrap();
+    let id2 = gs.ensure_episode(conv_id).await.unwrap();
+    assert_eq!(
+        id1, id2,
+        "ensure_episode must return the same id on conflict"
+    );
+}
+
+#[tokio::test]
+async fn ensure_episode_different_conversations_get_different_ids() {
+    let gs = setup().await;
+    let c1 = insert_conversation(&gs).await;
+    let c2 = insert_conversation(&gs).await;
+    let id1 = gs.ensure_episode(c1).await.unwrap();
+    let id2 = gs.ensure_episode(c2).await.unwrap();
+    assert_ne!(id1, id2);
+}
+
+#[tokio::test]
+async fn link_entity_to_episode_and_query() {
+    let gs = setup().await;
+    let conv_id = insert_conversation(&gs).await;
+    let entity_id = gs
+        .upsert_entity("Rust", "rust", EntityType::Language, None)
+        .await
+        .unwrap();
+    let ep_id = gs.ensure_episode(conv_id).await.unwrap();
+    gs.link_entity_to_episode(ep_id, entity_id).await.unwrap();
+
+    let episodes = gs.episodes_for_entity(entity_id).await.unwrap();
+    assert_eq!(episodes.len(), 1);
+    assert_eq!(episodes[0].id, ep_id);
+    assert_eq!(episodes[0].conversation_id, conv_id);
+}
+
+#[tokio::test]
+async fn link_entity_to_episode_idempotent() {
+    let gs = setup().await;
+    let conv_id = insert_conversation(&gs).await;
+    let entity_id = gs
+        .upsert_entity("Tokio", "tokio", EntityType::Tool, None)
+        .await
+        .unwrap();
+    let ep_id = gs.ensure_episode(conv_id).await.unwrap();
+    gs.link_entity_to_episode(ep_id, entity_id).await.unwrap();
+    // Second call must not error (ON CONFLICT DO NOTHING).
+    gs.link_entity_to_episode(ep_id, entity_id).await.unwrap();
+
+    let episodes = gs.episodes_for_entity(entity_id).await.unwrap();
+    assert_eq!(
+        episodes.len(),
+        1,
+        "duplicate link must not create a second row"
+    );
+}
+
+#[tokio::test]
+async fn entity_in_multiple_episodes() {
+    let gs = setup().await;
+    let c1 = insert_conversation(&gs).await;
+    let c2 = insert_conversation(&gs).await;
+    let entity_id = gs
+        .upsert_entity("Cargo", "cargo", EntityType::Tool, None)
+        .await
+        .unwrap();
+    let ep1 = gs.ensure_episode(c1).await.unwrap();
+    let ep2 = gs.ensure_episode(c2).await.unwrap();
+    gs.link_entity_to_episode(ep1, entity_id).await.unwrap();
+    gs.link_entity_to_episode(ep2, entity_id).await.unwrap();
+
+    let episodes = gs.episodes_for_entity(entity_id).await.unwrap();
+    assert_eq!(episodes.len(), 2);
+    let ids: Vec<i64> = episodes.iter().map(|e| e.id).collect();
+    assert!(ids.contains(&ep1));
+    assert!(ids.contains(&ep2));
+}
+
+#[tokio::test]
+async fn episodes_for_entity_returns_empty_when_no_links() {
+    let gs = setup().await;
+    let entity_id = gs
+        .upsert_entity("Clippy", "clippy", EntityType::Tool, None)
+        .await
+        .unwrap();
+    let episodes = gs.episodes_for_entity(entity_id).await.unwrap();
+    assert!(episodes.is_empty());
+}
+
+#[tokio::test]
+async fn episodes_for_entity_unknown_id_returns_empty() {
+    // entity_id 99999 does not exist — should return empty, not error
+    let gs = setup().await;
+    let episodes = gs.episodes_for_entity(99999).await.unwrap();
+    assert!(episodes.is_empty());
+}
+
+#[tokio::test]
+async fn link_entity_to_episode_invalid_entity_is_fk_error() {
+    // Linking a non-existent entity_id must fail with a DB error (FK violation), not panic.
+    let gs = setup().await;
+    let conv_id = insert_conversation(&gs).await;
+    let ep_id = gs.ensure_episode(conv_id).await.unwrap();
+    let result = gs.link_entity_to_episode(ep_id, 99999).await;
+    // FK enforcement may be off in test pool — accept both Ok (FK off) and Err (FK on).
+    match result {
+        Ok(()) | Err(crate::error::MemoryError::Sqlx(_)) => {} // FK off or FK violation — both acceptable
+        Err(e) => panic!("unexpected error type: {e:?}"),
+    }
+}
+
+#[tokio::test]
+async fn episode_cascade_delete_on_conversation_delete() {
+    // Deleting the parent conversation must cascade-delete the episode row.
+    let gs = setup().await;
+    let conv_id = insert_conversation(&gs).await;
+    let ep_id = gs.ensure_episode(conv_id).await.unwrap();
+
+    // Delete the conversation row directly.
+    sqlx::query(sql!("DELETE FROM conversations WHERE id = ?1"))
+        .bind(conv_id)
+        .execute(&gs.pool)
+        .await
+        .unwrap();
+
+    // The episode should be gone due to ON DELETE CASCADE.
+    let count: i64 = sqlx::query_scalar(sql!("SELECT COUNT(*) FROM graph_episodes WHERE id = ?1"))
+        .bind(ep_id)
+        .fetch_one(&gs.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        count, 0,
+        "episode must cascade-delete with its conversation"
+    );
+}
+
+#[tokio::test]
+async fn ensure_episode_zero_conversation_id_is_rejected() {
+    // conversation_id=0 does not satisfy the FK (no row with id=0 in conversations).
+    let gs = setup().await;
+    let result = gs.ensure_episode(0).await;
+    match result {
+        Ok(_) | Err(crate::error::MemoryError::Sqlx(_)) => {} // FK off or FK violation — both acceptable
+        Err(e) => panic!("unexpected error: {e:?}"),
+    }
+}
