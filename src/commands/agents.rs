@@ -73,7 +73,7 @@ fn handle_list(config_path: Option<&Path>) -> anyhow::Result<()> {
     for d in &defs {
         let scope = d.source.as_deref().unwrap_or("-");
         let desc = truncate(&d.description, desc_w);
-        let model = d.model.as_deref().unwrap_or("-");
+        let model = d.model.as_ref().map_or("-", |m| m.as_str());
         println!(
             "{:<name_w$}  {:<scope_w$}  {:<desc_w$}  {}",
             d.name, scope, desc, model
@@ -93,7 +93,10 @@ fn handle_show(name: &str, config_path: Option<&Path>) -> anyhow::Result<()> {
     println!("Name:        {}", def.name);
     println!("Description: {}", def.description);
     println!("Source:      {}", def.source.as_deref().unwrap_or("-"));
-    println!("Model:       {}", def.model.as_deref().unwrap_or("-"));
+    println!(
+        "Model:       {}",
+        def.model.as_ref().map_or("-", |m| m.as_str())
+    );
     println!("Mode:        {:?}", def.permissions.permission_mode);
     println!("Max turns:   {}", def.permissions.max_turns);
     println!("Background:  {}", def.permissions.background);
@@ -141,7 +144,7 @@ fn handle_create(
     }
     let mut def = SubAgentDef::default_template(name, description);
     if let Some(m) = model {
-        def.model = Some(m.to_owned());
+        def.model = Some(zeph_core::subagent::ModelSpec::Named(m.to_owned()));
     }
 
     let target = def
