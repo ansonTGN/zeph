@@ -71,6 +71,21 @@ pub struct UtilityContext {
     pub user_requested: bool,
 }
 
+/// Recommended action from the utility policy (arXiv:2603.19896, §4.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UtilityAction {
+    /// Generate a text response without executing the proposed tool.
+    Respond,
+    /// Retrieve additional context (memory search, RAG, graph recall) before responding.
+    Retrieve,
+    /// Execute the proposed tool call.
+    ToolCall,
+    /// Verify the previous tool result before proceeding.
+    Verify,
+    /// Stop the tool loop entirely (budget exhausted or loop limit).
+    Stop,
+}
+
 /// Hashes `(tool_name, serialized_params)` pre-execution for redundancy detection.
 fn call_hash(call: &ToolCall) -> u64 {
     let mut h = DefaultHasher::new();
@@ -157,23 +172,63 @@ impl UtilityScorer {
         if score.is_valid() { Some(score) } else { None }
     }
 
-    /// Returns `true` when the tool call should be executed based on its score.
+    /// Recommend an action based on the utility score and turn context.
     ///
-    /// `user_requested` tools bypass the gate unconditionally.
-    /// When `score` is `None` (scoring disabled or produced invalid result) and
-    /// `user_requested` is false, the tool is skipped (fail-closed).
+    /// Decision tree (thresholds from arXiv:2603.19896):
+    /// 1. `user_requested` → always `ToolCall` (bypass policy).
+    /// 2. Scoring disabled → always `ToolCall`.
+    /// 3. `score` is `None` (invalid score, scoring enabled) → `Stop` (fail-closed).
+    /// 4. `cost > 0.9` (budget nearly exhausted) → `Stop`.
+    /// 5. `redundancy == 1.0` (duplicate call) → `Respond`.
+    /// 6. `gain >= 0.7 && total >= threshold` → `ToolCall`.
+    /// 7. `gain >= 0.5 && uncertainty > 0.5` → `Retrieve`.
+    /// 8. `total < threshold && tool_calls_this_turn > 0` → `Verify`.
+    /// 9. `total >= threshold` → `ToolCall`.
+    /// 10. Default → `Respond`.
     #[must_use]
-    pub fn should_execute(&self, score: Option<&UtilityScore>, user_requested: bool) -> bool {
-        if user_requested {
-            return true;
+    pub fn recommend_action(
+        &self,
+        score: Option<&UtilityScore>,
+        ctx: &UtilityContext,
+    ) -> UtilityAction {
+        // Bypass: user-requested tools are never gated.
+        if ctx.user_requested {
+            return UtilityAction::ToolCall;
         }
-        match score {
-            Some(s) => s.total >= self.config.threshold,
-            // Scoring disabled → always execute.
-            // Scoring produced invalid result → fail-closed: skip.
-            None if !self.config.enabled => true,
-            None => false,
+        // Pass-through: scoring disabled → always execute.
+        if !self.config.enabled {
+            return UtilityAction::ToolCall;
         }
+        let Some(s) = score else {
+            // Invalid score with scoring enabled → fail-closed.
+            return UtilityAction::Stop;
+        };
+
+        // Budget nearly exhausted.
+        if s.cost > 0.9 {
+            return UtilityAction::Stop;
+        }
+        // Duplicate call — skip tool.
+        if s.redundancy >= 1.0 {
+            return UtilityAction::Respond;
+        }
+        // High-gain tool call above threshold.
+        if s.gain >= 0.7 && s.total >= self.config.threshold {
+            return UtilityAction::ToolCall;
+        }
+        // Uncertain — gather more context first.
+        if s.gain >= 0.5 && s.uncertainty > 0.5 {
+            return UtilityAction::Retrieve;
+        }
+        // Below threshold but prior results exist — verify before proceeding.
+        if s.total < self.config.threshold && ctx.tool_calls_this_turn > 0 {
+            return UtilityAction::Verify;
+        }
+        // Above threshold (low-gain but low-cost / low-redundancy).
+        if s.total >= self.config.threshold {
+            return UtilityAction::ToolCall;
+        }
+        UtilityAction::Respond
     }
 
     /// Record a call as executed for redundancy tracking.
@@ -236,8 +291,11 @@ mod tests {
         let call = make_call("bash", json!({}));
         let score = scorer.score(&call, &default_ctx());
         assert!(score.is_none());
-        // When disabled, should_execute always returns true (never gated).
-        assert!(scorer.should_execute(score.as_ref(), false));
+        // When disabled, recommend_action always returns ToolCall (never gated).
+        assert_eq!(
+            scorer.recommend_action(score.as_ref(), &default_ctx()),
+            UtilityAction::ToolCall
+        );
     }
 
     #[test]
@@ -252,7 +310,13 @@ mod tests {
             "first call should exceed threshold: {}",
             s.total
         );
-        assert!(scorer.should_execute(Some(&s), false));
+        // First call with high uncertainty may trigger Retrieve (gather context) — that is also
+        // a non-blocking outcome. Only Stop/Respond are considered failures here.
+        let action = scorer.recommend_action(Some(&s), &default_ctx());
+        assert!(
+            action == UtilityAction::ToolCall || action == UtilityAction::Retrieve,
+            "first call should not be blocked, got {action:?}",
+        );
     }
 
     #[test]
@@ -285,20 +349,33 @@ mod tests {
             uncertainty: 0.0,
             total: -100.0,
         };
-        assert!(scorer.should_execute(Some(&score), true));
+        let ctx = UtilityContext {
+            user_requested: true,
+            ..default_ctx()
+        };
+        assert_eq!(
+            scorer.recommend_action(Some(&score), &ctx),
+            UtilityAction::ToolCall
+        );
     }
 
     #[test]
     fn none_score_fail_closed_when_enabled() {
         let scorer = UtilityScorer::new(default_config());
-        // Simulate scoring failure (None with scoring enabled).
-        assert!(!scorer.should_execute(None, false));
+        // Scoring failure (None with scoring enabled) → Stop (fail-closed).
+        assert_eq!(
+            scorer.recommend_action(None, &default_ctx()),
+            UtilityAction::Stop
+        );
     }
 
     #[test]
     fn none_score_executes_when_disabled() {
         let scorer = UtilityScorer::new(UtilityScoringConfig::default()); // disabled
-        assert!(scorer.should_execute(None, false));
+        assert_eq!(
+            scorer.recommend_action(None, &default_ctx()),
+            UtilityAction::ToolCall
+        );
     }
 
     #[test]
@@ -402,7 +479,12 @@ mod tests {
             "total should be non-negative: {}",
             score.total
         );
-        assert!(scorer.should_execute(Some(&score), false));
+        // With threshold=0 any non-blocking action (ToolCall or Retrieve) is acceptable.
+        let action = scorer.recommend_action(Some(&score), &default_ctx());
+        assert!(
+            action == UtilityAction::ToolCall || action == UtilityAction::Retrieve,
+            "threshold=0 should not block calls, got {action:?}",
+        );
     }
 
     #[test]
@@ -420,6 +502,151 @@ mod tests {
             "realistic score should be below 1.0: {}",
             score.total
         );
-        assert!(!scorer.should_execute(Some(&score), false));
+        // Below threshold, no prior calls → Respond.
+        assert_ne!(
+            scorer.recommend_action(Some(&score), &default_ctx()),
+            UtilityAction::ToolCall
+        );
+    }
+
+    // ── recommend_action tests ────────────────────────────────────────────────
+
+    #[test]
+    fn recommend_action_user_requested_always_tool_call() {
+        let scorer = UtilityScorer::new(default_config());
+        let score = UtilityScore {
+            gain: 0.0,
+            cost: 1.0,
+            redundancy: 1.0,
+            uncertainty: 0.0,
+            total: -100.0,
+        };
+        let ctx = UtilityContext {
+            user_requested: true,
+            ..default_ctx()
+        };
+        assert_eq!(
+            scorer.recommend_action(Some(&score), &ctx),
+            UtilityAction::ToolCall
+        );
+    }
+
+    #[test]
+    fn recommend_action_disabled_scorer_always_tool_call() {
+        let scorer = UtilityScorer::new(UtilityScoringConfig::default()); // disabled
+        let ctx = default_ctx();
+        assert_eq!(scorer.recommend_action(None, &ctx), UtilityAction::ToolCall);
+    }
+
+    #[test]
+    fn recommend_action_none_score_enabled_stops() {
+        let scorer = UtilityScorer::new(default_config());
+        let ctx = default_ctx();
+        assert_eq!(scorer.recommend_action(None, &ctx), UtilityAction::Stop);
+    }
+
+    #[test]
+    fn recommend_action_budget_exhausted_stops() {
+        let scorer = UtilityScorer::new(default_config());
+        let score = UtilityScore {
+            gain: 0.8,
+            cost: 0.95,
+            redundancy: 0.0,
+            uncertainty: 0.5,
+            total: 0.5,
+        };
+        assert_eq!(
+            scorer.recommend_action(Some(&score), &default_ctx()),
+            UtilityAction::Stop
+        );
+    }
+
+    #[test]
+    fn recommend_action_redundant_responds() {
+        let scorer = UtilityScorer::new(default_config());
+        let score = UtilityScore {
+            gain: 0.8,
+            cost: 0.1,
+            redundancy: 1.0,
+            uncertainty: 0.5,
+            total: 0.5,
+        };
+        assert_eq!(
+            scorer.recommend_action(Some(&score), &default_ctx()),
+            UtilityAction::Respond
+        );
+    }
+
+    #[test]
+    fn recommend_action_high_gain_above_threshold_tool_call() {
+        let scorer = UtilityScorer::new(default_config());
+        let score = UtilityScore {
+            gain: 0.8,
+            cost: 0.1,
+            redundancy: 0.0,
+            uncertainty: 0.4,
+            total: 0.6,
+        };
+        assert_eq!(
+            scorer.recommend_action(Some(&score), &default_ctx()),
+            UtilityAction::ToolCall
+        );
+    }
+
+    #[test]
+    fn recommend_action_uncertain_retrieves() {
+        let scorer = UtilityScorer::new(default_config());
+        // gain >= 0.5, uncertainty > 0.5, but gain < 0.7 so rule 3 not triggered
+        let score = UtilityScore {
+            gain: 0.6,
+            cost: 0.1,
+            redundancy: 0.0,
+            uncertainty: 0.8,
+            total: 0.4,
+        };
+        assert_eq!(
+            scorer.recommend_action(Some(&score), &default_ctx()),
+            UtilityAction::Retrieve
+        );
+    }
+
+    #[test]
+    fn recommend_action_below_threshold_with_prior_calls_verifies() {
+        let scorer = UtilityScorer::new(default_config());
+        let score = UtilityScore {
+            gain: 0.3,
+            cost: 0.1,
+            redundancy: 0.0,
+            uncertainty: 0.2,
+            total: 0.05, // below default threshold 0.1
+        };
+        let ctx = UtilityContext {
+            tool_calls_this_turn: 1,
+            ..default_ctx()
+        };
+        assert_eq!(
+            scorer.recommend_action(Some(&score), &ctx),
+            UtilityAction::Verify
+        );
+    }
+
+    #[test]
+    fn recommend_action_default_responds() {
+        let scorer = UtilityScorer::new(default_config());
+        let score = UtilityScore {
+            gain: 0.3,
+            cost: 0.1,
+            redundancy: 0.0,
+            uncertainty: 0.2,
+            total: 0.05, // below threshold, no prior calls
+        };
+        let ctx = UtilityContext {
+            tool_calls_this_turn: 0,
+            ..default_ctx()
+        };
+        assert_eq!(
+            scorer.recommend_action(Some(&score), &ctx),
+            UtilityAction::Respond
+        );
     }
 }
