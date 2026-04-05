@@ -12,6 +12,7 @@ use std::{
 use futures_core::Stream;
 use serde::{Deserialize, Serialize};
 
+use crate::embed::owned_strs;
 use crate::error::LlmError;
 
 static SCHEMA_CACHE: LazyLock<Mutex<HashMap<TypeId, (serde_json::Value, String)>>> =
@@ -496,6 +497,29 @@ pub trait LlmProvider: Send + Sync {
     ///
     /// Returns an error if the provider does not support embeddings or the request fails.
     fn embed(&self, text: &str) -> impl Future<Output = Result<Vec<f32>, LlmError>> + Send;
+
+    /// Embed multiple texts in a single API call.
+    ///
+    /// Default implementation calls [`embed`][Self::embed] sequentially for each input.
+    /// Providers with native batch APIs should override this.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any embedding fails. On native batch backends the entire batch
+    /// fails atomically; on the sequential fallback the first error aborts.
+    fn embed_batch(
+        &self,
+        texts: &[&str],
+    ) -> impl Future<Output = Result<Vec<Vec<f32>>, LlmError>> + Send {
+        let owned = owned_strs(texts);
+        async move {
+            let mut results = Vec::with_capacity(owned.len());
+            for text in &owned {
+                results.push(self.embed(text).await?);
+            }
+            Ok(results)
+        }
+    }
 
     /// Whether this provider supports embedding generation.
     fn supports_embeddings(&self) -> bool;
@@ -1487,6 +1511,29 @@ mod tests {
         match decoded {
             MessagePart::Summary { text } => assert_eq!(text, "hello"),
             other => panic!("expected MessagePart::Summary, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn embed_batch_default_empty_returns_empty() {
+        let provider = StubProvider {
+            response: String::new(),
+        };
+        let result = provider.embed_batch(&[]).await.unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn embed_batch_default_calls_embed_sequentially() {
+        let provider = StubProvider {
+            response: String::new(),
+        };
+        let texts = ["hello", "world", "foo"];
+        let result = provider.embed_batch(&texts).await.unwrap();
+        assert_eq!(result.len(), 3);
+        // StubProvider::embed always returns [0.1, 0.2, 0.3]
+        for vec in &result {
+            assert_eq!(vec, &[0.1_f32, 0.2, 0.3]);
         }
     }
 }
