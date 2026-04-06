@@ -476,6 +476,181 @@ Kumiho implements belief revision for the graph memory store. When new informati
 
 This is paired with D-MEM RPE (Reward Prediction Error) routing for graph memory, which uses prediction errors from graph queries to adaptively weight the graph store's contribution to hybrid recall.
 
+## Persona Memory
+
+Persona memory extracts persistent user-preference and domain-knowledge facts from conversation history. Extracted facts are injected into context at assembly time, giving the agent a stable model of user expertise, goals, and preferences across sessions.
+
+Facts are extracted by a fast LLM provider after the session accumulates enough user messages (controlled by `min_messages`). A self-referential heuristic gate skips extraction for agent-to-agent sessions. When conflicting facts are detected, the newer entry marks the older one via `supersedes_id`, preserving history without duplication.
+
+```toml
+[memory.persona]
+enabled                 = false
+persona_provider        = "fast"   # cheap extraction model; falls back to primary
+min_confidence          = 0.6      # facts below this threshold are discarded
+min_messages            = 3        # minimum user messages before first extraction
+max_messages            = 10       # messages fed to LLM per extraction pass
+extraction_timeout_secs = 10
+context_budget_tokens   = 500
+```
+
+## Trajectory Memory
+
+Trajectory memory captures procedural ("how to do X") and episodic ("what happened in turn N") entries from tool-call turns. Procedural entries are injected as "past experience" during context assembly, helping the agent reuse successful tool patterns across sessions.
+
+Extraction runs after every turn that contains tool calls, using a fast LLM provider to classify and summarise each tool sequence. Only entries above `min_confidence` are stored.
+
+```toml
+[memory.trajectory]
+enabled                 = false
+trajectory_provider     = "fast"   # cheap extraction model; falls back to primary
+context_budget_tokens   = 400      # token budget for trajectory hints in context
+recall_top_k            = 5        # procedural entries retrieved per turn
+min_confidence          = 0.6
+max_messages            = 10
+extraction_timeout_secs = 10
+```
+
+## Category-Aware Memory
+
+When enabled, messages are tagged with a category derived from the active skill or tool context. The category is stored in the `messages.category` column and used as a payload filter during Qdrant recall, scoping semantic search to the relevant topic area.
+
+```toml
+[memory.category]
+enabled  = false
+auto_tag = true    # derive category from active skill or tool type automatically
+```
+
+## TiMem — Temporal-Hierarchical Memory Tree
+
+TiMem organises memories as leaf nodes and periodically consolidates them into hierarchical summaries. Each sweep clusters similar leaves by cosine similarity and asks a fast LLM to produce a parent-level summary. Context assembly uses tree traversal for complex queries, returning a mix of leaf-level detail and higher-level summaries within the token budget.
+
+```toml
+[memory.tree]
+enabled                = false
+consolidation_provider = "fast"  # falls back to primary
+sweep_interval_secs    = 300     # background consolidation interval
+batch_size             = 20      # leaves processed per sweep
+similarity_threshold   = 0.8     # cosine threshold for clustering
+max_level              = 3       # maximum tree depth above leaves
+context_budget_tokens  = 400
+recall_top_k           = 5
+min_cluster_size       = 2       # minimum cluster size to trigger LLM consolidation
+```
+
+## Time-Based Microcompact
+
+Microcompact clears stale low-value tool outputs from context when the session has been idle longer than `gap_threshold_minutes`. This is a zero-LLM-cost in-memory operation that reduces context pressure before compaction runs.
+
+Cleared tool types: `bash`, `shell`, `grep`, `rg`, `find`, `web_fetch`, `web_search`, `read`, `cat`, `list_directory`. The `keep_recent` most recent entries from these tools are always preserved.
+
+```toml
+[memory.microcompact]
+enabled               = false
+gap_threshold_minutes = 60   # idle gap in minutes before clearing stale outputs
+keep_recent           = 3    # most recent low-value tool outputs to preserve
+```
+
+## autoDream Background Consolidation
+
+autoDream runs a background memory consolidation sweep after a session ends, once both gates pass: at least `min_sessions` sessions have completed and at least `min_hours` have elapsed since the last consolidation. The sweep merges duplicate memories, updates stale facts, and removes redundant entries.
+
+Gates are in-process only — they reset on restart. The first consolidation always passes the hours gate (no prior timestamp).
+
+```toml
+[memory.autodream]
+enabled                = false
+min_sessions           = 3     # sessions since last consolidation
+min_hours              = 24    # hours since last consolidation
+consolidation_provider = ""    # provider name; falls back to primary
+max_iterations         = 8     # safety bound for the consolidation sweep
+```
+
+## MagicDocs — Auto-Maintained Markdown
+
+MagicDocs detects files containing a `# MAGIC DOC:` header when they are read by file tools, registers them in a per-session list, and periodically rewrites them via a background LLM call to keep them accurate.
+
+Updates run every `min_turns_between_updates` tool-call turns. Only one background update runs at a time; if the previous update is still running the current trigger is skipped. The TUI status bar shows "Updating N magic doc(s)…" while an update is in progress.
+
+To mark a file as auto-maintained, add `# MAGIC DOC: <description>` as the first line.
+
+```toml
+[memory.magic_docs]
+enabled                   = false
+min_turns_between_updates = 5    # turns between updates for the same file
+update_provider           = ""   # provider name; falls back to primary
+max_iterations            = 4    # max iterations per update call
+```
+
+## Store Routing
+
+Store routing classifies each incoming query and routes it to the appropriate memory backend(s), avoiding unnecessary store lookups for simple requests.
+
+```toml
+[memory.store_routing]
+enabled                      = false
+strategy                     = "heuristic"   # "heuristic" | "llm" | "hybrid"
+routing_classifier_provider  = ""            # provider name; falls back to primary
+fallback_route               = "hybrid"      # route used when confidence < threshold
+confidence_threshold         = 0.7
+```
+
+| Strategy | Behavior |
+|----------|----------|
+| `heuristic` | Pure pattern matching — zero LLM calls. Fastest and cheapest. Default. |
+| `llm` | A lightweight LLM classifies the query intent and selects the target store. Higher accuracy on ambiguous queries; adds one LLM call per turn. |
+| `hybrid` | Heuristic runs first. When confidence is below `confidence_threshold`, the decision escalates to the LLM. Balances cost and accuracy. |
+
+`routing_classifier_provider` should reference a cheap/fast provider (e.g., `gpt-4o-mini`) declared in `[[llm.providers]]`. Leave it empty to fall back to the primary provider.
+
+`fallback_route` is the store used when the classifier cannot reach a confident decision (applies to `hybrid` strategy). The default value `"hybrid"` sends the query to all stores.
+
+Store routing is disabled by default (`enabled = false`). When disabled, `HeuristicRouter` is used directly, which is equivalent to `strategy = "heuristic"` with routing always enabled.
+
+## Memory Tiers
+
+The tier promotion system organises memories into a hierarchy of four conceptual tiers:
+
+| Tier | Description |
+|------|-------------|
+| **Working memory** | Active conversation messages in the current session |
+| **Episodic** | Recent messages persisted to SQLite after the turn completes |
+| **Semantic** | Frequently-recalled facts promoted from episodic by the background sweep |
+| **Archival** | Long-term storage; entries demoted from semantic when they age out of active recall |
+
+Promotion is driven by a background sweep that clusters near-duplicate episodic messages by cosine similarity. When a fact appears in at least `promotion_min_sessions` distinct sessions, the cluster is distilled into a single semantic-tier entry via an LLM call, and the source episodic entries are marked `agent_visible = false`.
+
+The tier system is disabled by default. Enable it under `[memory.tiers]`:
+
+```toml
+[memory.tiers]
+enabled                  = true
+promotion_min_sessions   = 3      # distinct sessions a fact must appear in before promotion (>= 2)
+similarity_threshold     = 0.92   # cosine similarity threshold for clustering episodic duplicates
+sweep_interval_secs      = 3600   # how often the background sweep runs (seconds)
+sweep_batch_size         = 100    # messages evaluated per sweep cycle (>= 1)
+```
+
+### MemScene Consolidation
+
+MemScene is a second-pass sweep that consolidates groups of semantically related *semantic-tier* messages into scene-level summaries. A scene covers a coherent sub-topic: its embedding captures the collective meaning of its member messages, compressing the vector space without discarding information. Scene summaries are indexed and searchable in future sessions.
+
+MemScene is configured alongside the tier system:
+
+```toml
+[memory.tiers]
+enabled                       = true
+scene_enabled                 = true
+scene_similarity_threshold    = 0.80   # cosine similarity threshold for scene grouping (in [0.5, 1.0])
+scene_batch_size              = 50     # unassigned semantic messages processed per sweep (>= 1)
+scene_provider                = "fast" # [[llm.providers]] name for scene label/summary generation
+scene_sweep_interval_secs     = 7200   # how often the scene consolidation sweep runs (seconds)
+```
+
+`scene_provider` must reference a `[[llm.providers]]` entry. When unset, the default provider is used. Scenes are stored in SQLite alongside their member message IDs and can be inspected with `zeph memory stats`.
+
+> [!NOTE]
+> `scene_similarity_threshold` is validated to be in `[0.5, 1.0]` and `scene_batch_size` must be `>= 1`. Invalid values are rejected at startup.
+
 ## Next Steps
 
 - [Set Up Semantic Memory](../guides/semantic-memory.md) — Qdrant setup guide

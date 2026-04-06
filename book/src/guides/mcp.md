@@ -121,6 +121,9 @@ min_tools_to_filter = 5         # Only apply filtering when the server exposes a
 
 MCP servers can request structured user input mid-task via the `elicitation/create` protocol method. This allows a server to prompt for missing parameters, confirmations, or credentials without requiring a separate out-of-band channel.
 
+> [!NOTE]
+> Elicitation is an unstable ACP extension compiled in via the `unstable-elicitation` feature flag in `zeph-acp`. Standard release builds include it. If you built Zeph without this feature, the `elicitation/create` method is not handled and requests from servers are silently ignored.
+
 ### Enabling Elicitation
 
 Elicitation is disabled by default. Enable it globally or per server:
@@ -160,6 +163,69 @@ When a server sends `elicitation/create`:
 Zeph implements the MCP Roots protocol, which allows MCP servers to discover the project root directory and workspace structure. When a server requests roots, Zeph responds with the current working directory and any configured project paths.
 
 Tool descriptions from MCP servers are capped at a configurable limit to prevent oversized prompt injection from servers with verbose tool descriptions.
+
+## Server Instructions
+
+MCP servers can provide a plain-text `instructions` field in their `initialize` response. When present, Zeph injects these instructions as a dedicated block in the system prompt so the LLM understands how to use the server's tools effectively.
+
+Instructions from all connected servers are concatenated (sorted by server ID for determinism) and injected once per turn. Each server's instructions are separated by a blank line.
+
+> [!NOTE]
+> Without server instructions the LLM must infer tool behavior from schema descriptions alone, which can lead to incorrect parameter choices or missed capabilities. Well-written server instructions significantly improve tool selection accuracy.
+
+Instructions are sanitized at registration using the same 17-pattern injection scanner applied to tool descriptions. Patterns are replaced with `[sanitized]` — the instructions are still injected, but malicious payloads are neutralised.
+
+## Tool Call Quota
+
+Limit the total number of tool calls the agent may make in a single session:
+
+```toml
+[tools]
+max_tool_calls_per_session = 100   # default: unlimited
+```
+
+When the quota is exhausted, further tool calls are blocked and the agent is informed via a `quota_blocked` error. Retries of a failed call do not consume additional quota — only the first attempt counts. Set to `null` or omit the field to disable the limit.
+
+## OAP Authorization
+
+On-Arrival Processing (OAP) is a declarative authorization layer that evaluates tool calls against capability-based rules before execution. OAP rules are appended after `[tools.policy]` rules using first-match-wins semantics, so existing deny rules in `[tools.policy]` always take precedence.
+
+```toml
+[tools.authorization]
+enabled = true
+
+[[tools.authorization.rules]]
+action = "allow"
+tools = ["read_file", "list_directory"]
+comment = "Read-only filesystem access"
+
+[[tools.authorization.rules]]
+action = "deny"
+tools = ["shell"]
+comment = "Shell execution not permitted in this deployment"
+```
+
+OAP is disabled by default (`enabled = false`). Rules are merged into `PolicyEnforcer` at startup. Use `[tools.policy]` for safety-critical deny rules; use `[tools.authorization]` for capability grants that layer on top.
+
+## Structured Error Codes
+
+MCP tool call failures include a typed `McpErrorCode` that the agent uses for retry and recovery decisions:
+
+| Code | Meaning | Retryable |
+|------|---------|-----------|
+| `transient` | Temporary failure; retry likely succeeds | Yes |
+| `rate_limited` | Back off and retry | Yes |
+| `server_error` | Server-side error; retry with backoff | Yes |
+| `invalid_input` | Do not retry without changing parameters | No |
+| `auth_failure` | Re-authenticate or escalate | No |
+| `not_found` | Tool or resource does not exist | No |
+| `policy_blocked` | Blocked by policy or OAP authorization rule | No |
+
+Timeouts and connection errors automatically map to `transient`. Policy violations (SSRF, command blocklist, OAP deny) map to `policy_blocked`. The error code is surfaced in logs and debug dumps alongside the server ID and tool name.
+
+## Caller Identity Propagation
+
+Tool calls carry an optional `caller_id` field that identifies the originating agent or sub-agent. This field is set automatically when a sub-agent dispatches a tool call and is recorded in the tool audit log. Operators can use `caller_id` to trace which agent issued a specific tool call in multi-agent deployments.
 
 ## How Matching Works
 

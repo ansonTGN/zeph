@@ -151,8 +151,8 @@ This means frequently retrieved edges — facts the agent has found useful many 
 A background decay task can periodically reduce `retrieval_count` to prevent indefinite accumulation:
 
 ```toml
-[memory.graph.note_linking]
-link_weight_decay_lambda = 0.95      # Multiplicative decay per interval, (0.0, 1.0] (default: 0.95)
+[memory.graph]
+link_weight_decay_lambda = 0.95          # Multiplicative decay per interval, (0.0, 1.0] (default: 0.95)
 link_weight_decay_interval_secs = 86400  # Decay interval in seconds (default: 24h)
 ```
 
@@ -424,6 +424,135 @@ Graph memory is being implemented incrementally:
 4. ~~**Background Extraction** — non-blocking extraction in agent loop, context injection, budget allocation~~
 5. ~~**Community Detection** — label propagation with petgraph, graph eviction~~
 6. ~~**TUI & Observability** — `/graph` commands, metrics, init wizard~~
+
+## Belief Revision
+
+Belief revision (Kumiho AGM-inspired) handles the case where a newly extracted fact contradicts an existing one. Without revision, the graph accumulates conflicting beliefs indefinitely.
+
+When `belief_revision.enabled = true`, each new edge is compared against existing active edges for the same source/target entity pair using embedding cosine similarity. If the similarity exceeds `similarity_threshold`, the new fact is considered a contradiction of the existing one:
+
+1. The existing edge is invalidated — `valid_until` and `expired_at` are set, and a `superseded_by` pointer is written linking the old edge to its replacement.
+2. The new edge is inserted as the current belief.
+
+Both the old and new edges are preserved for temporal queries. The old edge is visible via `edge_history()` but excluded from active recall.
+
+```toml
+[memory.graph.belief_revision]
+enabled = false              # Enable contradiction detection and revision (default: false)
+similarity_threshold = 0.85  # Cosine similarity threshold for conflict detection (default: 0.85)
+```
+
+Belief revision requires an embedding store (`qdrant` or `sqlite` vector backend). On any embedding failure the revision step is skipped and the new edge is inserted normally.
+
+## Note Linking
+
+Note linking (A-MEM) automatically creates `similar_to` edges between semantically similar entities after each extraction pass. This builds a secondary similarity layer on top of the explicitly extracted relation edges, enabling retrieval to traverse conceptual proximity even when no direct relation was stated.
+
+After each extraction completes, every newly extracted entity is compared against the existing entity embedding collection. Entity pairs with cosine similarity above `similarity_threshold` receive a bidirectional `similar_to` edge. The number of links per entity is capped by `top_k` to prevent high-degree hubs.
+
+```toml
+[memory.graph.note_linking]
+enabled = false              # Enable A-MEM note linking after extraction (default: false)
+similarity_threshold = 0.85  # Min cosine similarity to create a similar_to edge (default: 0.85)
+top_k = 10                   # Max similar entities to link per extracted entity (default: 10)
+timeout_secs = 5             # Linking pass timeout in seconds (default: 5)
+```
+
+Note linking requires an embedding store. It runs non-blocking after each extraction and is bounded by `timeout_secs` to prevent slow searches from stalling the pipeline.
+
+## RPE Gate
+
+The RPE (Relevance/Prediction Error) gate is a D-MEM inspired cost-reduction mechanism. Graph extraction via an LLM call is expensive; many conversational turns carry little new factual content. The RPE gate estimates how "surprising" each turn is and skips extraction for low-surprise turns.
+
+Surprise is measured as the divergence between the expected response pattern (rolling average of recent turns) and the actual response. Turns with RPE below `threshold` skip the MAGMA extraction pipeline entirely. A consecutive-skip safety valve (`max_skip_turns`) ensures no turn is silently skipped indefinitely — after `max_skip_turns` consecutive skips, the next turn always triggers extraction regardless of its RPE score.
+
+```toml
+[memory.graph.rpe]
+enabled = false       # Enable RPE-based extraction gating (default: false)
+threshold = 0.3       # RPE below this value skips extraction; range [0.0, 1.0] (default: 0.3)
+max_skip_turns = 5    # Max consecutive turns to skip before forcing extraction (default: 5)
+```
+
+When `enabled = false` (the default), every turn triggers extraction as before.
+
+## Link Weight Decay
+
+The A-MEM link weight decay mechanism prevents `retrieval_count` from growing without bound. Without decay, edges traversed early in a conversation permanently dominate recall scoring regardless of how stale they become.
+
+A background task runs periodically and multiplies `retrieval_count` by `link_weight_decay_lambda` for all edges that were not traversed since the last decay pass:
+
+```
+new_retrieval_count = retrieval_count * link_weight_decay_lambda
+```
+
+With the default `lambda = 0.95`, each decay pass reduces unused edge counts by 5%. Over 14 daily passes an edge that was never traversed again decays to roughly half its original count. Set `lambda = 1.0` to disable decay.
+
+These fields live directly under `[memory.graph]`, not under a subsection:
+
+```toml
+[memory.graph]
+link_weight_decay_lambda = 0.95       # Multiplicative decay per interval, (0.0, 1.0] (default: 0.95)
+link_weight_decay_interval_secs = 86400  # Seconds between decay passes (default: 86400 = 24h)
+```
+
+Decay interacts with the A-MEM evolved weight formula (see [A-MEM Link Weight Evolution](#a-mem-link-weight-evolution)): decay reduces the effective boost of stale edges while recent retrievals continue to accumulate their count normally.
+
+## Episode Nodes
+
+Every conversation is represented as an **episode node** in the graph. When graph memory is enabled, Zeph calls `ensure_episode(conversation_id)` at the start of each session to create or retrieve an episode record in the `graph_episodes` table. The call is idempotent — repeated calls for the same conversation return the same episode ID.
+
+### Entity Linking
+
+As entities are extracted during a conversation, each entity is linked to the current episode via `link_entity_to_episode(episode_id, entity_id)`, stored in the `graph_episode_entities` join table. This link uses `INSERT OR IGNORE` so re-extracted entities never produce duplicates.
+
+The reverse lookup — all episodes in which a given entity appeared — is available via `episodes_for_entity(entity_id)`. This enables time-aware queries: "which sessions mentioned this entity?", "what entities appeared in the last three sessions?", or "when did we first discuss this concept?"
+
+### Schema
+
+Two tables support episode tracking:
+
+```
+graph_episodes (
+    id              INTEGER PRIMARY KEY,
+    conversation_id INTEGER NOT NULL UNIQUE,  -- FK → conversations.id
+    created_at      DATETIME DEFAULT CURRENT_TIMESTAMP
+)
+
+graph_episode_entities (
+    episode_id  INTEGER NOT NULL,  -- FK → graph_episodes.id
+    entity_id   INTEGER NOT NULL,  -- FK → graph_entities.id
+    PRIMARY KEY (episode_id, entity_id)
+)
+```
+
+### Uses
+
+Episode boundaries are the foundation for temporal reasoning over the knowledge graph:
+
+- **Freshness scoring** — facts from the current episode are more salient than facts from older episodes, complementing the bi-temporal edge timestamps.
+- **Session-scoped recall** — retrieve only entities observed in recent sessions without full BFS traversal.
+- **Temporal queries** — combine `episodes_for_entity` with `edges_at_timestamp` to reconstruct the agent's knowledge state at any past session boundary.
+
+No configuration is required — episode tracking is always active when `memory.graph.enabled = true`.
+
+## Advanced Tuning
+
+The following fields under `[memory.graph]` control performance and resource usage. They rarely need adjustment in typical deployments.
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `community_summary_max_prompt_bytes` | `8192` | Maximum prompt size in bytes fed to the LLM when generating a community summary; truncates long community context to keep costs predictable. |
+| `community_summary_concurrency` | `4` | Number of LLM calls issued in parallel during community summarization; lower values reduce concurrent API load at the cost of slower detection runs. |
+| `lpa_edge_chunk_size` | `10000` | Edges loaded per chunk during label-propagation community detection; reduces peak memory on large graphs. Set to `0` to load all edges at once (legacy path). |
+| `pool_size` | `3` | SQLite connection pool size for the graph tables; kept separate from the main memory pool to prevent starvation when community detection or spreading activation runs concurrently with regular operations. |
+
+```toml
+[memory.graph]
+community_summary_max_prompt_bytes = 8192
+community_summary_concurrency = 4
+lpa_edge_chunk_size = 10000
+pool_size = 3
+```
 
 ## See Also
 
