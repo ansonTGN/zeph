@@ -6,9 +6,10 @@ Thank you for considering contributing to Zeph.
 
 1. Fork the repository
 2. Clone your fork and create a branch from `main`
-3. Install Rust 1.88+ (Edition 2024 required)
+3. Install Rust 1.88+ (Edition 2024 required, resolver 3)
 4. Install [sccache](https://github.com/mozilla/sccache) for build caching (optional but recommended)
 5. Run `cargo build` to verify the setup
+6. Install [cargo-nextest](https://nexte.st/) for running tests
 
 ## Development
 
@@ -76,16 +77,27 @@ cargo llvm-cov --all-features --workspace
 
 | Crate | Purpose |
 |-------|---------|
-| `zeph-core` | Agent loop, config, channel trait |
-| `zeph-llm` | LlmProvider trait, Ollama + Claude + OpenAI + Candle backends |
-| `zeph-skills` | SKILL.md parser, registry, prompt formatter |
-| `zeph-memory` | SQLite conversation persistence, Qdrant vector search |
-| `zeph-channels` | Telegram adapter |
-| `zeph-tools` | Tool executor, shell sandbox, web scraper |
-| `zeph-index` | AST-based code indexing, semantic retrieval, repo map |
-| `zeph-mcp` | MCP client, multi-server lifecycle |
-| `zeph-a2a` | A2A protocol client and server |
-| `zeph-tui` | ratatui TUI dashboard with real-time metrics |
+| `zeph-common` | Shared primitives: `Secret`, `VaultError`, common types |
+| `zeph-config` | Pure-data configuration types, TOML loader, env overrides, migration |
+| `zeph-vault` | `VaultProvider` trait + env and age-encrypted backends |
+| `zeph-db` | Database abstraction (SQLite + PostgreSQL) |
+| `zeph-llm` | `LlmProvider` trait, Ollama + Claude + OpenAI + Gemini + Candle backends |
+| `zeph-memory` | SQLite + Qdrant memory, semantic search, document loaders |
+| `zeph-tools` | `ToolExecutor` trait, shell sandbox, file ops, web scraper |
+| `zeph-skills` | SKILL.md parser, registry, embedding matcher, hot-reload |
+| `zeph-index` | AST-based code indexing, semantic retrieval, repo map (always-on) |
+| `zeph-sanitizer` | Content sanitization, PII filter, exfiltration guard |
+| `zeph-experiments` | Autonomous experiment engine, LLM-as-judge evaluation |
+| `zeph-subagent` | Sub-agent lifecycle, grants, transcripts, hooks |
+| `zeph-orchestration` | DAG-based task orchestration, planner, router, aggregator |
+| `zeph-core` | Agent loop, `AppBuilder` bootstrap, context builder, metrics |
+| `zeph-channels` | Telegram, Discord, Slack adapters |
+| `zeph-mcp` | MCP client via rmcp, multi-server lifecycle (optional) |
+| `zeph-acp` | ACP server for IDE integration (optional) |
+| `zeph-a2a` | A2A protocol client + server (optional) |
+| `zeph-gateway` | HTTP webhook gateway (optional) |
+| `zeph-scheduler` | Cron task scheduler with SQLite persistence (optional) |
+| `zeph-tui` | ratatui TUI dashboard with real-time metrics (optional) |
 
 ## Spec-Driven Development
 

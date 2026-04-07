@@ -19,7 +19,7 @@ ZEPH_INSTALL_DIR=/usr/local/bin curl -fsSL https://github.com/bug-ops/zeph/relea
 Install a specific version:
 
 ```bash
-curl -fsSL https://github.com/bug-ops/zeph/releases/latest/download/install.sh | sh -s -- --version v0.15.3
+curl -fsSL https://github.com/bug-ops/zeph/releases/latest/download/install.sh | sh -s -- --version v0.18.5
 ```
 
 Verify it works:
@@ -50,6 +50,8 @@ cargo install zeph --features tui,a2a
 
 ## From Source
 
+Requires Rust 1.88+ (Edition 2024).
+
 ```bash
 git clone https://github.com/bug-ops/zeph
 cd zeph
@@ -57,6 +59,17 @@ cargo build --release
 ```
 
 The binary is produced at `target/release/zeph`. Run `zeph init` to generate a config file.
+
+Build with optional features for TUI, IDE integration, or server deployment:
+
+```bash
+cargo build --release --features desktop          # TUI dashboard
+cargo build --release --features ide              # ACP for IDE integration
+cargo build --release --features server           # HTTP gateway + A2A + OpenTelemetry
+cargo build --release --features full             # all optional features
+```
+
+See [Feature Flags](../reference/feature-flags.md) for the complete list of build options.
 
 ## Pre-built Binaries
 
@@ -81,7 +94,7 @@ docker pull ghcr.io/bug-ops/zeph:latest
 Or use a specific version:
 
 ```bash
-docker pull ghcr.io/bug-ops/zeph:v0.9.8
+docker pull ghcr.io/bug-ops/zeph:v0.18.5
 ```
 
 Images are scanned with [Trivy](https://trivy.dev/) in CI/CD and use Oracle Linux 9 Slim base with **0 HIGH/CRITICAL CVEs**. Multi-platform: linux/amd64, linux/arm64.
