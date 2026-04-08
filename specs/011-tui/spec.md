@@ -87,6 +87,24 @@ All `/commands` are parsed from chat input:
 /sec               — show security panel
 ```
 
+## RenderCache
+
+`RenderCache` (`crates/zeph-tui/src/render_cache.rs`) caches wrapped/rendered `Line<'static>` vectors per message, keyed by `RenderCacheKey` (content hash × terminal width × display flags).
+
+- `clear()` replaces the entries `Vec` with a new empty `Vec` — releases all cached memory immediately
+- `shift(n)` removes the first `n` entries via `drain(0..n)` — used when old messages scroll out of view; avoids re-indexing the full vector
+- NEVER use `clear()` as a substitute for `shift()` when the intent is to evict only leading entries — `clear()` throws away all cached renders including still-visible messages
+
+## Embed Backfill Status
+
+When embed backfill is running at startup (TUI mode only), the status bar shows:
+
+```
+Backfilling embeddings: {done}/{total} ({pct}%)
+```
+
+This is driven by a `tokio::sync::watch` channel from `spawn_embed_backfill()`. The status clears automatically when the channel signals `None` (completion or timeout). No spinner is used — the fraction display is the progress indicator.
+
 ## Key Invariants
 
 - Metrics updated every turn — not only when a specific event fires
@@ -94,3 +112,5 @@ All `/commands` are parsed from chat input:
 - All background operations show spinner before starting, clear on completion
 - Security panel must show current `ContentSanitizer` state (not just error events)
 - No blocking I/O on the TUI render thread — all heavy work offloaded to tokio tasks
+- `RenderCache::clear()` must release memory — never retain stale entries after `/clear`
+- `RenderCache::shift()` must be used (not `clear()`) when only leading messages are evicted

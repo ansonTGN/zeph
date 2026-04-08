@@ -40,7 +40,7 @@ trait LlmProvider: Send + Sync {
     fn embed(&self, text: &str) -> impl Future<Output = Result<Vec<f32>, LlmError>> + Send;
     fn supports_streaming(&self) -> bool;
     fn supports_embeddings(&self) -> bool;
-    fn supports_tool_use(&self) -> bool;
+    fn supports_tool_use(&self) -> bool;  // default: true
     fn supports_vision(&self) -> bool;
     fn supports_structured_output(&self) -> bool;
     fn debug_request_json(&self, ...) -> serde_json::Value;
@@ -110,80 +110,6 @@ default = true
 
 Subsystems reference a provider by name via a `*_provider` field. When the field is absent, the subsystem falls back to the default provider. See `.local/specs/024-multi-model-design/spec.md` for the full per-subsystem mapping.
 
-## ASI: Agent Stability Index
-
-`crates/zeph-llm/src/router/asi.rs` — per-provider coherence tracking. Implemented in v0.18.5.
-
-### Overview
-`AsiState` maintains a sliding window of response embeddings per provider. Coherence is computed as cosine similarity of the latest embedding vs. the window mean. Low coherence penalizes Thompson beta priors and EMA scores via `penalty_weight`. State is session-only (no persistence). The embed call is fire-and-forget via `tokio::spawn` — routing is never blocked by it.
-
-### Config
-```toml
-[llm.routing.asi]
-enabled = false
-window_size = 5            # sliding window depth
-coherence_threshold = 0.5  # warn when coherence drops below this
-penalty_weight = 0.3       # how much low coherence reduces Thompson/EMA scores
-```
-
-### Key Invariants
-- `coherence()` returns `1.0` until at least 2 embeddings are observed — no penalty during warm-up
-- ASI does not block routing — embed call is fire-and-forget; lag of 1–2 responses is acceptable
-- Session-only state — never persisted; ASI resets on every process restart
-- NEVER use ASI state from a different provider's window — per-provider isolation is mandatory
-
----
-
-## Quality Gate for Thompson/EMA Routing
-
-Optional post-selection embedding similarity check. After a provider is selected and produces a response, `cosine_similarity(query_emb, response_emb)` is computed. If similarity is below the threshold, the next provider in the ordered list is tried. On full exhaustion, the best response seen is returned (no `NoProviders` error). Fail-open on embed errors.
-
-Does not apply to Cascade or Bandit routing strategies.
-
-### Config
-```toml
-[llm.routing]
-quality_gate = 0.75   # omit or set to 0.0 to disable; values > 1.0 are silently ignored
-```
-
-### Key Invariants
-- `quality_gate > 1.0` is silently ignored — not wired into the router
-- On embed error during gate evaluation, the current response is accepted (fail-open)
-- NEVER apply quality_gate to Cascade or Bandit strategies
-
----
-
-## Per-Provider Cost Breakdown
-
-`crates/zeph-core/src/cost.rs` — per-provider token and cost tracking. Implemented in v0.18.5.
-
-### Overview
-`CostTracker::record_usage` accepts `provider_name`, `cache_read_tokens`, and `cache_write_tokens` in addition to input/output tokens. Cache pricing is applied per-provider type:
-- Claude: cache read = 10% of prompt price, cache write = 125% of prompt price
-- OpenAI: cache read = 50% of prompt price
-- Others: 0%
-
-Per-provider totals (input, cache_read, cache_write, output tokens, cost, request count) are accumulated in `CostState::providers` and exposed via `CostTracker::provider_breakdown()`.
-
-`MetricsSnapshot` gains `provider_cost_breakdown: Vec<(String, ProviderUsage)>`. The `/status` CLI command and TUI `/cost` view both render a per-provider table sorted by cost descending. Daily reset clears the breakdown alongside the spending total.
-
-### Key Invariants
-- `record_usage` must always pass `provider_name` — anonymous usage cannot be attributed
-- Cache pricing constants are per-provider-type, not per-named-provider — mapping is by type string
-- Daily reset clears per-provider breakdown atomically with the spending total
-- NEVER attribute cache tokens to a different provider than the one that produced them
-
----
-
-## `spawn_asi_update` Debounce
-
-`RouterProvider` tracks a `turn_counter` (`Arc<AtomicU64>`) incremented once at the top of `chat()`. `spawn_asi_update` uses a second atomic (`asi_last_turn`) to gate on the current `turn_id` via `swap(AcqRel)` — concurrent sub-calls within the same turn (tool schema fetches, streaming sub-calls) are dropped. Exactly one embed call and one ASI window update fire per turn.
-
-### Key Invariant
-- NEVER fire `spawn_asi_update` more than once per logical agent turn — multiple concurrent `chat()` calls within a turn share the same `turn_id` gate
-
----
-
 ## Key Invariants
 
 - Provider methods are always `&self` — immutable, concurrent-safe
@@ -192,4 +118,3 @@ Per-provider totals (input, cache_read, cache_write, output tokens, cost, reques
 - `chat`, `chat_stream`, `chat_with_tools` are independent codepaths — do not delegate one to another
 - Candle and metal/cuda features are mutually exclusive in the build
 - Provider identity is the `name` field from `[[llm.providers]]` — never resolved by type string
-- Providers with `embed = true` are excluded from EMA/Thompson/Cascade/Bandit routing pool — embedding-only providers must not receive chat completion requests

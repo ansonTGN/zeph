@@ -41,9 +41,9 @@ The `Channel` trait (`crates/zeph-core/src/channel.rs`) is the only I/O boundary
 - **Generic over `C: Channel`** — instantiated once per session, not cloned or shared
 - Main loop: `tokio::select!` multiplexes channel recv + skill/config/instruction reload events + message queue drain
 - `VecDeque<QueuedMessage>` is drained before each `channel.recv()` — queue is processed first
-- Provider can be swapped at runtime via `Arc<RwLock<Option<AnyProvider>>>` — provider is NOT fixed at construction
+- Provider can be swapped at runtime via `Arc<parking_lot::RwLock<Option<AnyProvider>>>` — provider is NOT fixed at construction
 - Builtin commands (`/exit`, `/clear`, `/compact`, etc.) short-circuit `process_user_message` and return `Some(bool)`
-- All sub-state is held in named structs (`MemoryState`, `SkillState`, `McpState`, etc.) — no loose fields
+- All sub-state is held in dedicated named structs — no loose fields: `MessageState`, `MemoryState`, `SkillState`, `McpState`, `IndexState`, `DebugState`, `SecurityState`, `ToolState`, `RuntimeConfig`, and others
 
 **NEVER**: make the agent generic over a Provider type; it uses `AnyProvider` (enum dispatch).
 
@@ -77,8 +77,8 @@ The `Channel` trait (`crates/zeph-core/src/channel.rs`) is the only I/O boundary
 `ToolExecutor` trait (`crates/zeph-tools/src/executor.rs`):
 
 - Held as `Arc<dyn ErasedToolExecutor>` in Agent — shared, immutable from agent perspective
-- Two execution paths: structured (`execute_tool_call`) and legacy text-based (`execute`) — both must work
-- Two trust gates: plain `execute` (pre-approved) vs `execute_confirmed` (requires user approval)
+- All tool execution goes through the native `tool_use` path — there is no legacy text-based path
+- Two trust gates: `execute_tool_call` (pre-approved) vs `execute_tool_call_confirmed` (requires user approval)
 - Returns `Option<ToolOutput>` — `None` = this executor doesn't own the tool (pass to next in composite chain)
 - `CompositeExecutor` chains executors; order matters (first `Some(...)` wins)
 - Shell blocklist check runs **unconditionally before** `PermissionPolicy` — cannot be bypassed
@@ -156,12 +156,12 @@ Feature flags (`Cargo.toml [features]`):
 
 - `unsafe_code = "deny"` workspace-wide — zero exceptions
 - Agent loop is **single-threaded async** — no parallel threads per session
-- Shared mutable state: `Arc<RwLock<T>>` (readers-preferred) or `Arc<Mutex<T>>` (exclusive access)
+- Shared mutable state: `parking_lot::RwLock<T>` (readers-preferred) or `parking_lot::Mutex<T>` (exclusive access) — no poison handling needed
 - No blocking I/O inside async hot paths — use `tokio::task::spawn_blocking` if unavoidable
 - TUI and ACP stdio transport are **mutually exclusive** (both own stdin/stdout) — enforce at startup
 - MCP child process stderr must be suppressed in TUI mode
 
-**NEVER**: use `std::sync::Mutex` in async code or call blocking I/O directly inside `.await` chains.
+**NEVER**: use `std::sync::Mutex` or `std::sync::RwLock` in async code; never call blocking I/O directly inside `.await` chains.
 
 ## 11. Error Handling Contract
 
