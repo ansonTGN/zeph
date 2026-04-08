@@ -35,8 +35,7 @@ The LLM should call `load_skill` when:
 
 Example: the user asks to generate an MCP bridge. The `mcp-generate` skill did not rank in the top-K for this session, but its name and description appear in `<other_skills>`. The LLM calls `load_skill("mcp-generate")` to retrieve the full instructions before generating the bridge.
 
-> [!NOTE]
-> `load_skill` is only useful with native tool use (providers that support structured `tool_use` responses). In legacy bash-block mode the tool is not exposed.
+`load_skill` is registered alongside other tools (shell, file, web scrape, etc.) and exposed to the LLM via the standard native tool catalog on all providers.
 
 ## Security model
 

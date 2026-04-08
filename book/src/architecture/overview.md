@@ -2,7 +2,7 @@
 
 Cargo workspace (Edition 2024, resolver 3) with 21 crates + binary root.
 
-Requires Rust 1.88+. Native async traits are used throughout — no `async-trait` crate.
+Requires Rust 1.88+. Native async traits are used throughout. `async-trait` is retained only in crates blocked by upstream dependencies (`zeph-core`, `zeph-mcp`, `zeph-acp` — blocked by `rmcp`).
 
 ## Workspace Layout
 
@@ -58,7 +58,7 @@ Queued messages are processed sequentially with full context rebuilding between 
 
 ## Key Design Decisions
 
-- **Generic Agent:** `Agent<C: Channel>` — generic over channel only. The provider is resolved at construction time (`AnyProvider` enum dispatch). Tool execution uses `Box<dyn ErasedToolExecutor>` for object-safe dynamic dispatch, eliminating the former `T: ToolExecutor` generic parameter. Internal state is grouped into five domain structs (`MemoryState`, `SkillState`, `ContextState`, `McpState`, `IndexState`) with logic decomposed into `streaming.rs`, `persistence.rs`, and three dedicated subsystems: `ContextManager` (budget / compaction), `ToolOrchestrator` (doom-loop detection / iteration limit), and `LearningEngine` (self-learning reflection state)
+- **Generic Agent:** `Agent<C: Channel>` — generic over channel only. The provider is resolved at construction time (`AnyProvider` enum dispatch). Tool execution uses `Box<dyn ErasedToolExecutor>` for object-safe dynamic dispatch, eliminating the former `T: ToolExecutor` generic parameter. Internal state is grouped into domain sub-structs: `MessageState` (message buffer, image staging), `MemoryState` (semantic memory, graph, summaries), `SkillState` (registry, matcher, prompt), `RuntimeConfig` (security, hooks, persona config), `McpState` (MCP tools, manager), `IndexState` (code retriever, indexer), `DebugState` (dumper, trace, anomaly detector), `SecurityState` (sanitizer, quarantine, exfiltration guard), and `ToolState` (schema filter, dependency graph, iteration bookkeeping). Logic is decomposed into `streaming.rs`, `persistence.rs`, and three dedicated subsystems: `ContextManager` (budget / compaction), `ToolOrchestrator` (doom-loop detection / iteration limit), and `LearningEngine` (self-learning reflection state). Concurrency uses `parking_lot` locks throughout (no poison handling)
 - **TLS:** rustls everywhere (no openssl-sys)
 - **Bootstrap:** `AppBuilder` in `zeph-core::bootstrap/` (split into `mod.rs`, `config.rs`, `health.rs`, `mcp.rs`, `provider.rs`, `skills.rs`) handles config/vault resolution, provider creation, memory setup, skill matching, tool executor composition, and graceful shutdown wiring. `main.rs` (26 LOC) is a thin entry point delegating to `runner.rs` for channel/mode dispatch
 - **Binary structure:** `zeph` binary is decomposed into focused modules — `runner.rs` (dispatch), `agent_setup.rs` (tool executor + MCP + feature extensions), `tracing_init.rs`, `tui_bridge.rs`, `channel.rs`, `cli.rs` (clap args), `acp.rs`, `daemon.rs`, `scheduler.rs`, `commands/` (vault/skill/memory subcommands), `tests.rs`

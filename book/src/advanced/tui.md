@@ -287,7 +287,7 @@ The TUI dashboard displays real-time metrics collected from the agent loop via `
 | Panel | Metrics |
 |-------|---------|
 | **Skills** | Active/total skill count, matched skill names per query |
-| **Memory** | SQLite message count, conversation ID, Qdrant status, embeddings generated, summaries count, tool output prunes |
+| **Memory** | SQLite message count, conversation ID, Qdrant status, embeddings generated, summaries count, tool output prunes, embed backfill progress |
 | **Resources** | Prompt/completion/total tokens, API calls, last LLM latency (ms), provider and model name, prompt cache read/write tokens, filter stats |
 | **Compaction** | Compaction probe verdicts (Pass/SoftFail/HardFail/Error counts), last probe score, subgoal registry state (when orchestration active) |
 | **Security** | Sanitizer runs/flags/truncations, quarantine calls/failures, exfiltration blocks (images/URLs/memory), recent event log. Shown in place of sub-agents panel when events are recent (< 60s) |
@@ -322,6 +322,16 @@ Confidence: F/6 P/2 B/0
 | `F/P/B` | Confidence distribution: Full / Partial / Fallback counts (see below) |
 
 The filter section only appears when `filter_applications > 0` — it is hidden when no commands have been filtered.
+
+### Embed Backfill Progress
+
+When semantic memory is enabled and unembedded messages exist from previous sessions, a background backfill task processes them in micro-batches (32 messages, concurrency 4). The Memory panel shows progress during the backfill:
+
+```
+Backfilling embeddings: 128/512 (25%)
+```
+
+The progress indicator disappears once all messages have been embedded. Backfill uses bounded memory — only one micro-batch is held in memory at a time — so it does not spike memory usage regardless of how many messages need processing.
 
 #### Confidence Levels Explained
 
@@ -530,6 +540,8 @@ Syntax highlighting (tree-sitter) and markdown parsing (pulldown-cmark) results 
 - View mode toggle (compact/expanded)
 
 This eliminates redundant parsing work that previously re-processed every visible message on every frame.
+
+`RenderCache::clear()` releases the backing `Vec` allocation (not just clearing entries), preventing memory accumulation across long sessions. `RenderCache::shift(count)` efficiently removes the oldest entries when messages are trimmed during compaction, avoiding a full re-render.
 
 ## Architecture
 

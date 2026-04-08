@@ -14,7 +14,7 @@ zeph (binary)
 │   └── zeph-vault          VaultProvider trait + env and age-encrypted backends
 │
 ├── Layer 2 — Core Domain Crates
-│   ├── zeph-llm            LlmProvider trait, Ollama/Claude/OpenAI/Candle backends, orchestrator
+│   ├── zeph-llm            LlmProvider trait, Ollama/Claude/OpenAI/Gemini/Candle backends, orchestrator
 │   ├── zeph-memory         SQLite + Qdrant, SemanticMemory, summarization, document loaders
 │   ├── zeph-tools          ToolExecutor trait, ShellExecutor, FileExecutor, TrustLevel
 │   └── zeph-skills         SKILL.md parser, registry, embedding matcher, hot-reload
@@ -70,7 +70,7 @@ zeph (binary)
 | `zeph-common` | 0 | `Secret`, `VaultError`, and shared primitive types |
 | `zeph-config` | 1 | All configuration structs, TOML loader, env overrides, migration |
 | `zeph-vault` | 1 | `VaultProvider` trait + `EnvVaultProvider` and `AgeVaultProvider` backends |
-| `zeph-llm` | 2 | `LlmProvider` trait, all LLM backends, model orchestrator, embeddings |
+| `zeph-llm` | 2 | `LlmProvider` trait, Ollama/Claude/OpenAI/Gemini/Candle backends, model orchestrator, embeddings |
 | `zeph-memory` | 2 | SQLite persistence, Qdrant vector search, document loaders, token counter, semantic response cache, anchored summarization, MAGMA typed edges, SYNAPSE spreading activation, write-time importance scoring |
 | `zeph-tools` | 2 | Tool execution framework, shell sandbox, file executor, trust model, TAFC schema augmentation, tool result cache, tool dependency graph, tool schema filtering |
 | `zeph-skills` | 2 | SKILL.md parser, skill registry, embedding matcher, hot-reload |
@@ -93,6 +93,7 @@ zeph (binary)
 - **Single responsibility**: each crate owns one domain; cross-cutting concerns are split into dedicated crates rather than accumulated in `zeph-core`
 - **Always testable in isolation**: leaf crates carry no workspace peer dependencies; unit tests run without a running agent
 - **Feature-gated extensions**: optional crates are compiled only when the corresponding feature flag is active — see [Feature Flags](../reference/feature-flags.md)
-- **No `async-trait`**: native async trait methods (Edition 2024) throughout; `Pin<Box<dyn Future>>` for object-safe dynamic dispatch
+- **Minimal `async-trait`**: native async trait methods (Edition 2024) throughout; `Pin<Box<dyn Future>>` for object-safe dynamic dispatch. `async-trait` is retained only in `zeph-core`, `zeph-mcp`, and `zeph-acp` (blocked by upstream `rmcp`)
+- **`parking_lot` locks**: `std::sync::RwLock`/`Mutex` replaced with `parking_lot` across the workspace — no poison handling needed
 - **TLS**: rustls everywhere — no openssl-sys dependency
 - **Error handling**: `thiserror` for typed error enums in every crate; `anyhow` only in the top-level `runner.rs`

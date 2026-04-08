@@ -30,7 +30,7 @@ Agent loop, bootstrap orchestration, configuration loading, and context builder.
   - `provider.rs` — provider factory functions
   - `skills.rs` — skill matcher and embedding model helpers
   - `tests.rs` — unit tests for bootstrap logic
-- `Agent<C>` — main agent loop generic over channel only. Tool execution uses `Box<dyn ErasedToolExecutor>` for object-safe dynamic dispatch (no `T` generic). Provider is resolved at construction time (`AnyProvider` enum dispatch, no `P` generic). Streaming support, message queue drain. Internal state is grouped into five domain structs (`MemoryState`, `SkillState`, `ContextState`, `McpState`, `IndexState`); logic is decomposed into `streaming.rs`, `persistence.rs`, and three dedicated subsystem structs described below
+- `Agent<C>` — main agent loop generic over channel only. Tool execution uses `Box<dyn ErasedToolExecutor>` for object-safe dynamic dispatch (no `T` generic). Provider is resolved at construction time (`AnyProvider` enum dispatch, no `P` generic). Streaming support, message queue drain. Internal state is grouped into domain sub-structs: `MessageState` (message buffer, image staging), `MemoryState` (semantic memory, graph, summaries), `SkillState` (registry, matcher, prompt), `RuntimeConfig` (security, hooks, persona), `McpState` (MCP tools, manager), `IndexState` (code retriever, indexer), `DebugState` (dumper, trace, anomaly detector), `SecurityState` (sanitizer, quarantine, exfiltration guard), and `ToolState` (schema filter, dependency graph, iteration bookkeeping). Logic is decomposed into `streaming.rs`, `persistence.rs`, and three dedicated subsystem structs described below. Each sub-struct has a dedicated `impl` block with domain-specific methods (`SecurityState::scrub_pii`, `SkillState::rebuild_prompt`, `McpState::sync_tools`, `IndexState::fetch_code_rag`, `DebugState::start_iteration_span`, etc.)
 - `ContextManager` — owns context budget configuration, `token_counter` (`Arc<TokenCounter>`), compaction threshold (80%), compaction tail preservation, prune-protect token floor, and token safety margin. Exposes `should_compact()` used by the agent loop before each LLM call
 - `ToolOrchestrator` — owns `doom_loop_history` (rolling hash window), `max_iterations` (default 10), summarize-tool-output flag, and `OverflowConfig`. Exposes `push_doom_hash()`, `clear_doom_history()`, and `is_doom_loop()` (returns `true` when last `DOOM_LOOP_WINDOW` hashes are identical)
 - `LearningEngine` — owns `LearningConfig` and per-turn `reflection_used` flag. Exposes `is_enabled()`, `mark_reflection_used()`, `was_reflection_used()`, and `reset_reflection()` called at the start of each agent turn
@@ -54,7 +54,7 @@ Agent loop, bootstrap orchestration, configuration loading, and context builder.
 
 LLM provider abstraction and backend implementations.
 
-- `LlmProvider` trait — `chat()`, `chat_typed()`, `chat_stream()`, `embed()`, `supports_streaming()`, `supports_embeddings()`, `supports_vision()`
+- `LlmProvider` trait — `chat()`, `chat_typed()`, `chat_stream()`, `embed()`, `supports_streaming()`, `supports_embeddings()`, `supports_vision()`, `supports_tool_use()` (default: `true`)
 - `MessagePart::Image` — image content part (raw bytes + MIME type) for multimodal input
 - `EmbedFuture` / `EmbedFn` — canonical type aliases for embedding closures, re-exported by downstream crates (`zeph-skills`, `zeph-mcp`)
 - `OllamaProvider` — local inference via ollama-rs
@@ -116,7 +116,7 @@ Tool execution abstraction and shell backend. This crate has no dependency on `z
 
 - `ToolExecutor` trait + `ErasedToolExecutor` — `ErasedToolExecutor` is an object-safe wrapper enabling `Box<dyn ErasedToolExecutor>` for dynamic dispatch in `Agent<C>`
 - `ToolRegistry` — typed definitions for built-in tools (bash, read, edit, write, find_path, list_directory, create_directory, delete_path, move_path, copy_path, grep, web_scrape, fetch, diagnostics), injected into system prompt as `<tools>` catalog
-- `ToolCall` / `execute_tool_call()` — structured tool invocation with typed parameters alongside legacy bash extraction (dual-mode)
+- `ToolCall` / `execute_tool_call()` — structured tool invocation with typed parameters via native tool use
 - `FileExecutor` — sandboxed file operations (read, write, edit, find_path, list_directory, create_directory, delete_path, move_path, copy_path, grep) with ancestor-walk path canonicalization and lstat-based symlink safety
 - `ShellExecutor` — bash block parser, command safety filter, sandbox validation; exposes `check_blocklist()` and `DEFAULT_BLOCKED_COMMANDS` as public API so ACP executors apply the same blocklist
 - `WebScrapeExecutor` — HTML scraping with CSS selectors (`web_scrape`) and plain URL-to-text (`fetch`), both with SSRF protection

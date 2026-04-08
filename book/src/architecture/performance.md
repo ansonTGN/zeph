@@ -36,6 +36,38 @@ Context sources (summaries, cross-session recall, semantic recall, code RAG) are
 
 Context assembly and compaction pre-allocate output strings based on estimated final size, reducing intermediate allocations during prompt construction.
 
+## Centralized Token Estimation
+
+A shared `estimate_tokens()` function (in `zeph-common`) provides consistent `chars / 4` estimation across all call sites. Previously, 15 separate locations used ad-hoc token counting. The centralized function is used for budget checks, tool output truncation, and metrics reporting.
+
+## Tool Batch Optimization
+
+`record_skill_outcomes` is called once per tool batch rather than once per individual tool call. When the LLM returns multiple parallel tool calls (common with Claude and OpenAI), skill outcome recording happens in a single database write after the entire batch completes.
+
+## Context Truncation Guards
+
+Several subsystems apply targeted truncation to prevent oversized content from entering the LLM context:
+
+- **Graph extraction**: context messages truncated to 2 KB before being sent to the extraction provider
+- **Persona extraction**: capped to 8 messages, each limited to 2 KiB
+- **Old tool results**: content truncated to 2 KB after each LLM turn to prevent stale tool output from consuming the context window
+- **Debug request JSON**: skipped entirely when using Trace log format
+
+## Bounded Background Tasks
+
+Self-learning background tasks (trajectory extraction, skill mining) use a `JoinSet` with a cap of 16 concurrent tasks. Previously, background learning tasks were unbounded, risking memory growth during sessions with many tool calls. `maybe_spawn_trajectory_extraction` uses a bounded tail slice to limit input size.
+
+## Embedding Concurrency Cap
+
+Embedding requests are gated by an `Arc<Semaphore>` with a configurable permit count (default: 4). This prevents bursts of embedding calls (during code indexing, skill hot-reload, or memory backfill) from overwhelming the embedding provider or triggering rate limits.
+
+```toml
+[[llm.providers]]
+type = "ollama"
+model = "nomic-embed-text"
+embed_concurrency = 4   # Max concurrent embedding requests (default: 4, 0 = unlimited)
+```
+
 ## TUI Render Performance
 
 The TUI applies two optimizations to maintain responsive input during heavy streaming:

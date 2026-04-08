@@ -206,5 +206,5 @@ This is independent of the shell sandbox (`[tools.shell].allowed_paths`). File t
 
 ## Deep Dives
 
-- [Tool System](../advanced/tools.md) — full reference with filter pipeline, native tool use, iteration control
+- [Tool System](../advanced/tools.md) — full reference with filter pipeline, iteration control, and error taxonomy
 - [Security](../reference/security.md) — sandboxing and path validation details

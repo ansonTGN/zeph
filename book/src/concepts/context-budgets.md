@@ -14,10 +14,10 @@ The remaining space is used for the system prompt, active skills, graph memory f
 
 ```toml
 [agent]
-context_budget_tokens = 128000   # 0 = unlimited (default)
+context_budget_tokens = 128000   # 0 = auto-detect (default)
 ```
 
-When left at `0`, Zeph uses all available context without budgeting. Set this to your model's context window size minus a margin for the response (e.g., `128000` for a 200K-token model).
+When left at `0`, Zeph queries the provider for its context window size and uses that as the budget. If the provider does not report a context window (e.g., some local models), Zeph falls back to 128,000 tokens as a safe default. This fallback also applies during `reload_config()` to prevent unbounded memory growth. Set this value explicitly to override auto-detection (e.g., `128000` for a 200K-token model with margin for the response).
 
 ## BATS Budget Hints
 

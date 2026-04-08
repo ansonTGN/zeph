@@ -84,13 +84,11 @@ After adding or removing a server, Qdrant registry syncs automatically for seman
 
 ## Native Tool Integration (Claude / OpenAI)
 
-When the active provider supports structured tool calling (Claude, OpenAI), MCP tools are exposed as native `ToolDefinition`s — no text injection into the system prompt.
+MCP tools are exposed as native `ToolDefinition`s alongside built-in tools. All providers use the same structured tool calling path.
 
-`McpToolExecutor` implements `tool_definitions()`, which returns all connected MCP tools as typed definitions with qualified names in `server_id:tool_name` format. The agent calls `execute_tool_call()` when the LLM returns a structured tool_use block for an MCP tool. The executor parses the qualified name, looks up the tool in the shared list, and dispatches the call to `manager.call_tool()`.
+`McpToolExecutor` implements `tool_definitions()`, which returns all connected MCP tools as typed definitions with qualified names in `server_id:tool_name` format. The agent calls `execute_tool_call()` when the LLM returns a structured `tool_use` block for an MCP tool. The executor parses the qualified name, looks up the tool in the shared list, and dispatches the call to `manager.call_tool()`.
 
-The shared tool list (`Arc<RwLock<Vec<McpTool>>>`) is updated automatically when servers are added or removed via `/mcp add` / `/mcp remove`. This means the provider sees the current tool set on every turn without requiring a restart.
-
-For providers without native tool support (Ollama with `tool_use = false`, Candle), `append_mcp_prompt()` falls back to injecting tool descriptions as text into the system prompt, filtered by relevance score via Qdrant.
+The shared tool list (`Arc<RwLock<Vec<McpTool>>>`) is updated automatically when servers are added or removed via `/mcp add` / `/mcp remove`. The provider sees the current tool set on every turn without requiring a restart.
 
 ## Semantic Tool Discovery
 
