@@ -114,7 +114,7 @@ max_body_bytes = 1048576  # Maximum response body size in bytes (default: 1 MiB)
 
 ## Native Tool Use
 
-Providers that support structured tool calling (Claude, OpenAI) use the native API-level tool mechanism instead of text-based fenced blocks. The agent detects this via `LlmProvider::supports_tool_use()` and switches to the native path automatically.
+All providers use the native API-level tool mechanism for structured tool calling. `LlmProvider::supports_tool_use()` returns `true` by default. Tool definitions, execution, and result handling follow a single unified path.
 
 In native mode:
 
@@ -123,36 +123,16 @@ In native mode:
 - The agent executes each tool call and sends results back as `tool_result` messages.
 - The system prompt instructs the LLM to use the structured mechanism, not fenced code blocks.
 
-The native path uses the same tool executors and permission checks as the legacy path. The only difference is how tools are invoked and results are returned — structured JSON instead of text parsing.
-
 Types involved: `ToolDefinition` (name + description + JSON Schema), `ChatResponse` (Text or ToolUse), `ToolUseRequest` (id + name + input), and `ToolUse`/`ToolResult` variants in `MessagePart`.
 
 Prompt caching is enabled automatically for Anthropic and OpenAI providers, reducing latency and cost when the system prompt and tool definitions remain stable across turns.
 
-## Ollama Native Tool Calling
+### Ollama
 
-Ollama can use the native tool calling path by setting `tool_use = true` in the `[llm.ollama]` config section:
-
-```toml
-[llm.ollama]
-tool_use = true
-```
-
-When enabled, `OllamaProvider::supports_tool_use()` returns `true`. The agent switches to `chat_with_tools()`, which converts `ToolDefinition`s to `ollama_rs::ToolInfo`, sends them alongside the messages, and parses `tool_calls` blocks from the response. `ToolResult` message parts are sent back as `role: tool` messages.
-
-When `tool_use = false` (the default), Ollama falls back to text-based extraction described below.
+Ollama uses the same native tool calling path as Claude and OpenAI. `OllamaProvider` converts `ToolDefinition`s to `ollama_rs::ToolInfo`, sends them alongside the messages, and parses `tool_calls` blocks from the response. `ToolResult` message parts are sent back as `role: tool` messages.
 
 > [!NOTE]
 > Requires a model that supports function calling (e.g. `qwen3:8b`, `llama3.1`, `mistral-nemo`). Check the Ollama model page to confirm tool support.
-
-## Legacy Text Extraction
-
-Providers without native tool support (Ollama with `tool_use = false`, Candle) use text-based tool invocation, distinguished by `InvocationHint` on each `ToolDef`:
-
-1. **Fenced block** (`InvocationHint::FencedBlock("bash")` / `FencedBlock("scrape")`) — the LLM emits a fenced code block with the specified tag. `ShellExecutor` handles ` ```bash ` blocks, `WebScrapeExecutor` handles ` ```scrape ` blocks containing JSON with CSS selectors.
-2. **Structured tool call** (`InvocationHint::ToolCall`) — the LLM emits a `ToolCall` with `tool_id` and typed `params`. `CompositeExecutor` routes the call to `FileExecutor` for file tools.
-
-Both modes coexist in the same iteration. The system prompt includes invocation instructions per tool so the LLM knows exactly which format to use.
 
 ## ACP Tool Notifications
 

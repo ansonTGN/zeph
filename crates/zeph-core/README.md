@@ -92,7 +92,7 @@ Key `LspConfig` fields (TOML section `[agent.lsp]`, requires `lsp-context` featu
 | `diagnostics.max_files` | usize | `5` | Maximum files per diagnostic batch |
 | `diagnostics.min_severity` | string | `"error"` | Minimum severity to include: `"error"`, `"warning"`, `"info"`, `"hint"` |
 | `hover.enabled` | bool | `false` | Pre-fetch hover info for key symbols after `read_file` |
-| `hover.max_symbols` | usize | `10` | Maximum hover entries per file |
+| `hover.max_symbols` | usize | `5` | Maximum hover entries per file |
 | `references.enabled` | bool | `true` | Fetch reference sites before `rename_symbol` |
 | `references.max_refs` | usize | `50` | Maximum references to show per symbol |
 
@@ -110,7 +110,7 @@ min_severity = "error"
 
 [agent.lsp.hover]
 enabled = false
-max_symbols = 10
+max_symbols = 5
 
 [agent.lsp.references]
 enabled = true
@@ -143,6 +143,7 @@ Key `MemoryConfig` fields (TOML section `[memory]`):
 | `deferred_apply_threshold` | f32 | `0.70` | Context usage ratio at which deferred tool-pair summaries are applied (must be < `compaction_threshold`) |
 | `sqlite_pool_size` | u32 | `5` | SQLite connection pool size for memory storage |
 | `response_cache_cleanup_interval_secs` | u64 | `3600` | Interval for expiring stale response cache entries |
+| `embed_concurrency` | u32 | `4` | Max concurrent embedding requests (0 = unlimited); shared across indexer, backfill, and graph extraction |
 
 Key `CompressionConfig` fields (TOML section `[memory.compression]`):
 

@@ -191,7 +191,7 @@ embedding_model = "qwen3-embedding"    # model for text embeddings
 # vision_model = "llava:13b"          # Ollama only: dedicated model for image requests
 # embed = true                         # mark as embedding provider for skill matching and semantic memory
 # default = true                       # mark as primary chat provider
-# tool_use = false                     # Ollama only: enable native tool calling (default: false)
+# embed_concurrency = 4                # Max concurrent embedding requests via semaphore (default: 4, 0 = unlimited)
 
 # Additional provider examples:
 # [[llm.providers]]
