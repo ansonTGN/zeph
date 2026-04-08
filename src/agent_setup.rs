@@ -454,14 +454,12 @@ use zeph_core::config::IndexConfig;
 use zeph_core::cost::CostTracker;
 use zeph_index::{
     indexer::{CodeIndexer, IndexerConfig},
-    retriever::{CodeRetriever, RetrievalConfig},
     store::CodeStore,
     watcher::IndexWatcher,
 };
 use zeph_memory::QdrantOps;
 
 pub(crate) type CodeIndexerSetup = (
-    Option<Arc<CodeRetriever>>,
     Option<IndexWatcher>,
     Option<tokio::sync::watch::Receiver<zeph_index::IndexProgress>>,
 );
@@ -785,7 +783,7 @@ pub(crate) async fn apply_code_indexer(
     status_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
 ) -> CodeIndexerSetup {
     if !config.enabled {
-        return (None, None, None);
+        return (None, None);
     }
 
     let init = async {
@@ -794,12 +792,6 @@ pub(crate) async fn apply_code_indexer(
         })?;
         let store = CodeStore::with_ops(ops, pool);
         let provider_arc = std::sync::Arc::new(provider);
-        let retrieval_config = RetrievalConfig {
-            max_chunks: config.max_chunks,
-            score_threshold: config.score_threshold,
-            budget_ratio: config.budget_ratio,
-        };
-        let retriever = CodeRetriever::new(store.clone(), provider_arc.clone(), retrieval_config);
         let indexer = std::sync::Arc::new(CodeIndexer::new(
             store,
             provider_arc,
@@ -812,11 +804,11 @@ pub(crate) async fn apply_code_indexer(
                 ..IndexerConfig::default()
             },
         ));
-        anyhow::Ok((retriever, indexer))
+        anyhow::Ok(indexer)
     };
 
     match init.await {
-        Ok((retriever, indexer)) => {
+        Ok(indexer) => {
             let (progress_tx, progress_rx) =
                 tokio::sync::watch::channel(zeph_index::IndexProgress::default());
             let workspace_root = config.workspace_root.as_deref().map_or_else(
@@ -834,15 +826,11 @@ pub(crate) async fn apply_code_indexer(
             );
             tracing::info!("code indexer started");
             let watcher = start_index_watcher(config.watch, &workspace_root, indexer, status_tx);
-            (
-                Some(std::sync::Arc::new(retriever)),
-                watcher,
-                Some(progress_rx),
-            )
+            (watcher, Some(progress_rx))
         }
         Err(e) => {
             tracing::warn!("code indexer initialization failed: {e:#}");
-            (None, None, None)
+            (None, None)
         }
     }
 }
@@ -912,18 +900,13 @@ fn start_index_watcher(
     }
 }
 
-pub(crate) fn apply_code_retrieval<C: Channel>(
-    agent: Agent<C>,
-    config: &IndexConfig,
-    retriever: Option<Arc<CodeRetriever>>,
-    provider_has_tools: bool,
-) -> Agent<C> {
+pub(crate) fn apply_code_retrieval<C: Channel>(agent: Agent<C>, config: &IndexConfig) -> Agent<C> {
     if !config.enabled {
         return agent;
     }
 
     // When mcp_enabled, skip static repo-map injection and register IndexMcpServer instead.
-    let agent = if config.mcp_enabled {
+    if config.mcp_enabled {
         if config.repo_map_tokens > 0 {
             tracing::warn!(
                 "index.repo_map_tokens is set but index.mcp_enabled=true — \
@@ -934,19 +917,6 @@ pub(crate) fn apply_code_retrieval<C: Channel>(
         agent.with_index_mcp_server(cwd)
     } else if config.repo_map_tokens > 0 {
         agent.with_repo_map(config.repo_map_tokens, config.repo_map_ttl_secs)
-    } else {
-        agent
-    };
-
-    if provider_has_tools {
-        tracing::info!(
-            "code retrieval (semantic search) skipped: provider supports native tool_use"
-        );
-        return agent;
-    }
-
-    if let Some(retriever) = retriever {
-        agent.with_code_retriever(retriever)
     } else {
         agent
     }
@@ -1250,9 +1220,8 @@ mod tests {
         let db_url = format!("sqlite:{}", tmp.path().display());
         let pool = zeph_db::sqlx::SqlitePool::connect(&db_url).await.unwrap();
 
-        let (retriever, watcher, progress_rx) =
+        let (watcher, progress_rx) =
             apply_code_indexer(&config, None, offline_provider(), pool, false, None).await;
-        assert!(retriever.is_none());
         assert!(watcher.is_none());
         assert!(progress_rx.is_none());
     }
@@ -1269,9 +1238,8 @@ mod tests {
         let pool = zeph_db::sqlx::SqlitePool::connect(&db_url).await.unwrap();
         let qdrant = QdrantOps::new("http://127.0.0.1:1").unwrap();
 
-        let (retriever, watcher, _progress_rx) =
+        let (watcher, _progress_rx) =
             apply_code_indexer(&config, Some(qdrant), offline_provider(), pool, false, None).await;
-        assert!(retriever.is_some());
         assert!(watcher.is_none());
     }
 
@@ -1286,11 +1254,9 @@ mod tests {
         let db_url = format!("sqlite:{}", tmp.path().display());
         let pool = zeph_db::sqlx::SqlitePool::connect(&db_url).await.unwrap();
 
-        // disabled → early return; the fallback path is exercised in the enabled branch
-        // but we can verify None is accepted without panic
-        let (retriever, _, _) =
+        let (watcher, _) =
             apply_code_indexer(&config, None, offline_provider(), pool, false, None).await;
-        assert!(retriever.is_none());
+        assert!(watcher.is_none());
     }
 
     #[tokio::test]
@@ -1307,11 +1273,8 @@ mod tests {
         let pool = zeph_db::sqlx::SqlitePool::connect(&db_url).await.unwrap();
         let qdrant = QdrantOps::new("http://127.0.0.1:1").unwrap();
 
-        let (retriever, watcher, _) =
+        let (watcher, _) =
             apply_code_indexer(&config, Some(qdrant), offline_provider(), pool, false, None).await;
-        // Qdrant is unreachable but the CodeStore/CodeRetriever still gets constructed —
-        // the indexer only fails when it actually tries to connect (in background task).
-        assert!(retriever.is_some());
         assert!(watcher.is_none()); // watch = false
     }
 
@@ -1322,7 +1285,7 @@ mod tests {
             enabled: false,
             ..IndexConfig::default()
         };
-        let result = apply_code_retrieval(agent, &config, None, true);
+        let result = apply_code_retrieval(agent, &config);
         drop(result);
     }
 }

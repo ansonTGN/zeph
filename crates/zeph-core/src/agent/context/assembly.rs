@@ -21,10 +21,11 @@ use super::super::LSP_NOTE_PREFIX;
 use super::super::{
     Agent, CODE_CONTEXT_PREFIX, CORRECTIONS_PREFIX, CROSS_SESSION_PREFIX, DOCUMENT_RAG_PREFIX,
     GRAPH_FACTS_PREFIX, MemoryState, RECALL_PREFIX, SESSION_DIGEST_PREFIX, SUMMARY_PREFIX, Skill,
-    build_system_prompt_with_instructions, format_skills_prompt,
+    format_skills_prompt,
 };
 use super::ContextSlot;
 use crate::channel::Channel;
+use crate::context::build_system_prompt_with_instructions;
 use crate::redact::scrub_content;
 use zeph_sanitizer::{ContentSource, ContentSourceKind, MemorySourceHint};
 
@@ -1873,9 +1874,7 @@ impl<C: Channel> Agent<C> {
         // Query embedding is computed here; when strategy=Embedding already computed it above,
         // but providers are stateless so a second embed() call is acceptable for MVP.
         self.tool_state.cached_filtered_tool_ids = None;
-        if let Some(ref filter) = self.tool_state.tool_schema_filter
-            && self.provider.supports_tool_use()
-        {
+        if let Some(ref filter) = self.tool_state.tool_schema_filter {
             let defs = self.tool_executor.tool_definitions_erased();
             let all_ids: Vec<&str> = defs.iter().map(|d| d.id.as_ref()).collect();
             let descriptions: Vec<(&str, &str)> = defs
@@ -1937,26 +1936,12 @@ impl<C: Channel> Agent<C> {
             let _ = self.channel.send_status("").await;
         }
 
-        let tool_catalog = if self.provider.supports_tool_use() {
-            // Native tool_use: tools are passed via API, skip prompt-based instructions
-            None
-        } else {
-            let defs = self.tool_executor.tool_definitions_erased();
-            if defs.is_empty() {
-                None
-            } else {
-                let reg = zeph_tools::ToolRegistry::from_definitions(defs);
-                Some(reg.format_for_prompt_filtered(&self.runtime.permission_policy))
-            }
-        };
         // BLOCK 1: stable within a session — base prompt + skills + tool catalog
         // Instruction blocks are passed separately and injected in the volatile section.
         #[allow(unused_mut)]
         let mut system_prompt = build_system_prompt_with_instructions(
             &skills_prompt,
             Some(&self.session.env_context),
-            tool_catalog.as_deref(),
-            self.provider.supports_tool_use(),
             &self.instructions.blocks,
         );
 
