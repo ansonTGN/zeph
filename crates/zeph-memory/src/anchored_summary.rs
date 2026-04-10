@@ -1,6 +1,10 @@
 // SPDX-FileCopyrightText: 2026 Andrei G <bug-ops>
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+//! Structured compaction summary with anchored, typed sections.
+//!
+//! Used during hard compaction when `[memory] structured_summaries = true`.
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -21,7 +25,7 @@ pub struct AnchoredSummary {
     /// Each entry is a path or qualified name.
     pub files_modified: Vec<String>,
     /// Architectural or implementation decisions made, with rationale.
-    /// Format: "Decision: <what> — Reason: <why>".
+    /// Format: "Decision: `<what>` — Reason: `<why>`".
     pub decisions_made: Vec<String>,
     /// Unresolved questions, ambiguities, or blocked items.
     pub open_questions: Vec<String>,

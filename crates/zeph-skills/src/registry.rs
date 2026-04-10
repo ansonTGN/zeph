@@ -1,6 +1,34 @@
 // SPDX-FileCopyrightText: 2026 Andrei G <bug-ops>
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+//! In-process skill registry with lazy body loading and content fingerprinting.
+//!
+//! [`SkillRegistry`] scans one or more base directories for `*/SKILL.md` files,
+//! loads their frontmatter eagerly, and reads the Markdown body on first access
+//! (via [`std::sync::OnceLock`]). This keeps startup I/O proportional to the number
+//! of skills, not to their total size.
+//!
+//! # Duplicate handling
+//!
+//! When the same skill name appears in multiple base directories the **first** path wins.
+//! Pass higher-priority directories first (e.g. user-managed before bundled).
+//!
+//! # Examples
+//!
+//! ```rust,no_run
+//! use zeph_skills::registry::SkillRegistry;
+//!
+//! let registry = SkillRegistry::load(&["/path/to/skills"]);
+//! println!("fingerprint: {}", registry.fingerprint());
+//!
+//! # fn try_main() -> Result<(), zeph_skills::SkillError> {
+//! # let registry = zeph_skills::registry::SkillRegistry::load(&["/tmp"]);
+//! let body = registry.get_body("my-skill")?;
+//! println!("{body}");
+//! # Ok(())
+//! # }
+//! ```
+
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
@@ -17,6 +45,9 @@ struct SkillEntry {
     body: OnceLock<String>,
 }
 
+/// In-process skill registry with lazy body loading and content fingerprinting.
+///
+/// See the [module-level documentation](self) for usage details.
 #[derive(Default)]
 pub struct SkillRegistry {
     entries: Vec<SkillEntry>,
@@ -110,6 +141,20 @@ impl SkillRegistry {
         hasher.finish()
     }
 
+    /// Return borrowed references to the metadata of every loaded skill.
+    ///
+    /// The order matches the insertion order (first-path-wins for duplicates).
+    /// Useful for building the embedding index without loading any bodies.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use zeph_skills::registry::SkillRegistry;
+    /// # let registry = SkillRegistry::load(&["/tmp"]);
+    /// for meta in registry.all_meta() {
+    ///     println!("{}: {}", meta.name, meta.description);
+    /// }
+    /// ```
     #[must_use]
     pub fn all_meta(&self) -> Vec<&SkillMeta> {
         self.entries.iter().map(|e| &e.meta).collect()
@@ -219,7 +264,7 @@ impl SkillRegistry {
     /// its `allowed_tools` exceed the permissions of that trust level via
     /// [`check_capability_escalation`].
     ///
-    /// This method is **separate from [`scan_loaded`]** because escalation checks require
+    /// This method is **separate from `scan_loaded`** because escalation checks require
     /// a trust level per skill, which is not available from the SKILL.md frontmatter alone
     /// — it must be resolved from the trust store at the call site (bootstrap). Keeping the
     /// two concerns separate avoids coupling the registry to the trust store.
