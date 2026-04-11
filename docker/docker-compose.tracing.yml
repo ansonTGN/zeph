@@ -1,0 +1,51 @@
+# Jaeger all-in-one distributed tracing backend for Zeph.
+# Image version pinned 2026-04-11. Review periodically.
+#
+# Usage (Zeph running on the host via `cargo run`):
+#   docker compose -f docker/docker-compose.tracing.yml up -d
+#
+# Usage (alongside the main stack):
+#   docker compose -f docker/docker-compose.yml -f docker/docker-compose.tracing.yml up -d
+#
+# After starting:
+#   Jaeger UI: http://localhost:16686
+#
+# Enable tracing in Zeph config (requires --features otel or --features server):
+#   [observability]
+#   exporter  = "otlp"
+#   endpoint  = "http://localhost:4317"
+#
+# Or via the [telemetry] block (requires --features profiling):
+#   [telemetry]
+#   enabled       = true
+#   backend       = "otlp"
+#   otlp_endpoint = "http://localhost:4317"
+#   service_name  = "zeph-agent"
+#   sample_rate   = 1.0
+#
+# NOTE: this overlay binds port 4317 (OTLP gRPC). Do NOT run alongside
+# docker-compose.profiling.yml — Tempo also binds 4317. Use one at a time.
+
+services:
+  jaeger:
+    # v1.76.0 (latest v1 release; v2 requires a config file — upgrade when v2 stable image ships)
+    image: jaegertracing/all-in-one:latest
+    environment:
+      # Collector: accept OTLP gRPC and HTTP
+      COLLECTOR_OTLP_ENABLED: "true"
+      # Keep memory store unbounded during dev sessions
+      SPAN_STORAGE_TYPE: memory
+    ports:
+      - "127.0.0.1:4317:4317"   # OTLP gRPC  (traces from Zeph)
+      - "127.0.0.1:4318:4318"   # OTLP HTTP  (alternative ingestion)
+      - "127.0.0.1:16686:16686" # Jaeger UI
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:14269/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+networks:
+  default:
+    name: zeph-tracing
