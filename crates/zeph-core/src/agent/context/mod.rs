@@ -5,71 +5,12 @@ pub(super) mod assembler;
 mod assembly;
 mod summarization;
 
-use zeph_memory::TokenCounter;
-
-use super::{Agent, Channel, Message};
-
-pub(super) fn chunk_messages(
-    messages: &[Message],
-    budget: usize,
-    oversized: usize,
-    tc: &TokenCounter,
-) -> Vec<Vec<Message>> {
-    let mut chunks: Vec<Vec<Message>> = Vec::new();
-    let mut current: Vec<Message> = Vec::new();
-    let mut current_tokens = 0usize;
-
-    for msg in messages {
-        let msg_tokens = tc.count_message_tokens(msg);
-
-        if msg_tokens >= oversized {
-            // Oversized message gets its own chunk
-            if !current.is_empty() {
-                chunks.push(std::mem::take(&mut current));
-                current_tokens = 0;
-            }
-            chunks.push(vec![msg.clone()]);
-        } else if current_tokens + msg_tokens > budget && !current.is_empty() {
-            chunks.push(std::mem::take(&mut current));
-            current_tokens = 0;
-            current.push(msg.clone());
-            current_tokens += msg_tokens;
-        } else {
-            current.push(msg.clone());
-            current_tokens += msg_tokens;
-        }
-    }
-
-    if !current.is_empty() {
-        chunks.push(current);
-    }
-
-    if chunks.is_empty() {
-        chunks.push(Vec::new());
-    }
-
-    chunks
-}
+#[cfg(test)]
+use super::Message;
+use super::{Agent, Channel};
 
 pub(super) use crate::text::truncate_to_chars as truncate_chars;
-
-/// Cap an LLM summary to `max_chars` characters (SEC-02).
-///
-/// Prevents a misbehaving LLM backend from returning an arbitrarily large summary that
-/// would expand rather than shrink the context window after compaction.
-pub(super) fn cap_summary(s: String, max_chars: usize) -> String {
-    match s.char_indices().nth(max_chars) {
-        Some((byte_idx, _)) => {
-            tracing::warn!(
-                original_chars = s.chars().count(),
-                cap = max_chars,
-                "LLM summary exceeded cap, truncating"
-            );
-            format!("{}…", &s[..byte_idx])
-        }
-        None => s,
-    }
-}
+pub(super) use zeph_context::slot::{cap_summary, chunk_messages};
 
 /// Return type from `compact_context()` that distinguishes between successful compaction,
 /// probe rejection, and no-op.
@@ -91,26 +32,6 @@ pub(super) const PERSONA_PREFIX: &str = "[Persona context]\n";
 pub(super) const TRAJECTORY_PREFIX: &str = "[Past experience]\n";
 pub(super) const TREE_MEMORY_PREFIX: &str = "[Memory summary]\n";
 
-/// Tagged output of each concurrent context-fetch future.
-///
-/// Using an enum instead of a tuple allows individual sources to be added or
-/// removed (including cfg-gated ones) without rewriting the join combinator.
-pub(super) enum ContextSlot {
-    Summaries(Option<Message>),
-    CrossSession(Option<Message>),
-    /// Semantic recall result. Carries the formatted message and the top-1 similarity score.
-    SemanticRecall(Option<Message>, Option<f32>),
-    DocumentRag(Option<Message>),
-    Corrections(Option<Message>),
-    CodeContext(Option<String>),
-    GraphFacts(Option<Message>),
-    /// Persona memory facts injected after the system prompt (#2461).
-    PersonaFacts(Option<Message>),
-    /// Top-k procedural trajectory hints recalled for the current turn (#2498).
-    TrajectoryHints(Option<Message>),
-    /// `TiMem` tree summary nodes recalled for context (#2262).
-    TreeMemory(Option<Message>),
-}
 impl<C: Channel> Agent<C> {
     pub(super) fn compaction_tier(&self) -> super::context_manager::CompactionTier {
         self.context_manager
