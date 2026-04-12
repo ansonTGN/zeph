@@ -77,7 +77,7 @@ impl Channel for AppChannel {
     async fn send_diff(&mut self, diff: zeph_core::DiffData) -> Result<(), ChannelError> {
         dispatch_app_channel!(self, send_diff, diff)
     }
-    async fn send_tool_output(&mut self, event: ToolOutputEvent<'_>) -> Result<(), ChannelError> {
+    async fn send_tool_output(&mut self, event: ToolOutputEvent) -> Result<(), ChannelError> {
         dispatch_app_channel!(self, send_tool_output, event)
     }
 
@@ -104,7 +104,7 @@ impl Channel for AppChannel {
         )
     }
 
-    async fn send_tool_start(&mut self, event: ToolStartEvent<'_>) -> Result<(), ChannelError> {
+    async fn send_tool_start(&mut self, event: ToolStartEvent) -> Result<(), ChannelError> {
         dispatch_app_channel!(self, send_tool_start, event)
     }
 }
@@ -215,6 +215,7 @@ mod tests {
     use super::*;
     use zeph_channels::AnyChannel;
     use zeph_channels::CliChannel;
+    use zeph_common::ToolName;
     use zeph_core::channel::{Channel, StopHint, ToolStartEvent};
 
     fn make_app_channel() -> AppChannel {
@@ -244,10 +245,11 @@ mod tests {
         let mut ch = make_app_channel();
         assert!(
             ch.send_tool_start(ToolStartEvent {
-                tool_name: "shell",
-                tool_call_id: "tc-001",
+                tool_name: ToolName::from("shell"),
+                tool_call_id: "tc-001".to_string(),
                 params: None,
                 parent_tool_use_id: None,
+                started_at: std::time::Instant::now(),
             })
             .await
             .is_ok()
@@ -295,23 +297,25 @@ mod tests {
         .unwrap();
         // 13. send_tool_start
         ch.send_tool_start(ToolStartEvent {
-            tool_name: "bash",
-            tool_call_id: "x",
+            tool_name: ToolName::from("bash"),
+            tool_call_id: "x".to_string(),
             params: None,
             parent_tool_use_id: None,
+            started_at: std::time::Instant::now(),
         })
         .await
         .unwrap();
         // 14. send_tool_output
         ch.send_tool_output(ToolOutputEvent {
-            tool_name: "bash",
-            body: "ok",
+            tool_name: ToolName::from("bash"),
+            display: "ok".to_string(),
             diff: None,
             filter_stats: None,
             kept_lines: None,
             locations: None,
-            tool_call_id: "x",
+            tool_call_id: "x".to_string(),
             is_error: false,
+            terminal_id: None,
             parent_tool_use_id: None,
             raw_response: None,
             started_at: None,
