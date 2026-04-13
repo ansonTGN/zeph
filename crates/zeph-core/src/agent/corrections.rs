@@ -337,26 +337,65 @@ impl<C: crate::channel::Channel> Agent<C> {
         }
     }
 
-    pub(super) async fn handle_feedback(&mut self, input: &str) -> Result<(), error::AgentError> {
+    /// Post-dispatch learning hook called from the agent loop after a registry command sends its
+    /// `Message` response. Triggers `generate_improved_skill` for `/skill reject` and `/feedback`
+    /// commands — these require `&mut self` and cannot run inside the `Send` future in
+    /// `agent_access_impl.rs`.
+    pub(super) async fn maybe_trigger_post_command_learning(&mut self, trimmed: &str) {
+        if !self.is_learning_enabled() {
+            return;
+        }
+        let rest = if let Some(r) = trimmed.strip_prefix("/feedback ") {
+            // "/feedback <skill_name> <message>" — pass "<skill_name> <message>" to split
+            let r = r.trim();
+            if let Some((name, feedback_rest)) = r.split_once(' ') {
+                let feedback = feedback_rest.trim().trim_matches('"');
+                if self.feedback.detector.detect(feedback, &[]).is_some() {
+                    self.generate_improved_skill(name.trim(), feedback, "", Some(feedback))
+                        .await
+                        .ok();
+                }
+            }
+            return;
+        } else if let Some(r) = trimmed.strip_prefix("/skill reject ") {
+            r.trim()
+        } else {
+            return;
+        };
+        // "/skill reject <name> <reason>" path
+        let mut parts = rest.splitn(2, ' ');
+        let Some(name) = parts.next() else { return };
+        let reason = parts.next().unwrap_or("").trim();
+        if !reason.is_empty() {
+            self.generate_improved_skill(name, reason, "", Some(reason))
+                .await
+                .ok();
+        }
+    }
+
+    /// Return the `/feedback` command output as a `String` without sending via channel.
+    ///
+    /// Used by the `AgentAccess::handle_feedback_command` implementation to satisfy the
+    /// `Send` bound on the returned future.
+    pub(super) async fn handle_feedback_as_string(
+        &mut self,
+        input: &str,
+    ) -> Result<String, error::AgentError> {
         let Some((name, rest)) = input.split_once(' ') else {
-            self.channel
-                .send("Usage: /feedback <skill_name> <message>")
-                .await?;
-            return Ok(());
+            return Ok("Usage: /feedback <skill_name> <message>".to_owned());
         };
         let (skill_name, feedback) = (name.trim(), rest.trim().trim_matches('"'));
 
         if feedback.is_empty() {
-            self.channel
-                .send("Usage: /feedback <skill_name> <message>")
-                .await?;
-            return Ok(());
+            return Ok("Usage: /feedback <skill_name> <message>".to_owned());
         }
 
-        let Some(memory) = &self.memory_state.persistence.memory else {
-            self.channel.send("Memory not available.").await?;
-            return Ok(());
+        // Clone Arc before .await to avoid holding &self across suspension points.
+        let memory = self.memory_state.persistence.memory.clone();
+        let Some(memory) = memory else {
+            return Ok("Memory not available.".to_owned());
         };
+        let conversation_id = self.memory_state.persistence.conversation_id;
 
         let outcome_type = if self.feedback.detector.detect(feedback, &[]).is_some() {
             "user_rejection"
@@ -369,22 +408,13 @@ impl<C: crate::channel::Channel> Agent<C> {
             .record_skill_outcome(
                 skill_name,
                 None,
-                self.memory_state.persistence.conversation_id,
+                conversation_id,
                 outcome_type,
                 None,
                 Some(feedback),
             )
             .await?;
 
-        if self.is_learning_enabled() && outcome_type == "user_rejection" {
-            self.generate_improved_skill(skill_name, feedback, "", Some(feedback))
-                .await
-                .ok();
-        }
-
-        self.channel
-            .send(&format!("Feedback recorded for \"{skill_name}\"."))
-            .await?;
-        Ok(())
+        Ok(format!("Feedback recorded for \"{skill_name}\"."))
     }
 }
