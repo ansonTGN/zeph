@@ -1,3 +1,7 @@
+---
+applyTo: "**"
+---
+
 # Copilot Code Review Instructions
 
 ## Project Context
