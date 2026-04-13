@@ -1575,25 +1575,62 @@ pub mod agent_tests {
         let executor = MockToolExecutor::no_tools();
         let mut agent = Agent::new(provider, channel, registry, None, 5, executor);
 
-        let result = agent.handle_image_as_string("/nonexistent/image.png");
+        let result = agent.handle_image_as_string("nonexistent/image.png");
         assert!(agent.msg.pending_image_parts.is_empty());
         assert!(result.contains("Cannot read image"));
     }
 
     #[test]
-    fn handle_image_command_loads_valid_file() {
-        use std::io::Write;
+    fn handle_image_command_absolute_path_is_rejected() {
         let provider = mock_provider(vec![]);
         let channel = MockChannel::new(vec![]);
         let registry = create_test_registry();
         let executor = MockToolExecutor::no_tools();
         let mut agent = Agent::new(provider, channel, registry, None, 5, executor);
 
-        // Write a small temp image
-        let mut tmp = tempfile::NamedTempFile::with_suffix(".jpg").unwrap();
+        let result = agent.handle_image_as_string("/etc/passwd");
+        assert!(agent.msg.pending_image_parts.is_empty());
+        assert!(result.contains("path traversal not allowed"));
+    }
+
+    #[test]
+    fn handle_image_command_parent_dir_traversal_is_rejected() {
+        let provider = mock_provider(vec![]);
+        let channel = MockChannel::new(vec![]);
+        let registry = create_test_registry();
+        let executor = MockToolExecutor::no_tools();
+        let mut agent = Agent::new(provider, channel, registry, None, 5, executor);
+
+        let result = agent.handle_image_as_string("../../etc/passwd");
+        assert!(agent.msg.pending_image_parts.is_empty());
+        assert!(result.contains("path traversal not allowed"));
+    }
+
+    #[test]
+    fn handle_image_command_loads_valid_file() {
+        use std::io::Write as _;
+        let provider = mock_provider(vec![]);
+        let channel = MockChannel::new(vec![]);
+        let registry = create_test_registry();
+        let executor = MockToolExecutor::no_tools();
+        let mut agent = Agent::new(provider, channel, registry, None, 5, executor);
+
+        // Use a temp dir under cwd so the resulting path can be made relative,
+        // which is required by the path-traversal guard.
+        let cwd = std::env::current_dir().unwrap();
+        let tmp_dir = tempfile::TempDir::new_in(&cwd).unwrap();
+        let file_path = tmp_dir.path().join("test.jpg");
         let data = vec![0xFFu8, 0xD8, 0xFF, 0xE0];
-        tmp.write_all(&data).unwrap();
-        let path = tmp.path().to_str().unwrap().to_owned();
+        std::fs::File::create(&file_path)
+            .unwrap()
+            .write_all(&data)
+            .unwrap();
+        let path = file_path
+            .strip_prefix(&cwd)
+            .unwrap_or(&file_path)
+            .to_str()
+            .unwrap()
+            .to_owned();
 
         let result = agent.handle_image_as_string(&path);
         assert_eq!(agent.msg.pending_image_parts.len(), 1);
