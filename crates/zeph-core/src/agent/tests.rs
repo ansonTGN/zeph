@@ -2668,6 +2668,7 @@ mod compaction_e2e {
         GraphStatus, PlanCommand, TaskGraph, TaskNode, TaskResult, TaskStatus,
     };
 
+    #[cfg(feature = "scheduler")]
     fn agent_with_orchestration() -> Agent<MockChannel> {
         let provider = mock_provider(vec![]);
         let channel = MockChannel::new(vec![]);
@@ -2705,6 +2706,7 @@ mod compaction_e2e {
 
     /// GAP-1: `handle_plan_confirm` with `subagent_manager` = None → fallback message,
     /// graph restored in `pending_graph`.
+    #[cfg(feature = "scheduler")]
     #[tokio::test]
     async fn plan_confirm_no_manager_restores_graph() {
         let mut agent = agent_with_orchestration();
@@ -2714,7 +2716,7 @@ mod compaction_e2e {
 
         // No subagent_manager set.
         agent
-            .handle_plan_command(PlanCommand::Confirm)
+            .handle_plan_command_as_string(PlanCommand::Confirm)
             .await
             .unwrap();
 
@@ -2731,13 +2733,14 @@ mod compaction_e2e {
     }
 
     /// GAP-2: `handle_plan_confirm` with `pending_graph` = None → "No pending plan" message.
+    #[cfg(feature = "scheduler")]
     #[tokio::test]
     async fn plan_confirm_no_pending_graph_sends_message() {
         let mut agent = agent_with_orchestration();
 
         // No pending_graph.
         agent
-            .handle_plan_command(PlanCommand::Confirm)
+            .handle_plan_command_as_string(PlanCommand::Confirm)
             .await
             .unwrap();
 
@@ -2750,6 +2753,7 @@ mod compaction_e2e {
 
     /// GAP-3: happy path — pre-built Running graph with one already-Completed task.
     /// `resume_from()` accepts it; first `tick()` emits Done{Completed}; aggregation called.
+    #[cfg(feature = "scheduler")]
     #[tokio::test]
     async fn plan_confirm_completed_graph_aggregates() {
         use zeph_subagent::def::{SkillFilter, SubAgentPermissions, ToolPolicy};
@@ -2798,7 +2802,7 @@ mod compaction_e2e {
         agent.orchestration.pending_graph = Some(graph);
 
         agent
-            .handle_plan_command(PlanCommand::Confirm)
+            .handle_plan_command_as_string(PlanCommand::Confirm)
             .await
             .unwrap();
 
@@ -2821,6 +2825,7 @@ mod compaction_e2e {
     /// Since the fix for #1463, no agents → `RunInline` (not `spawn_for_task`). So when
     /// the provider fails, the scheduler records a Failed `TaskOutcome`, graph fails,
     /// and `finalize_plan_execution` sends a failure message.
+    #[cfg(feature = "scheduler")]
     #[tokio::test]
     async fn plan_confirm_inline_provider_failure_sends_message() {
         use zeph_subagent::SubAgentManager;
@@ -2845,7 +2850,7 @@ mod compaction_e2e {
         agent.orchestration.pending_graph = Some(graph);
 
         agent
-            .handle_plan_command(PlanCommand::Confirm)
+            .handle_plan_command_as_string(PlanCommand::Confirm)
             .await
             .unwrap();
 
@@ -2858,36 +2863,43 @@ mod compaction_e2e {
     }
 
     /// GAP-5: `handle_plan_list` with `pending_graph` → shows summary + status label.
+    #[cfg(feature = "scheduler")]
     #[tokio::test]
     async fn plan_list_with_pending_graph_shows_summary() {
         let mut agent = agent_with_orchestration();
 
         agent.orchestration.pending_graph = Some(make_simple_graph(GraphStatus::Created));
 
-        agent.handle_plan_command(PlanCommand::List).await.unwrap();
+        let out = agent
+            .handle_plan_command_as_string(PlanCommand::List)
+            .await
+            .unwrap();
 
-        let msgs = agent.channel.sent_messages();
         assert!(
-            msgs.iter().any(|m| m.contains("awaiting confirmation")),
-            "must show 'awaiting confirmation' status; got: {msgs:?}"
+            out.contains("awaiting confirmation"),
+            "must show 'awaiting confirmation' status; got: {out:?}"
         );
     }
 
     /// GAP-6: `handle_plan_list` with no graph → "No recent plans."
+    #[cfg(feature = "scheduler")]
     #[tokio::test]
     async fn plan_list_no_graph_shows_no_recent() {
         let mut agent = agent_with_orchestration();
 
-        agent.handle_plan_command(PlanCommand::List).await.unwrap();
+        let out = agent
+            .handle_plan_command_as_string(PlanCommand::List)
+            .await
+            .unwrap();
 
-        let msgs = agent.channel.sent_messages();
         assert!(
-            msgs.iter().any(|m| m.contains("No recent plans")),
-            "must show 'No recent plans'; got: {msgs:?}"
+            out.contains("No recent plans"),
+            "must show 'No recent plans'; got: {out:?}"
         );
     }
 
     /// GAP-7: `handle_plan_retry` resets Running tasks to Ready and clears `assigned_agent`.
+    #[cfg(feature = "scheduler")]
     #[tokio::test]
     async fn plan_retry_resets_running_tasks_to_ready() {
         let mut agent = agent_with_orchestration();
@@ -2904,7 +2916,7 @@ mod compaction_e2e {
         agent.orchestration.pending_graph = Some(graph);
 
         agent
-            .handle_plan_command(PlanCommand::Retry(None))
+            .handle_plan_command_as_string(PlanCommand::Retry(None))
             .await
             .unwrap();
 
@@ -2933,6 +2945,47 @@ mod compaction_e2e {
         );
     }
 
+    /// GAP-A: `handle_plan_cancel_as_string` with no active plan returns "No active plan".
+    #[cfg(feature = "scheduler")]
+    #[tokio::test]
+    async fn plan_cancel_as_string_no_active_plan() {
+        let mut agent = agent_with_orchestration();
+        let out = agent.handle_plan_cancel_as_string(None);
+        assert!(
+            out.contains("No active plan"),
+            "must return 'No active plan' message; got: {out:?}"
+        );
+    }
+
+    /// GAP-A: `handle_plan_resume_as_string` with no pending graph returns "No paused plan".
+    #[cfg(feature = "scheduler")]
+    #[tokio::test]
+    async fn plan_resume_as_string_no_paused_plan() {
+        let mut agent = agent_with_orchestration();
+        let out = agent.handle_plan_resume_as_string(None);
+        assert!(
+            out.contains("No paused plan"),
+            "must return 'No paused plan' message; got: {out:?}"
+        );
+    }
+
+    /// GAP-B: `dispatch_plan_command_as_string` with a parse error returns `Ok(non-empty)`.
+    /// `/plan list extra_args` is rejected by the parser — the error must be returned as
+    /// `Ok(message)`, not propagated as `Err`.
+    #[cfg(feature = "scheduler")]
+    #[tokio::test]
+    async fn dispatch_plan_command_as_string_invalid_subcommand() {
+        let mut agent = agent_with_orchestration();
+        let result = agent
+            .dispatch_plan_command_as_string("/plan list unexpected_arg")
+            .await
+            .unwrap();
+        assert!(
+            !result.is_empty(),
+            "parse error must be returned as Ok(non-empty string), not propagated; got: {result:?}"
+        );
+    }
+
     /// Regression test for issue #1454: secret requests queued before the first `tick()` were
     /// silently dropped when a single-task plan completed on the very first tick (instant
     /// completion) because `process_pending_secret_requests()` was only called inside the
@@ -2944,6 +2997,7 @@ mod compaction_e2e {
     /// 2. Using a graph where the first `tick()` emits `Done` (all tasks already Completed).
     /// 3. Asserting that `try_recv_secret_request()` returns `None` after the plan loop,
     ///    proving the drain was executed.
+    #[cfg(feature = "scheduler")]
     #[tokio::test]
     async fn test_secret_drain_after_instant_completion() {
         use tokio_util::sync::CancellationToken;
@@ -3043,7 +3097,7 @@ mod compaction_e2e {
 
         // Run the plan loop — the fix adds a post-loop drain call.
         agent
-            .handle_plan_command(PlanCommand::Confirm)
+            .handle_plan_command_as_string(PlanCommand::Confirm)
             .await
             .unwrap();
 
@@ -3064,6 +3118,7 @@ mod compaction_e2e {
     /// GAP-8: `handle_plan_confirm` with no sub-agents defined executes the task inline
     /// via the main provider. Verifies `RunInline` path: plan succeeds, provider output
     /// appears in aggregation, `pending_graph` is cleared.
+    #[cfg(feature = "scheduler")]
     #[tokio::test]
     async fn plan_confirm_no_subagents_executes_inline() {
         use zeph_subagent::SubAgentManager;
@@ -3087,7 +3142,7 @@ mod compaction_e2e {
         agent.orchestration.pending_graph = Some(graph);
 
         agent
-            .handle_plan_command(PlanCommand::Confirm)
+            .handle_plan_command_as_string(PlanCommand::Confirm)
             .await
             .unwrap();
 
@@ -3108,6 +3163,7 @@ mod compaction_e2e {
     /// Verifies that when the channel delivers "/plan cancel" while the scheduler loop
     /// is waiting for a task event, `cancel_all()` is called and the loop exits with
     /// `GraphStatus::Canceled`. The "Canceling plan..." status must be sent immediately.
+    #[cfg(feature = "scheduler")]
     #[tokio::test]
     async fn plan_cancel_during_scheduler_loop_cancels_plan() {
         use crate::config::OrchestrationConfig;
@@ -3165,6 +3221,7 @@ mod compaction_e2e {
     /// COV-02: `finalize_plan_execution` with `GraphStatus::Canceled` sends the correct
     /// message, does NOT store the graph into `pending_graph`, and updates
     /// `orchestration.tasks_completed` with the count of tasks that finished before cancel.
+    #[cfg(feature = "scheduler")]
     #[tokio::test]
     async fn finalize_plan_execution_canceled_does_not_store_graph() {
         use zeph_subagent::SubAgentManager;
@@ -3229,6 +3286,7 @@ mod compaction_e2e {
     /// non-cancel message while the loop is waiting for a scheduler event, the message
     /// is passed to `enqueue_or_merge()` and appears in `agent.msg.message_queue` after
     /// `run_scheduler_loop` returns.
+    #[cfg(feature = "scheduler")]
     #[tokio::test]
     async fn scheduler_loop_queues_non_cancel_message() {
         use crate::config::OrchestrationConfig;
@@ -3287,6 +3345,7 @@ mod compaction_e2e {
 
     /// COV-04: channel close (`Ok(None)`) on an exit-supporting channel (CLI/TUI) returns
     /// `GraphStatus::Canceled` — no retry needed, stdin EOF is a normal termination.
+    #[cfg(feature = "scheduler")]
     #[tokio::test]
     async fn scheduler_loop_channel_close_supports_exit_returns_canceled() {
         use crate::config::OrchestrationConfig;
@@ -3331,6 +3390,7 @@ mod compaction_e2e {
     /// COV-04b: channel close (`Ok(None)`) on a server channel (Telegram/Discord/Slack,
     /// `supports_exit()=false`) returns `GraphStatus::Failed` so the user can `/plan retry`
     /// after reconnecting.
+    #[cfg(feature = "scheduler")]
     #[tokio::test]
     async fn scheduler_loop_channel_close_no_exit_support_returns_failed() {
         use crate::config::OrchestrationConfig;
@@ -3380,6 +3440,7 @@ mod compaction_e2e {
     /// `cancel_all()` empties `self.running`, so any completion event processed AFTER it
     /// would be silently discarded. The drain tick must come FIRST while `self.running`
     /// is still intact.
+    #[cfg(feature = "scheduler")]
     #[tokio::test]
     async fn scheduler_loop_channel_close_drain_captures_completion() {
         use crate::config::OrchestrationConfig;
@@ -3453,31 +3514,30 @@ mod compaction_e2e {
     }
 
     /// GAP-9: `handle_plan_status` shows the correct message for each graph status.
+    #[cfg(feature = "scheduler")]
     #[tokio::test]
     async fn plan_status_reflects_graph_status() {
         // No active plan → "No active plan."
         let mut agent = agent_with_orchestration();
-        agent
-            .handle_plan_command(PlanCommand::Status(None))
+        let out = agent
+            .handle_plan_command_as_string(PlanCommand::Status(None))
             .await
             .unwrap();
-        let msgs = agent.channel.sent_messages();
         assert!(
-            msgs.iter().any(|m| m.contains("No active plan")),
-            "no plan → 'No active plan'; got: {msgs:?}"
+            out.contains("No active plan"),
+            "no plan → 'No active plan'; got: {out:?}"
         );
 
         // GraphStatus::Created → awaiting confirmation.
         let mut agent = agent_with_orchestration();
         agent.orchestration.pending_graph = Some(make_simple_graph(GraphStatus::Created));
-        agent
-            .handle_plan_command(PlanCommand::Status(None))
+        let out = agent
+            .handle_plan_command_as_string(PlanCommand::Status(None))
             .await
             .unwrap();
-        let msgs = agent.channel.sent_messages();
         assert!(
-            msgs.iter().any(|m| m.contains("awaiting confirmation")),
-            "Created graph → 'awaiting confirmation'; got: {msgs:?}"
+            out.contains("awaiting confirmation"),
+            "Created graph → 'awaiting confirmation'; got: {out:?}"
         );
 
         // GraphStatus::Failed → retry message.
@@ -3485,15 +3545,13 @@ mod compaction_e2e {
         let mut failed_graph = make_simple_graph(GraphStatus::Created);
         failed_graph.status = GraphStatus::Failed;
         agent.orchestration.pending_graph = Some(failed_graph);
-        agent
-            .handle_plan_command(PlanCommand::Status(None))
+        let out = agent
+            .handle_plan_command_as_string(PlanCommand::Status(None))
             .await
             .unwrap();
-        let msgs = agent.channel.sent_messages();
         assert!(
-            msgs.iter()
-                .any(|m| m.contains("failed") || m.contains("Failed")),
-            "Failed graph → failure message; got: {msgs:?}"
+            out.contains("failed") || out.contains("Failed"),
+            "Failed graph → failure message; got: {out:?}"
         );
 
         // GraphStatus::Paused → resume message.
@@ -3501,15 +3559,13 @@ mod compaction_e2e {
         let mut paused_graph = make_simple_graph(GraphStatus::Created);
         paused_graph.status = GraphStatus::Paused;
         agent.orchestration.pending_graph = Some(paused_graph);
-        agent
-            .handle_plan_command(PlanCommand::Status(None))
+        let out = agent
+            .handle_plan_command_as_string(PlanCommand::Status(None))
             .await
             .unwrap();
-        let msgs = agent.channel.sent_messages();
         assert!(
-            msgs.iter()
-                .any(|m| m.contains("paused") || m.contains("Paused")),
-            "Paused graph → paused message; got: {msgs:?}"
+            out.contains("paused") || out.contains("Paused"),
+            "Paused graph → paused message; got: {out:?}"
         );
 
         // GraphStatus::Completed → completed message.
@@ -3517,21 +3573,20 @@ mod compaction_e2e {
         let mut completed_graph = make_simple_graph(GraphStatus::Created);
         completed_graph.status = GraphStatus::Completed;
         agent.orchestration.pending_graph = Some(completed_graph);
-        agent
-            .handle_plan_command(PlanCommand::Status(None))
+        let out = agent
+            .handle_plan_command_as_string(PlanCommand::Status(None))
             .await
             .unwrap();
-        let msgs = agent.channel.sent_messages();
         assert!(
-            msgs.iter()
-                .any(|m| m.contains("completed") || m.contains("Completed")),
-            "Completed graph → completed message; got: {msgs:?}"
+            out.contains("completed") || out.contains("Completed"),
+            "Completed graph → completed message; got: {out:?}"
         );
     }
 
     /// Regression for #1879: `finalize_plan_execution` with `GraphStatus::Failed` where no
     /// tasks actually failed (all canceled due to scheduler deadlock) must emit
     /// "Plan canceled. N/M tasks did not run." and NOT "Plan failed. 0/N tasks failed".
+    #[cfg(feature = "scheduler")]
     #[tokio::test]
     async fn finalize_plan_execution_deadlock_emits_cancelled_message() {
         use zeph_subagent::SubAgentManager;
@@ -3581,6 +3636,7 @@ mod compaction_e2e {
     /// a successful LlmPlanner call. This test covers the production metrics path in
     /// `handle_plan_goal` that was not exercised by the `status_command_shows_orchestration_*`
     /// tests (which set metrics directly via `update_metrics`).
+    #[cfg(feature = "scheduler")]
     #[tokio::test]
     async fn plan_goal_increments_api_calls_and_plans_total() {
         let valid_plan_json = r#"{"tasks": [
@@ -3601,7 +3657,7 @@ mod compaction_e2e {
             .confirm_before_execute = true;
 
         agent
-            .handle_plan_command(PlanCommand::Goal("build something".to_owned()))
+            .handle_plan_command_as_string(PlanCommand::Goal("build something".to_owned()))
             .await
             .unwrap();
 
@@ -3626,6 +3682,7 @@ mod compaction_e2e {
     /// COV-METRICS-02: `finalize_plan_execution` with `GraphStatus::Completed` increments
     /// `api_calls` for the aggregator call and updates `tasks_completed` / `tasks_skipped`.
     /// This covers the aggregator metrics path that was not tested end-to-end.
+    #[cfg(feature = "scheduler")]
     #[tokio::test]
     async fn finalize_plan_execution_completed_increments_aggregator_metrics() {
         use zeph_subagent::SubAgentManager;
@@ -3682,6 +3739,7 @@ mod compaction_e2e {
 
     /// Regression for #1879: mixed failure — some tasks failed, some canceled.
     /// Message must say "Plan failed. X/M tasks failed, Y canceled:" (not misleading).
+    #[cfg(feature = "scheduler")]
     #[tokio::test]
     async fn finalize_plan_execution_mixed_failed_and_cancelled() {
         use zeph_subagent::SubAgentManager;
@@ -3823,7 +3881,7 @@ mod secret_reason_truncation {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "scheduler"))]
 mod inline_tool_loop_tests {
     use std::sync::Mutex;
 
