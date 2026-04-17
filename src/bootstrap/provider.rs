@@ -6,6 +6,7 @@ pub use zeph_core::provider_factory::{BootstrapError, build_provider_from_entry}
 use zeph_llm::any::AnyProvider;
 use zeph_llm::ollama::OllamaProvider;
 use zeph_llm::router::cascade::ClassifierMode;
+use zeph_llm::router::coe::CoeConfig as RouterCoeConfig;
 use zeph_llm::router::triage::{ComplexityTier, TriageRouter};
 use zeph_llm::router::{AsiRouterConfig, BanditRouterConfig, CascadeRouterConfig, RouterProvider};
 
@@ -89,6 +90,66 @@ fn build_cascade_router_config(
         max_cascade_tokens: cascade_cfg.max_cascade_tokens,
         summary_provider,
         cost_tiers: cascade_cfg.cost_tiers.clone(),
+    }
+}
+
+/// Clamp a `CoE` threshold to `[0.0, 1.0]` and warn on invalid values.
+fn validate_coe_threshold(name: &str, value: f64) -> f64 {
+    if value.is_nan() || value.is_infinite() || !(0.0..=1.0).contains(&value) {
+        tracing::warn!(
+            field = name,
+            value,
+            "coe: threshold out of [0.0, 1.0] — clamping to valid range"
+        );
+        return value.clamp(0.0, 1.0);
+    }
+    value
+}
+
+/// Attach `CoE` to a `RouterProvider` if `[llm.coe]` is configured and enabled.
+///
+/// Skips silently when the secondary or embed provider cannot be resolved.
+fn apply_coe(router: RouterProvider, config: &Config) -> RouterProvider {
+    let Some(coe_cfg) = config.llm.coe.as_ref() else {
+        return router;
+    };
+    if !coe_cfg.enabled {
+        return router;
+    }
+    let pool = &config.llm.providers;
+    let secondary = if coe_cfg.secondary_provider.is_empty() {
+        // fall back to the first non-embed provider
+        pool.iter()
+            .find(|e| !e.embed)
+            .and_then(|e| build_provider_from_entry(e, config).ok())
+    } else {
+        pool.iter()
+            .find(|e| e.effective_name() == coe_cfg.secondary_provider.as_str())
+            .and_then(|e| build_provider_from_entry(e, config).ok())
+    };
+    let embed = if coe_cfg.embed_provider.is_empty() {
+        pool.iter()
+            .find(|e| e.embed)
+            .and_then(|e| build_provider_from_entry(e, config).ok())
+    } else {
+        pool.iter()
+            .find(|e| e.effective_name() == coe_cfg.embed_provider.as_str())
+            .and_then(|e| build_provider_from_entry(e, config).ok())
+    };
+    if let (Some(sec), Some(emb)) = (secondary, embed) {
+        let intra = validate_coe_threshold("intra_threshold", coe_cfg.intra_threshold);
+        let inter = validate_coe_threshold("inter_threshold", coe_cfg.inter_threshold);
+        let shadow = validate_coe_threshold("shadow_sample_rate", coe_cfg.shadow_sample_rate);
+        let router_coe = RouterCoeConfig {
+            intra_threshold: intra,
+            inter_threshold: inter,
+            shadow_sample_rate: shadow,
+        };
+        tracing::info!("coe: enabled (intra={:.2} inter={:.2})", intra, inter);
+        router.with_coe(router_coe, sec, emb)
+    } else {
+        tracing::warn!("coe: secondary or embed provider not resolved, CoE disabled");
+        router
     }
 }
 
@@ -228,6 +289,7 @@ fn create_provider_from_pool(config: &Config) -> Result<AnyProvider, BootstrapEr
             }
             let router =
                 RouterProvider::new(providers).with_ema(alpha, config.llm.router_reorder_interval);
+            let router = apply_coe(router, config);
             Ok(AnyProvider::Router(Box::new(apply_routing_signals(
                 router, config,
             ))))
@@ -241,6 +303,7 @@ fn create_provider_from_pool(config: &Config) -> Result<AnyProvider, BootstrapEr
                 .and_then(|r| r.thompson_state_path.as_deref())
                 .map(std::path::Path::new);
             let router = RouterProvider::new(providers).with_thompson(state_path);
+            let router = apply_coe(router, config);
             Ok(AnyProvider::Router(Box::new(apply_routing_signals(
                 router, config,
             ))))
