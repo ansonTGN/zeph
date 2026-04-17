@@ -34,7 +34,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use landlock::{
-    Access, AccessFs, AsBitFlags, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr,
+    Access, AccessFs, BitFlags, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr,
     RulesetStatus,
 };
 use seccompiler::{BpfProgram, SeccompAction, SeccompFilter, TargetArch};
