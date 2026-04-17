@@ -34,8 +34,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use landlock::{
-    Access, AccessFs, BitFlags, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr,
-    RulesetStatus,
+    Access, AccessFs, BitFlags, PathBeneath, PathFd, RestrictionStatus, Ruleset, RulesetAttr,
+    RulesetCreatedAttr,
 };
 use seccompiler::{BpfProgram, SeccompAction, SeccompFilter, TargetArch};
 use tokio::process::Command;
@@ -396,7 +396,7 @@ fn rewrite_with_bwrap(cmd: &mut Command, bwrap: &Path, policy: &SandboxPolicy, s
 ///
 /// Returns [`SandboxError::Policy`] when ruleset creation or rule addition fails.
 /// Returns [`SandboxError::Setup`] on I/O errors opening path file descriptors.
-pub fn apply_landlock(policy: &SandboxPolicy) -> Result<RulesetStatus, SandboxError> {
+pub fn apply_landlock(policy: &SandboxPolicy) -> Result<RestrictionStatus, SandboxError> {
     let abi = landlock::ABI::V4;
 
     let ruleset = Ruleset::default()
