@@ -414,7 +414,7 @@ pub fn apply_landlock(policy: &SandboxPolicy) -> Result<RulesetStatus, SandboxEr
             let fd =
                 PathFd::new(path).map_err(|e| SandboxError::Setup(std::io::Error::other(e)))?;
             ruleset = ruleset
-                .add_rule(PathBeneath::new(fd, read_access.as_bitflags()))
+                .add_rule(PathBeneath::new(fd, read_access))
                 .map_err(|e| SandboxError::Policy(format!("landlock add_rule read: {e}")))?;
         }
     }
@@ -426,7 +426,7 @@ pub fn apply_landlock(policy: &SandboxPolicy) -> Result<RulesetStatus, SandboxEr
             let fd =
                 PathFd::new(path).map_err(|e| SandboxError::Setup(std::io::Error::other(e)))?;
             ruleset = ruleset
-                .add_rule(PathBeneath::new(fd, write_access.as_bitflags()))
+                .add_rule(PathBeneath::new(fd, write_access))
                 .map_err(|e| SandboxError::Policy(format!("landlock add_rule write: {e}")))?;
         }
     }
@@ -438,7 +438,7 @@ pub fn apply_landlock(policy: &SandboxPolicy) -> Result<RulesetStatus, SandboxEr
         if p.exists() {
             let fd = PathFd::new(p).map_err(|e| SandboxError::Setup(std::io::Error::other(e)))?;
             ruleset = ruleset
-                .add_rule(PathBeneath::new(fd, sys_read.as_bitflags()))
+                .add_rule(PathBeneath::new(fd, sys_read))
                 .map_err(|e| {
                     SandboxError::Policy(format!("landlock add_rule sys {sys_path}: {e}"))
                 })?;
