@@ -134,7 +134,7 @@ uuid = "1.23"
 walkdir = "2.5"
 wiremock = "0.6.5"
 zeroize = { version = "1", default-features = false }
-zeph-a2a = { path = "crates/zeph-a2a", version = "*" }
+zeph-a2a = { path = "crates/zeph-a2a", version = "0.19.2" }
 zeph-bench = { path = "crates/zeph-bench", version = "0.19.2" }
 zeph-acp = { path = "crates/zeph-acp", version = "0.19.2" }
 zeph-db = { path = "crates/zeph-db", default-features = false, version = "0.19.2" }
