@@ -6,13 +6,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### Fixed
-
-- Windows CI: normalize path separators in `DestructiveCommandVerifier::is_allowed_path` so
-  Unix-style `allowed_paths` match correctly on Windows (backslash vs forward slash).
-- Windows CI: `handle_image_as_string` now rejects Unix-style absolute paths (e.g. `/etc/passwd`)
-  on Windows where `Path::is_absolute()` returns `false` without a drive letter.
-
 ## [0.19.2] - 2026-04-18
 
 ### Added
@@ -75,6 +68,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   macro), `match_wild_err_arm` (named binding in `Err` arm), and `duration_suboptimal_units`
   (`Duration::from_mins(1)` instead of `from_secs(60)`). No production code changed.
   Closes [#3160](https://github.com/bug-ops/zeph/issues/3160).
+- **fix(tools): Windows CI path normalization** — `DestructiveCommandVerifier::is_allowed_path`
+  now normalizes path separators to `/` before comparison so Unix-style `allowed_paths` match
+  correctly on Windows. `handle_image_as_string` now rejects Unix-style absolute paths
+  (e.g. `/etc/passwd`) on Windows where `Path::is_absolute()` returns `false` without a drive letter.
 
 - **fix(core): TaskSupervisor reap driver drains completions after cancel** — the reap driver
   in `start_reap_driver` previously broke out of its loop after a single `try_recv` when the
