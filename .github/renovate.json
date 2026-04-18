@@ -18,7 +18,7 @@
   "branchConcurrentLimit": 25,
   "labels": ["dependencies"],
   "rangeStrategy": "bump",
-  "platformCommit": true,
+  "platformCommit": "enabled",
   "platformAutomerge": true,
   "rebaseWhen": "conflicted",
   "dependencyDashboardTitle": "Renovate Dependency Dashboard",
