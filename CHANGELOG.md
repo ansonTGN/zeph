@@ -29,6 +29,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **feat(config): `[cli]` TOML section** (#2790, #3083) — `bare`, `json`, `auto` booleans and
   `[cli.loop]` subsection (`min_interval_secs`, `max_iterations`).
 
+### Changed
+
+- **chore(ci): overhaul Renovate configuration** — `.github/renovate.json` migrated from
+  `config:recommended` to `config:best-practices` with semantic commits (`chore(deps): ...`)
+  matching the project convention. Adds `dependencyDashboard`, `platformCommit: true` (fixes
+  recurring `repository-changed` aborts), `osvVulnerabilityAlerts`, `lockFileMaintenance`
+  (weekly `Cargo.lock` refresh), and a Dependency Dashboard OSV summary. New package groups
+  collapse noise from `tokio-*`, `serde-*`, `tracing-*`, `opentelemetry-*`,
+  `axum`/`tower-*`, and `candle-*`/`hf-hub`. GitHub Actions are pinned to SHAs via
+  `helpers:pinGitHubActionDigests`. `.github/workflows/renovate.yml` gains a
+  `validate-config` job (runs on PRs touching the config), plus `workflow_dispatch` inputs
+  for log level and dry-run mode.
+
+### Removed
+
+- **chore(ci): disable Dependabot (superseded by Renovate)** — `automated-security-fixes`
+  and `vulnerability-alerts` turned off at the repository level via GitHub API. Renovate now
+  handles both dependency updates and security PRs via `osvVulnerabilityAlerts: true` (OSV
+  database, independent of GitHub's vulnerability-alerts API) and the `vulnerabilityAlerts`
+  block in `.github/renovate.json`. Secret scanning remains enabled (separate system).
+
 ## [0.19.2] - 2026-04-18
 
 ### Added

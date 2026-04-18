@@ -3,10 +3,31 @@ name: Renovate
 on:
   schedule:
     - cron: "0 6 * * 1"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      logLevel:
+        description: "Renovate log level"
+        required: false
+        default: "info"
+        type: choice
+        options:
+          - info
+          - debug
+      dryRun:
+        description: "Dry run mode"
+        required: false
+        default: "disabled"
+        type: choice
+        options:
+          - disabled
+          - extract
+          - lookup
+          - full
   push:
     branches: [main]
     paths: [".github/renovate.json"]
+  pull_request:
+    paths: [".github/renovate.json", ".github/workflows/renovate.yml"]
 
 # The workflow itself only needs read access. RENOVATE_TOKEN (PAT with repo+workflow
 # scopes) provides write access for branch creation and PR management.
@@ -14,7 +35,21 @@ permissions:
   contents: read
 
 jobs:
+  validate-config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate Renovate config
+        run: |
+          docker run --rm \
+            -v "${PWD}/.github/renovate.json:/usr/src/app/renovate.json:ro" \
+            ghcr.io/renovatebot/renovate:43 \
+            renovate-config-validator --strict /usr/src/app/renovate.json
+
   renovate:
+    needs: validate-config
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -22,6 +57,8 @@ jobs:
       - uses: renovatebot/github-action@68a3ea99af6ad249940b5a9fdf44fc6d7f14378b # v46.1.6
         env:
           RENOVATE_REPOSITORIES: ${{ github.repository }}
+          LOG_LEVEL: ${{ inputs.logLevel || 'info' }}
+          RENOVATE_DRY_RUN: ${{ inputs.dryRun == 'disabled' && 'null' || inputs.dryRun }}
         with:
           token: ${{ secrets.RENOVATE_TOKEN }}
           configurationFile: .github/renovate.json
