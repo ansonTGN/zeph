@@ -81,6 +81,8 @@ CompositeExecutor [
 - Blocked patterns: process substitution `$(...)`, here-strings `<<<`, dangerous builtins
 - `TrustLevel`: `Untrusted` / `Provisional` / `Trusted` — affects which commands are auto-approved
 - Working directory is sandboxed to project root (configurable)
+- `ShellExecutor` holds a `ShellPolicyHandle` (`Arc<ArcSwap<ShellPolicy>>`) rather than a static blocked-commands list. On plugin overlay reload, `handle.rebuild()` swaps the policy atomically — no restart. See [[027-runtime-layer/spec#Hot-Reload Behavior]] for the reload contract.
+- `find_blocked_command()` return type is `Option<String>` (owned) — not `Option<&str>`
 
 ## Structured Shell Output Envelope
 
@@ -589,6 +591,7 @@ threshold = 0.0   # calls below this score are skipped
 - User-requested tool calls (explicit in turn) bypass the gate unconditionally
 - Scoring errors are fail-closed — uncertain scores do not allow execution
 - NEVER skip `memory_save` or other side-effect tools on pure score alone
+- `invoke_skill` and `load_skill` are ALWAYS exempt from the utility gate — they are skill-orchestration primitives, not reducible to a utility score. Both must appear in the `exempt_tools` list of `UtilityScoringConfig` by default (enforced by a unit test in `config.rs`). This is a hard invariant: a utility gate that skips `invoke_skill` or `load_skill` can silently stall skill-driven turns.
 
 ---
 

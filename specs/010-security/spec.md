@@ -98,6 +98,56 @@ Multiple crates — security is cross-cutting.
 - Blocked: process substitution `$(...)`, here-strings `<<<`, dangerous builtins (`rm -rf`, `mkfs`, etc.)
 - Bypass attempts: passing blocked patterns as arguments is also caught
 
+## File Permission Hardening (`fs_secure`)
+
+Issue #3132. All sensitive files written by Zeph — vault ciphertext, audit JSONL, debug dumps, router state, transcript sidecars — are created with owner-read/write-only permissions (`0o600`) on Unix via the `zeph_common::fs_secure` module.
+
+### `fs_secure` API
+
+| Function | Description |
+|----------|-------------|
+| `open_private_truncate(path)` | Create/truncate with 0o600 mode |
+| `write_private(path, data)` | One-shot write with 0o600 mode |
+| `atomic_write_private(path, data)` | Write to `.tmp` then rename (atomic on POSIX) |
+
+On non-Unix (Windows), helpers fall back to plain `OpenOptions` — Windows uses ACLs. The atomic rename on Windows is NOT atomic (`std::fs::rename` fails if destination exists on some Windows versions).
+
+### Residual Risks (documented)
+
+- `.tmp` suffix in `atomic_write_private` is a symlink-race target in shared directories. Callers in untrusted directories must use `tempfile::NamedTempFile::persist` instead.
+- SQLite WAL/SHM sidecars (`.db-wal`, `.db-shm`) inherit the process umask — not fixable without upstream sqlx support.
+
+### Key Invariants
+
+- All sensitive file creation paths must use `fs_secure` helpers — NEVER create vault, audit, or debug files with `std::fs::OpenOptions` directly
+- `0o600` is the maximum permission — NEVER create sensitive files with group/other read bits
+- `atomic_write_private` is the preferred write path for vault ciphertext — it guarantees partial-write safety on POSIX
+
+---
+
+## Seatbelt Deny-First Rules for Secret Paths
+
+Issue #3103 / #3115. On macOS, the Workspace Seatbelt sandbox profile now includes deny-first rules for well-known secret paths, added before the broad `(allow file-read*)` rule.
+
+### Denied Paths (deny-first)
+
+```
+~/.ssh/id_*
+~/.ssh/id_ed25519
+~/.ssh/id_rsa
+~/.aws/credentials
+~/.config/gh/hosts.yml
+~/Library/Keychains/
+```
+
+For symlinked secret paths (e.g., `~/.aws/credentials` → a real path in `/private/var/…`), deny rules are emitted for **both** the canonical real path and the symlink target to prevent traversal bypasses.
+
+### Key Invariants
+
+- Deny rules are appended BEFORE the broad `(allow file-read*)` rule in the Seatbelt profile — order matters; deny-first is not default Seatbelt behavior
+- Both the symlink and its canonical target must be denied for symlinked paths
+- Seatbelt workspace profile (`--init wizard` and `--migrate-config`) must include these rules
+
 ### Threat Model After #3077
 
 The Workspace Seatbelt profile grants **unconditional read access** to the entire
@@ -325,6 +375,25 @@ ibct_key_rotation_secs = 3600
 - Flagged parameter paths use dot notation (e.g., `properties.cmd`) for unambiguous identification
 - NEVER remove a tool parameter on injection suspicion — sanitize the description and flag; the tool remains callable
 - `security_meta.flagged_parameters` is set at registration time; subsequent calls do not re-scan unless the server re-registers
+
+---
+
+## Plugin Manifest Integrity (sha256)
+
+Issue #3166. Each `.plugin.toml` is integrity-checked via a sha256 digest to prevent tampering between install and load time.
+
+### Mechanism
+
+1. At install time (`zeph plugin install`), sha256 of the installed `.plugin.toml` is computed and written to `<data_root>/.plugin-integrity.toml` — outside `plugins_dir` to prevent the plugin from overwriting its own recorded digest (TOCTOU prevention).
+2. At startup and on every plugin overlay hot-reload, the digest is recomputed and compared against the stored value.
+3. Manifests whose digest does not match are rejected: the plugin is skipped and recorded in `ResolvedOverlay::skipped_plugins`.
+
+### Key Invariants
+
+- `.plugin-integrity.toml` MUST reside outside `plugins_dir` — placing it inside would allow a plugin to tamper with its own digest entry
+- Integrity check MUST run at both startup and hot-reload — not only at install time
+- A digest mismatch is always a hard rejection; there is no "warn and continue" mode
+- NEVER skip the integrity check when loading a plugin that was previously validated — the file may have been modified on disk between sessions
 
 ---
 
