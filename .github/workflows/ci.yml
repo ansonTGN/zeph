@@ -261,17 +261,6 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: taiki-e/install-action@5ce196a31930e2795a1b2185c2f79b55c0d57733 # nextest
-      - name: Configure Docker pull-through mirror
-        # mirror.gcr.io is a public, unauthenticated pull-through cache for
-        # Docker Hub maintained by Google Cloud. Using it avoids Docker Hub
-        # rate limits when many parallel CI jobs pull the same test images
-        # (qdrant, postgres, etc.) via testcontainers.
-        run: |
-          sudo mkdir -p /etc/docker
-          echo '{"registry-mirrors":["https://mirror.gcr.io"]}' \
-            | sudo tee /etc/docker/daemon.json >/dev/null
-          sudo systemctl restart docker
-          sudo docker info --format '{{ .RegistryConfig.Mirrors }}'
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
