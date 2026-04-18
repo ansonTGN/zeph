@@ -92,7 +92,7 @@ jobs:
           path-to-signatures: cla-signatures.json
           path-to-document: https://github.com/bug-ops/zeph/blob/main/.github/CLA.md
           branch: cla-signatures
-          allowlist: bug-ops,dependabot[bot],github-actions[bot]
+          allowlist: bug-ops,dependabot[bot],github-actions[bot],renovate[bot]
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
