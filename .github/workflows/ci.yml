@@ -265,6 +265,32 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Restore testcontainer image cache
+        id: tc-image-cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/testcontainer-images
+          key: testcontainer-images-${{ hashFiles('.github/testcontainers-images.txt') }}
+      - name: Pull and save testcontainer images (cache miss)
+        if: steps.tc-image-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p /tmp/testcontainer-images
+          while IFS= read -r image; do
+            [ -z "$image" ] && continue
+            echo "Pulling $image"
+            docker pull "$image"
+            fname=$(echo "$image" | tr '/:' '__')
+            docker save "$image" | zstd -T0 -3 -o /tmp/testcontainer-images/"$fname".tar.zst
+          done < .github/testcontainers-images.txt
+          ls -lh /tmp/testcontainer-images/
+      - name: Load testcontainer images (cache hit)
+        if: steps.tc-image-cache.outputs.cache-hit == 'true'
+        run: |
+          for f in /tmp/testcontainer-images/*.tar.zst; do
+            echo "Loading $f"
+            zstd -d -c "$f" | docker load
+          done
+          docker image ls
       - name: Download test archive
         uses: actions/download-artifact@v7
         with:
