@@ -3,7 +3,7 @@
 [![Crates.io](https://img.shields.io/crates/v/zeph-plugins)](https://crates.io/crates/zeph-plugins)
 [![docs.rs](https://img.shields.io/docsrs/zeph-plugins)](https://docs.rs/zeph-plugins)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](../../LICENSE)
-[![MSRV](https://img.shields.io/badge/MSRV-1.94-blue)](https://www.rust-lang.org)
+[![MSRV](https://img.shields.io/badge/MSRV-1.95-blue)](https://www.rust-lang.org)
 
 Plugin packaging, installation, and runtime config overlay for Zeph.
 
