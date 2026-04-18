@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Windows CI: normalize path separators in `DestructiveCommandVerifier::is_allowed_path` so
+  Unix-style `allowed_paths` match correctly on Windows (backslash vs forward slash).
+- Windows CI: `handle_image_as_string` now rejects Unix-style absolute paths (e.g. `/etc/passwd`)
+  on Windows where `Path::is_absolute()` returns `false` without a drive letter.
+
 ## [0.19.2] - 2026-04-18
 
 ### Added
