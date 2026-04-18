@@ -345,11 +345,16 @@ impl DestructiveCommandVerifier {
             let t = token.trim_matches(|c| c == '\'' || c == '"');
             if t.starts_with('/') || t.starts_with('~') || t.starts_with('.') {
                 let normalized = Self::lexical_normalize(std::path::Path::new(t));
-                let n_lower = normalized.to_string_lossy().to_lowercase();
+                // Normalize separators to '/' for cross-platform comparison so that
+                // Unix-style allowed_paths (e.g. "/tmp/build") match on Windows too.
+                let n_lower = normalized
+                    .to_string_lossy()
+                    .replace('\\', "/")
+                    .to_lowercase();
                 if self
                     .allowed_paths
                     .iter()
-                    .any(|p| n_lower.starts_with(p.as_str()))
+                    .any(|p| n_lower.starts_with(p.replace('\\', "/").to_lowercase().as_str()))
                 {
                     return true;
                 }
