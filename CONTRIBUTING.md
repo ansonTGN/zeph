@@ -1,6 +1,6 @@
 # Contributing to Zeph
 
-Thank you for considering contributing to Zeph.
+Thank you for considering contributing to Zeph. By participating, you are expected to uphold our [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Getting Started
 
