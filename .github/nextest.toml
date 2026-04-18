@@ -15,6 +15,13 @@ default-filter = "all()"
 # Running more threads than vCPUs improves throughput while waiting on containers.
 test-threads = 8
 
+[[profile.ci.overrides]]
+# Integration tests pull container images and hit transient network issues
+# (e.g. Docker Hub rate limits under parallel CI runs). Retry twice with
+# backoff before failing the test.
+filter = "binary(~integration)"
+retries = { backoff = "exponential", count = 2, delay = "10s", jitter = true }
+
 [profile.ci.junit]
 # Store JUnit XML report for CI
 path = "target/nextest/ci/junit.xml"
