@@ -208,6 +208,38 @@ fn spawn_tui_thread(
 }
 
 #[cfg(feature = "tui")]
+fn tui_command_context(config: &zeph_core::config::Config, cli_tafc: bool) -> TuiCommandContext {
+    TuiCommandContext {
+        provider: format!("{:?}", config.llm.effective_provider()),
+        model: config.llm.effective_model().to_owned(),
+        agent_name: config.agent.name.clone(),
+        semantic_enabled: config.memory.semantic.enabled,
+        autonomy_level: format!("{:?}", config.security.autonomy_level),
+        max_tool_iterations: config.agent.max_tool_iterations,
+        tafc_enabled: config.tools.tafc.enabled || cli_tafc,
+        tafc_complexity_threshold: config.tools.tafc.complexity_threshold,
+        sandbox_backend: if config.tools.sandbox.enabled {
+            #[cfg(target_os = "macos")]
+            {
+                Some("macos-seatbelt".to_owned())
+            }
+            #[cfg(all(target_os = "linux", feature = "sandbox"))]
+            {
+                Some("linux-bwrap-landlock".to_owned())
+            }
+            #[cfg(not(any(target_os = "macos", all(target_os = "linux", feature = "sandbox"))))]
+            {
+                Some("noop".to_owned())
+            }
+        } else {
+            None
+        },
+        sandbox_denied_domains_count: config.tools.sandbox.denied_domains.len(),
+        sandbox_fail_if_unavailable: config.tools.sandbox.fail_if_unavailable,
+    }
+}
+
+#[cfg(feature = "tui")]
 pub(crate) async fn run_tui_agent<C: Channel + 'static>(
     agent: zeph_core::agent::Agent<C>,
     mut params: TuiRunParams<'_>,
@@ -264,16 +296,7 @@ pub(crate) async fn run_tui_agent<C: Channel + 'static>(
     forwarders.spawn(forward_tui_commands(
         command_rx,
         agent_tx.clone(),
-        TuiCommandContext {
-            provider: format!("{:?}", params.config.llm.effective_provider()),
-            model: params.config.llm.effective_model().to_owned(),
-            agent_name: params.config.agent.name.clone(),
-            semantic_enabled: params.config.memory.semantic.enabled,
-            autonomy_level: format!("{:?}", params.config.security.autonomy_level),
-            max_tool_iterations: params.config.agent.max_tool_iterations,
-            tafc_enabled: params.config.tools.tafc.enabled || params.cli_tafc,
-            tafc_complexity_threshold: params.config.tools.tafc.complexity_threshold,
-        },
+        tui_command_context(params.config, params.cli_tafc),
     ));
 
     if let Some(tool_rx) = params.tool_rx {
@@ -328,6 +351,13 @@ pub(crate) struct TuiCommandContext {
     pub(crate) max_tool_iterations: usize,
     pub(crate) tafc_enabled: bool,
     pub(crate) tafc_complexity_threshold: f64,
+    /// Active sandbox backend name (e.g. `"macos-seatbelt"`, `"linux-bwrap-landlock"`, `"noop"`).
+    /// `None` when sandbox is disabled.
+    pub(crate) sandbox_backend: Option<String>,
+    /// Number of entries in `[tools.sandbox].denied_domains`.
+    pub(crate) sandbox_denied_domains_count: usize,
+    /// Whether `fail_if_unavailable` is set in config.
+    pub(crate) sandbox_fail_if_unavailable: bool,
 }
 
 #[cfg(feature = "tui")]
@@ -366,6 +396,30 @@ pub(crate) async fn forward_tui_commands(
                         .to_owned()
                 };
                 ("tafc:status".to_owned(), text)
+            }
+            zeph_tui::TuiCommand::SandboxStatus => {
+                let text = match &ctx.sandbox_backend {
+                    None => "Sandbox: disabled\n  Set [tools.sandbox] enabled = true to enable."
+                        .to_owned(),
+                    Some(backend) => {
+                        let egress = if ctx.sandbox_denied_domains_count == 0 {
+                            "no denied domains configured".to_owned()
+                        } else {
+                            format!("{} denied domain(s)", ctx.sandbox_denied_domains_count)
+                        };
+                        let fail_str = if ctx.sandbox_fail_if_unavailable {
+                            "yes"
+                        } else {
+                            "no"
+                        };
+                        format!(
+                            "Sandbox: enabled\n  Backend: {backend}\n  \
+                             Egress filter: {egress}\n  \
+                             fail_if_unavailable: {fail_str}"
+                        )
+                    }
+                };
+                ("sandbox:status".to_owned(), text)
             }
             _ => continue,
         };
