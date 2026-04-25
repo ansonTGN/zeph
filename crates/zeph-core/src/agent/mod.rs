@@ -355,6 +355,23 @@ impl<C: Channel> Agent<C> {
         }
     }
 
+    /// Consume the agent and return the inner channel.
+    ///
+    /// Call this after [`run`][Agent::run] completes to retrieve the I/O channel (e.g., to
+    /// read captured responses from a headless channel such as `BenchmarkChannel`).
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use zeph_core::agent::Agent;
+    /// // After agent.run().await completes, consume the agent to retrieve the channel.
+    /// // let channel: MyChannel = agent.into_channel();
+    /// ```
+    #[must_use]
+    pub fn into_channel(self) -> C {
+        self.channel
+    }
+
     /// Poll all active sub-agents for completed/failed/canceled results.
     ///
     /// Non-blocking: returns immediately with a list of `(task_id, result)` pairs

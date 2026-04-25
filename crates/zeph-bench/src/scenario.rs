@@ -218,7 +218,11 @@ fn normalize_basic(s: &str) -> String {
 fn normalize_gaia(s: &str) -> String {
     const ARTICLES: &[&str] = &["a", "an", "the"];
 
-    let stripped = s
+    // Map Unicode subscript/superscript digits to their ASCII equivalents before
+    // stripping — this ensures "H₂O" and "H2O" normalize identically.
+    let ascii_mapped: String = s.chars().map(ascii_fold_digit).collect();
+
+    let stripped = ascii_mapped
         .chars()
         .filter(|c| c.is_alphanumeric() || c.is_whitespace())
         .collect::<String>()
@@ -229,6 +233,25 @@ fn normalize_gaia(s: &str) -> String {
         .filter(|tok| !ARTICLES.contains(tok))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Map Unicode subscript and superscript digit characters to their ASCII equivalents.
+///
+/// Returns the character unchanged if it is not a subscript/superscript digit.
+fn ascii_fold_digit(c: char) -> char {
+    match c {
+        '\u{2080}' | '\u{2070}' => '0',
+        '\u{2081}' | '\u{00B9}' => '1',
+        '\u{2082}' | '\u{00B2}' => '2',
+        '\u{2083}' | '\u{00B3}' => '3',
+        '\u{2084}' | '\u{2074}' => '4',
+        '\u{2085}' | '\u{2075}' => '5',
+        '\u{2086}' | '\u{2076}' => '6',
+        '\u{2087}' | '\u{2077}' => '7',
+        '\u{2088}' | '\u{2078}' => '8',
+        '\u{2089}' | '\u{2079}' => '9',
+        other => other,
+    }
 }
 
 #[cfg(test)]
@@ -295,5 +318,11 @@ mod tests {
     #[test]
     fn gaia_normalized_differs() {
         assert!(!gaia_normalized_exact_match("cat", "dog"));
+    }
+
+    #[test]
+    fn gaia_normalized_subscript_digits_match_ascii() {
+        // Model may respond with Unicode subscript "H₂O" — must match ASCII "H2O".
+        assert!(gaia_normalized_exact_match("H\u{2082}O", "H2O"));
     }
 }
