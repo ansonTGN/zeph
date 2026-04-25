@@ -355,6 +355,8 @@ impl AppBuilder {
             self.config.memory.hebbian.hebbian_lr,
         );
 
+        memory = memory.with_hebbian_spread(self.build_hela_runtime());
+
         if self.config.memory.semantic.enabled && memory.is_vector_store_connected().await {
             tracing::info!("semantic memory enabled, vector store connected");
         }
@@ -1412,6 +1414,37 @@ impl AppBuilder {
             age_vault: None,
             qdrant_ops: None,
             resolved_overlay: zeph_plugins::ResolvedOverlay::default(),
+        }
+    }
+
+    /// Build the HeLa-Mem spread runtime from config.
+    fn build_hela_runtime(&self) -> zeph_memory::HelaSpreadRuntime {
+        let edge_types = self
+            .config
+            .memory
+            .hebbian
+            .spread_edge_types
+            .iter()
+            .filter_map(|raw| {
+                raw.parse::<zeph_memory::graph::EdgeType>()
+                    .map_err(|_| {
+                        tracing::warn!(
+                            value = %raw,
+                            "memory.hebbian.spread_edge_types: unrecognised edge type, ignored"
+                        );
+                    })
+                    .ok()
+            })
+            .collect();
+        zeph_memory::HelaSpreadRuntime {
+            enabled: self.config.memory.hebbian.enabled
+                && self.config.memory.hebbian.spreading_activation,
+            depth: self.config.memory.hebbian.spread_depth.clamp(1, 6),
+            max_visited: 200,
+            edge_types,
+            step_budget: Some(std::time::Duration::from_millis(
+                self.config.memory.hebbian.step_budget_ms,
+            )),
         }
     }
 }
