@@ -129,7 +129,15 @@ pub enum ChannelError {
     #[error("confirmation cancelled")]
     ConfirmCancelled,
 
-    /// Catch-all for provider-specific errors.
+    /// No active session is established yet (no message has been received).
+    ///
+    /// Occurs when `send` or related methods are called before any message has
+    /// arrived on the channel (i.e., `recv` has never returned successfully).
+    #[error("no active session")]
+    NoActiveSession,
+
+    /// Catch-all for third-party API errors (Telegram, Discord, Slack, etc.)
+    /// that do not map to a more specific variant.
     #[error("{0}")]
     Other(String),
 }
@@ -169,6 +177,21 @@ pub struct ChannelMessage {
 }
 
 /// Bidirectional communication channel for the agent.
+///
+/// # TODO (A3 — deferred: split monolithic Channel into focused sub-traits)
+///
+/// `Channel` currently has 16+ methods with 12 default no-op bodies. This makes it easy to
+/// accidentally ignore capabilities (e.g., streaming, elicitation) on a new channel
+/// implementation without a compile error. The planned split:
+///
+/// - `MessageChannel` — `send` / `recv` (required for all channels)
+/// - `StreamingChannel` — `send_streaming_chunk` / `finish_stream` (opt-in)
+/// - `ElicitationChannel` — `request_elicitation` (opt-in)
+/// - `StatusChannel` — `set_status` / `clear_status` (opt-in)
+///
+/// **Blocked by:** workspace-wide breaking change affecting CLI, Telegram, TUI, gateway, JSON,
+/// Discord, Slack, loopback channels, and all integration tests. Must be migrated channel by
+/// channel across ≥5 PRs. Requires its own SDD spec. See critic review §S4.
 pub trait Channel: Send {
     /// Receive the next message. Returns `None` on EOF or shutdown.
     ///

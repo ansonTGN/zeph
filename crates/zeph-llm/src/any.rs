@@ -6,12 +6,25 @@
 //! [`AnyProvider`] lets callers hold and clone any backend without generics or
 //! `Box<dyn LlmProvider>`. The macro `delegate_provider!` generates the
 //! match-over-variants boilerplate for every [`LlmProvider`] method delegation.
+//!
+//! # TODO (D1 — deferred: make `LlmProvider` object-safe, replace `AnyProvider` enum)
+//!
+//! `LlmProvider` is not object-safe today because of the `chat_typed<T: DeserializeOwned>` and
+//! `embed_batch` methods. The goal is to make it object-safe so the enum can be replaced by
+//! `Arc<dyn LlmProvider + Send + Sync>`, eliminating the need to patch this crate when adding a
+//! new provider backend.
+//!
+//! **Blocked by:** full enumeration of `AnyProvider` match sites (router, cascade fallback,
+//! `chat_typed` callers), migration plan for structured-output extraction, and a streaming
+//! throughput benchmark gate. See critic review `.local/handoff/critic-review.md` §C3.
+//! Each step must be a separate PR; do NOT bundle with other refactors.
 
 #[cfg(feature = "candle")]
 use crate::candle_provider::CandleProvider;
 use crate::claude::ClaudeProvider;
 use crate::compatible::CompatibleProvider;
 use crate::gemini::GeminiProvider;
+#[cfg(any(test, feature = "testing"))]
 use crate::mock::MockProvider;
 use crate::ollama::OllamaProvider;
 use crate::openai::OpenAiProvider;
@@ -39,6 +52,7 @@ macro_rules! delegate_provider {
             AnyProvider::Compatible($p) => $expr,
             AnyProvider::Router($p) => $expr,
             AnyProvider::Triage($p) => $expr,
+            #[cfg(any(test, feature = "testing"))]
             AnyProvider::Mock($p) => $expr,
         }
     };
@@ -64,6 +78,10 @@ pub enum AnyProvider {
     Router(Box<RouterProvider>),
     /// Complexity triage router: pre-classifies each request and delegates to the appropriate tier.
     Triage(Box<TriageRouter>),
+    /// A mock provider for use in tests and benchmarks.
+    ///
+    /// Only available with the `testing` feature or in `#[cfg(test)]` contexts.
+    #[cfg(any(test, feature = "testing"))]
     Mock(MockProvider),
 }
 
@@ -156,6 +174,7 @@ impl AnyProvider {
                 .unwrap_or_default()),
             #[cfg(feature = "candle")]
             AnyProvider::Candle(_) => Ok(vec![]),
+            #[cfg(any(test, feature = "testing"))]
             AnyProvider::Mock(p) => Ok(p.models.clone()),
         }
     }
@@ -235,6 +254,7 @@ impl AnyProvider {
             Self::OpenAi(p) => Self::OpenAi(p.with_generation_overrides(overrides)),
             Self::Gemini(p) => Self::Gemini(p.with_generation_overrides(overrides)),
             Self::Compatible(p) => Self::Compatible(p.with_generation_overrides(overrides)),
+            #[cfg(any(test, feature = "testing"))]
             Self::Mock(p) => Self::Mock(p.with_generation_overrides(overrides)),
             #[cfg(feature = "candle")]
             Self::Candle(p) => {
@@ -294,6 +314,7 @@ impl AnyProvider {
             Self::Ollama(_) => {}
             #[cfg(feature = "candle")]
             Self::Candle(_) => {}
+            #[cfg(any(test, feature = "testing"))]
             Self::Mock(_) => {}
         }
     }
