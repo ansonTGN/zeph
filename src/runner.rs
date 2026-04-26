@@ -23,11 +23,11 @@ use crate::bootstrap::warmup_provider;
 use crate::bootstrap::{AppBuilder, create_mcp_registry};
 use parking_lot::RwLock;
 use zeph_channels::AnyChannel;
+use zeph_config::{ThinkingConfig, ThinkingEffort};
 use zeph_core::agent::Agent;
 #[cfg(feature = "acp")]
 use zeph_core::config::AcpTransport;
 use zeph_core::{RestartPolicy, TaskDescriptor, TaskSupervisor};
-use zeph_llm::{ThinkingConfig, ThinkingEffort};
 
 #[cfg(feature = "acp-http")]
 use crate::acp::run_acp_http_server;
@@ -583,7 +583,7 @@ pub(crate) async fn run(cli: Cli) -> anyhow::Result<()> {
     // Apply -y / --auto: set autonomy_level to Full so trust-gate prompts are
     // auto-approved. Adversarial policy and shell blocklist remain enforced.
     if exec_mode.auto {
-        use zeph_tools::AutonomyLevel;
+        use zeph_config::tools::AutonomyLevel;
         app.config_mut().security.autonomy_level = AutonomyLevel::Full;
     }
 
@@ -705,10 +705,7 @@ pub(crate) async fn run(cli: Cli) -> anyhow::Result<()> {
     }
 
     // Validate denied_domains after all merges so config-file + CLI entries are both checked.
-    app.config()
-        .tools
-        .sandbox
-        .validate_denied_domains()
+    zeph_tools::validate_sandbox_denied_domains(&app.config().tools.sandbox)
         .map_err(|e| anyhow::anyhow!("invalid tools.sandbox.denied_domains: {e}"))?;
 
     // CLI --no-sandbox-fallback sets fail_if_unavailable.
@@ -742,9 +739,8 @@ pub(crate) async fn run(cli: Cli) -> anyhow::Result<()> {
     let budget_tokens = app.auto_budget_tokens(&provider);
 
     let config = app.config();
-    let permission_policy = config
-        .tools
-        .permission_policy(config.security.autonomy_level);
+    let permission_policy =
+        zeph_tools::build_permission_policy(&config.tools, config.security.autonomy_level);
 
     #[cfg(feature = "tui")]
     let with_tool_events = cli.tui && cfg!(feature = "tui");
@@ -991,14 +987,14 @@ pub(crate) async fn run(cli: Cli) -> anyhow::Result<()> {
                     // adopt the source-kind initial level when it grants more trust.
                     let stored = row
                         .trust_level
-                        .parse::<zeph_tools::SkillTrustLevel>()
+                        .parse::<zeph_common::SkillTrustLevel>()
                         .unwrap_or_else(|_| {
                             tracing::warn!(
                                 skill = %meta.name,
                                 raw = %row.trust_level,
                                 "unrecognised trust_level in DB, treating as quarantined"
                             );
-                            zeph_tools::SkillTrustLevel::Quarantined
+                            zeph_common::SkillTrustLevel::Quarantined
                         });
                     if !stored.is_active() || stored.severity() <= initial_level.severity() {
                         row.trust_level.clone()
@@ -1454,7 +1450,7 @@ pub(crate) async fn run(cli: Cli) -> anyhow::Result<()> {
     // Pre-allocate trust snapshot Arc shared between the agent's SkillState and
     // SkillInvokeExecutor — written once per turn by prepare_context, read by the executor.
     let trust_snapshot: std::sync::Arc<
-        parking_lot::RwLock<std::collections::HashMap<String, zeph_tools::SkillTrustLevel>>,
+        parking_lot::RwLock<std::collections::HashMap<String, zeph_common::SkillTrustLevel>>,
     > = std::sync::Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new()));
     let skill_invoke_executor = zeph_core::SkillInvokeExecutor::new(
         std::sync::Arc::clone(&registry),
@@ -1581,7 +1577,7 @@ pub(crate) async fn run(cli: Cli) -> anyhow::Result<()> {
                 Ok(enforcer) => {
                     let policy_context =
                         std::sync::Arc::new(RwLock::new(zeph_tools::PolicyContext {
-                            trust_level: zeph_tools::SkillTrustLevel::Trusted,
+                            trust_level: zeph_common::SkillTrustLevel::Trusted,
                             env: std::env::vars().collect(),
                         }));
                     let gate = zeph_tools::PolicyGateExecutor::new(
@@ -1674,8 +1670,8 @@ pub(crate) async fn run(cli: Cli) -> anyhow::Result<()> {
     let index_provider = config
         .index
         .embed_provider
-        .as_deref()
-        .filter(|s| !s.is_empty())
+        .as_ref()
+        .and_then(|p| p.as_non_empty())
         .and_then(
             |name| match crate::bootstrap::create_named_provider(name, config) {
                 Ok(p) => {

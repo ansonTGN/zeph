@@ -47,7 +47,7 @@ use zeph_tools::{ErasedToolExecutor, ToolCall, ToolError, ToolOutput};
 use cache::{HandleKey, SpeculativeCache, SpeculativeHandle, hash_args};
 use prediction::Prediction;
 
-pub use zeph_tools::config::{SpeculationMode, SpeculativeConfig};
+pub use zeph_config::tools::{SpeculationMode, SpeculativeConfig};
 
 /// Metrics collected across a single agent turn.
 #[derive(Debug, Default, Clone)]
@@ -73,7 +73,7 @@ pub struct SpeculativeMetrics {
 ///
 /// ```rust,no_run
 /// use std::sync::Arc;
-/// use zeph_tools::config::SpeculativeConfig;
+/// use zeph_config::tools::SpeculativeConfig;
 /// use zeph_core::agent::speculative::SpeculationEngine;
 ///
 /// # async fn example(executor: Arc<dyn zeph_tools::ErasedToolExecutor>) {

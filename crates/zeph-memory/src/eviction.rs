@@ -47,27 +47,7 @@ pub trait EvictionPolicy: Send + Sync {
     fn score(&self, entry: &EvictionEntry) -> f64;
 }
 
-/// Configuration for the eviction subsystem.
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-#[serde(default)]
-pub struct EvictionConfig {
-    /// Policy name. Currently only `"ebbinghaus"` is supported.
-    pub policy: String,
-    /// Maximum number of entries to retain. `0` means unlimited (eviction disabled).
-    pub max_entries: usize,
-    /// How often to run the eviction sweep, in seconds.
-    pub sweep_interval_secs: u64,
-}
-
-impl Default for EvictionConfig {
-    fn default() -> Self {
-        Self {
-            policy: "ebbinghaus".to_owned(),
-            max_entries: 0,
-            sweep_interval_secs: 3600,
-        }
-    }
-}
+use zeph_config::memory::EvictionConfig;
 
 // ── Ebbinghaus policy ─────────────────────────────────────────────────────────
 
