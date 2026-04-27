@@ -1,0 +1,8 @@
+name: CodeQL config
+
+# Exclude rust/unused-variable: rustc and clippy (-D warnings) already enforce
+# this more accurately. CodeQL's Rust extractor produces false positives for
+# variables used inside macro arguments (tracing!, assert_eq!, etc.).
+query-filters:
+  - exclude:
+      id: rust/unused-variable
