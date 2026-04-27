@@ -13,7 +13,6 @@ mod autodream;
 mod builder;
 pub(crate) mod channel_impl;
 mod command_context_impls;
-pub(crate) mod compaction_strategy;
 pub(super) mod compression_feedback;
 mod context;
 mod context_impls;
@@ -88,20 +87,11 @@ use message_queue::{MAX_AUDIO_BYTES, MAX_IMAGE_BYTES, detect_image_mime};
 use state::MessageState;
 
 pub(crate) const DOOM_LOOP_WINDOW: usize = 3;
-pub(crate) const DOCUMENT_RAG_PREFIX: &str = "## Relevant documents\n";
-pub(crate) const RECALL_PREFIX: &str = "[semantic recall]\n";
-pub(crate) const CODE_CONTEXT_PREFIX: &str = "[code context]\n";
-pub(crate) const SUMMARY_PREFIX: &str = "[conversation summaries]\n";
-pub(crate) const CROSS_SESSION_PREFIX: &str = "[cross-session context]\n";
-pub(crate) const CORRECTIONS_PREFIX: &str = "[past corrections]\n";
-pub(crate) const GRAPH_FACTS_PREFIX: &str = "[known facts]\n";
+// CODE_CONTEXT_PREFIX is re-exported from zeph-agent-context::helpers so callers inside
+// zeph-core that build system-prompt injections can use it without depending on zeph-agent-context
+// directly. SESSION_DIGEST_PREFIX was removed when assembly migrated to ContextService.
+pub(crate) use zeph_agent_context::helpers::CODE_CONTEXT_PREFIX;
 pub(crate) const SCHEDULED_TASK_PREFIX: &str = "Execute the following scheduled task now: ";
-pub(crate) const SESSION_DIGEST_PREFIX: &str = "[Session digest from previous interaction]\n";
-/// Prefix used for LSP context messages (`Role::System`) injected into message history.
-/// The tool-pair summarizer targets User/Assistant pairs and skips System messages,
-/// so these notes are never accidentally summarized. `remove_lsp_messages` uses this
-/// prefix to clear stale notes before each fresh injection.
-pub(crate) const LSP_NOTE_PREFIX: &str = "[lsp ";
 pub(crate) const TOOL_OUTPUT_SUFFIX: &str = "\n```";
 
 pub(crate) fn format_tool_output(tool_name: &str, body: &str) -> String {

@@ -43,7 +43,7 @@ impl<C: Channel> Agent<C> {
             .pruning_strategy
             .is_subgoal()
         {
-            use crate::agent::compaction_strategy::SubgoalState;
+            use zeph_agent_context::SubgoalState;
             self.msg.messages[1..compact_end]
                 .iter()
                 .enumerate()
@@ -74,7 +74,7 @@ impl<C: Channel> Agent<C> {
                 .is_subgoal();
 
             if is_subgoal {
-                use crate::agent::compaction_strategy::SubgoalState;
+                use zeph_agent_context::SubgoalState;
                 self.msg.messages[1..compact_end]
                     .iter()
                     .enumerate()
@@ -282,6 +282,19 @@ impl<C: Channel> Agent<C> {
         });
     }
 
+    // TODO(review): This method cannot be simply delegated to ContextService::compact_context
+    // because the service version handles only structural compaction (partition → summarize →
+    // drain → reinsert + SQLite persist). The Agent<C> version adds:
+    //   - Probe validation (apply_compaction_probe) — probe tests rely on this
+    //   - Compression guidelines loading
+    //   - Tool output archiving before summarization (archive_tool_outputs)
+    //   - Qdrant session-summary write via BackgroundSupervisor
+    //   - Emit compaction status signal
+    //   - CompactionOutcome return type (service returns usize)
+    // Delegating would break probe tests and lose Qdrant/archive functionality.
+    // To wire this properly, ContextSummarizationView would need probe config, archive
+    // state, and a Qdrant write callback. Suggested action: extend the view and service
+    // in a follow-up PR, then replace this body with a service delegation.
     pub(in crate::agent) async fn compact_context(
         &mut self,
     ) -> Result<CompactionOutcome, crate::agent::error::AgentError> {
@@ -520,5 +533,27 @@ impl<C: Channel> Agent<C> {
         });
 
         (sqlite_failed, Some(qdrant_fut))
+    }
+}
+
+// ── Test-helper delegations ───────────────────────────────────────────────────
+//
+// `compact_context_with_budget` is used exclusively by integration tests in
+// `crates/zeph-core/src/agent/context/summarization/mod.rs` (T-ORPHAN-01, T-ORPHAN-02).
+// It delegates to `ContextService::compact_context` which exercises the same structural
+// invariants (orphan-pair detection, adjust_compact_end_for_tool_pairs) without the
+// Agent-specific probe/archive/persist/Qdrant logic.
+#[cfg(test)]
+impl<C: Channel> Agent<C> {
+    pub(in crate::agent::context) async fn compact_context_with_budget(
+        &mut self,
+        max_summary_tokens: Option<usize>,
+    ) -> Result<(), crate::agent::error::AgentError> {
+        let svc = zeph_agent_context::ContextService::new();
+        let mut summ = self.summarization_view();
+        svc.compact_context(&mut summ, max_summary_tokens)
+            .await
+            .map(|_| ())
+            .map_err(|e| crate::agent::error::AgentError::ContextError(format!("{e:#}")))
     }
 }

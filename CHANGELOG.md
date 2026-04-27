@@ -8,6 +8,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- refactor(context): fix workspace compilation errors introduced during context migration
+  (#3523 fixup). Resolved 7 errors in `zeph-core`: unresolved prefix-constant imports in
+  `retrieved.rs` (now imported from `zeph_agent_context::helpers`), private `SECURITY_EVENT_CAP`
+  access (now uses `crate::metrics::SECURITY_EVENT_CAP`), `sanitizer` field type mismatch
+  (borrow instead of `Arc::clone`), `quarantine_summarizer` `Clone` failure (`.as_ref()` instead),
+  `channel_skills` type mismatch (`.allowed` slice), and Edition 2024 `ref` binding errors.
+  Moved `SecuritySink` struct to module scope to satisfy `clippy::items_after_statements`.
+  Removed unused `TxStatus` struct, dead `as_index_access` method, orphaned `SESSION_DIGEST_PREFIX`
+  re-export, and dangling `memory_first_keep_tail` module-level `use`. Demoted 14 test-only
+  shim methods on `Agent<C>` to `#[cfg(test)]` impl block (integration test bridges). No
+  production behavior change; 8998 tests pass.
+- refactor(context): relocate `CompactionOutcome` and `BudgetHint` from `zeph-core` to
+  `zeph-agent-context` (#3523 PR0a). `CompactionOutcome` (with new `CompactedWithPersistError`
+  variant) and `BudgetHint` (with `format_xml()`) now live in `zeph_agent_context::state` and
+  `zeph_agent_context::helpers` respectively. All `zeph-core` callers updated; old definitions
+  deleted.
+- refactor(context): expand `MessageWindowView` and migrate 15 trivial mutators to `ContextService`
+  (#3523 PR0b+PR1). `MessageWindowView` gains `cached_prompt_tokens`, `token_counter`, and
+  `completed_tool_ids` fields. `clear_history`, 13 `remove_*` methods, and
+  `trim_messages_to_budget` are now implemented on `ContextService` (zero-sized type); each
+  `Agent<C>` shim delegates via `message_window_view()` with all original logic deleted from
+  `zeph-core`. Message prefix constants (`CORRECTIONS_PREFIX`, `CODE_CONTEXT_PREFIX`,
+  `SESSION_DIGEST_PREFIX`, `LSP_NOTE_PREFIX`, `DOCUMENT_RAG_PREFIX`) moved to
+  `zeph_agent_context::helpers`.
 - refactor(agent-context): migrate `assembler_helpers` from `zeph-core` to `zeph-agent-context`
   as `pub mod helpers` (#3517 step 3). Deleted `zeph-core/src/agent/context/assembler_helpers.rs`;
   all helper functions (`truncate_chars`, `format_correction_note`, `effective_recall_timeout_ms`,

@@ -12,27 +12,31 @@
 //! expression. The borrow checker proves disjointness at that level without additional
 //! helper methods — each `&mut` resolves to a unique field path under `Agent<C>`.
 
+use parking_lot::RwLock;
+use std::borrow::Cow;
+use std::collections::HashSet;
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
-
-use parking_lot::RwLock;
 use zeph_common::SecurityEventCategory;
+use zeph_common::task_supervisor::{BlockingHandle, TaskSupervisor};
 use zeph_config::{
     ContextStrategy, DocumentConfig, GraphConfig, PersonaConfig, ReasoningConfig, TrajectoryConfig,
     TreeConfig,
 };
 use zeph_context::input::CorrectionConfig;
 use zeph_context::manager::ContextManager;
+use zeph_context::summarization::SummarizationDeps;
 use zeph_llm::any::AnyProvider;
 use zeph_llm::provider::Message;
-use zeph_memory::ConversationId;
 use zeph_memory::semantic::SemanticMemory;
+use zeph_memory::{ConversationId, TokenCounter};
 use zeph_sanitizer::ContentSanitizer;
 use zeph_sanitizer::quarantine::QuarantinedSummarizer;
 use zeph_skills::proactive::ProactiveExplorer;
 use zeph_skills::registry::SkillRegistry;
+
+use crate::compaction::{SubgoalExtractionResult, SubgoalRegistry};
 
 /// Borrow-lens over the agent's conversation window fields.
 ///
@@ -48,23 +52,36 @@ pub struct MessageWindowView<'a> {
     pub deferred_db_hide_ids: &'a mut Vec<i64>,
     /// Deferred summary strings to be appended after context assembly completes.
     pub deferred_db_summaries: &'a mut Vec<String>,
+    /// Running token count for the current prompt window — updated after every
+    /// message-list mutation to keep provider call budgets accurate.
+    /// Maps to `Agent<C>::runtime.providers.cached_prompt_tokens`.
+    pub cached_prompt_tokens: &'a mut u64,
+    /// Shared token counter — cheap `Arc` clone from `Agent<C>::runtime.metrics.token_counter`.
+    pub token_counter: Arc<TokenCounter>,
+    /// Tool IDs that completed successfully in the current session.
+    /// Maps to `Agent<C>::services.tool_state.completed_tool_ids`.
+    /// Cleared by `clear_history` together with the message list.
+    pub completed_tool_ids: &'a mut HashSet<String>,
 }
 
-/// Narrow mutable counters lens for sanitizer and quarantine metrics.
+/// Accumulated metric deltas for one context-assembly pass.
 ///
-/// Groups five disjoint sub-fields of `Agent<C>::runtime.metrics` into one struct
-/// so the borrow checker can prove disjointness at the shim literal expression.
-pub struct MetricsCounters<'a> {
-    /// Total sanitizer checks performed.
-    pub sanitizer_runs: &'a mut u64,
-    /// Total injection flags raised by the sanitizer.
-    pub sanitizer_injection_flags: &'a mut u64,
-    /// Total truncations applied by the sanitizer.
-    pub sanitizer_truncations: &'a mut u64,
-    /// Total quarantine invocations.
-    pub quarantine_invocations: &'a mut u64,
-    /// Total quarantine failures (summarizer error or timeout).
-    pub quarantine_failures: &'a mut u64,
+/// Holds owned counters that the service increments during `prepare_context`.
+/// After the call returns, the `zeph-core` shim applies these deltas to the agent's
+/// metrics snapshot via `update_metrics`. Using owned values (not references) avoids
+/// borrowing into `MetricsSnapshot`, which lives behind a watch channel.
+#[derive(Debug, Default)]
+pub struct MetricsCounters {
+    /// Sanitizer checks performed during this pass.
+    pub sanitizer_runs: u64,
+    /// Injection flags raised during this pass.
+    pub sanitizer_injection_flags: u64,
+    /// Truncations applied during this pass.
+    pub sanitizer_truncations: u64,
+    /// Quarantine invocations during this pass.
+    pub quarantine_invocations: u64,
+    /// Quarantine failures during this pass.
+    pub quarantine_failures: u64,
 }
 
 /// Abstract sink for security events raised during context assembly.
@@ -106,7 +123,9 @@ pub struct ContextAssemblyView<'a> {
     /// `services.memory.compaction.crossover_turn_threshold`.
     pub crossover_turn_threshold: u32,
     /// `services.memory.compaction.cached_session_digest` — cloned into assembler input.
-    pub cached_session_digest: Option<(String, Instant)>,
+    ///
+    /// The `usize` is the token count of the digest (used by `ContextMemoryView`).
+    pub cached_session_digest: Option<(String, usize)>,
     /// `services.memory.compaction.digest_config.enabled`.
     pub digest_enabled: bool,
 
@@ -146,15 +165,15 @@ pub struct ContextAssemblyView<'a> {
     /// never crosses the crate boundary.
     pub correction_config: Option<CorrectionConfig>,
     /// `services.sidequest.turn_counter`.
-    pub sidequest_turn_counter: u32,
+    pub sidequest_turn_counter: u64,
     /// `services.proactive_explorer` — `Arc` clone for async use without borrowing self.
     pub proactive_explorer: Option<Arc<ProactiveExplorer>>,
 
     // ── Security ──────────────────────────────────────────────────────────────────────
-    /// `services.security.sanitizer` — `Arc` clone is cheap.
-    pub sanitizer: Arc<ContentSanitizer>,
-    /// `services.security.quarantine_summarizer` — `Arc` clone is cheap.
-    pub quarantine_summarizer: Option<Arc<QuarantinedSummarizer>>,
+    /// `services.security.sanitizer` — borrowed from `SecurityState`; not Arc-wrapped in `zeph-core`.
+    pub sanitizer: &'a ContentSanitizer,
+    /// `services.security.quarantine_summarizer` — borrowed from `SecurityState`.
+    pub quarantine_summarizer: Option<&'a QuarantinedSummarizer>,
 
     // ── Context manager ───────────────────────────────────────────────────────────────
     /// `self.context_manager` — mutably borrowed for token recompute hooks.
@@ -163,8 +182,9 @@ pub struct ContextAssemblyView<'a> {
     // ── Runtime / metrics ─────────────────────────────────────────────────────────────
     /// `runtime.metrics.token_counter` — `Arc` clone is cheap.
     pub token_counter: Arc<zeph_memory::TokenCounter>,
-    /// Five disjoint mutable counters from `runtime.metrics`.
-    pub metrics: MetricsCounters<'a>,
+    /// Accumulated metric deltas — incremented during the pass, applied to the metrics
+    /// snapshot by the `zeph-core` shim after `prepare_context` returns.
+    pub metrics: MetricsCounters,
     /// Abstract sink for security events raised during context assembly.
     pub security_events: &'a mut dyn SecurityEventSink,
     /// `runtime.providers.cached_prompt_tokens` — read for compression-spectrum ratio.
@@ -175,18 +195,100 @@ pub struct ContextAssemblyView<'a> {
     pub redact_credentials: bool,
     /// `runtime.config.channel_skills` — per-channel skill filter for system prompt rebuild.
     pub channel_skills: &'a [String],
+
+    // ── Credential scrubber ───────────────────────────────────────────────────────────
+    /// Function pointer for scrubbing credentials from message content.
+    ///
+    /// Passed as a function pointer so `zeph-agent-context` does not need to depend on
+    /// `zeph-core::redact`. The shim in `zeph-core` sets this to `crate::redact::scrub_content`.
+    /// When `redact_credentials = false` the service does not call this function.
+    pub scrub: fn(&str) -> Cow<'_, str>,
 }
 
-/// Borrow-lens over fields needed for compaction and summarization operations.
+/// Values produced by [`crate::service::ContextService::prepare_context`] that must be applied by the caller.
 ///
-/// Fields are enumerated in Step 8 of the migration once the summarization
-/// sub-module is moved. This placeholder holds the minimum surface needed by
-/// the scaffold stage.
+/// `ContextService` cannot inject code context directly because `inject_code_context` touches
+/// the system prompt (position-0 message), which involves subsystems beyond the context-window
+/// boundary. Instead, the service returns the code-context body and the caller applies it.
+#[derive(Debug, Default)]
+pub struct ContextDelta {
+    /// Sanitized code-context body to inject into the system prompt by the `Agent<C>` shim.
+    ///
+    /// `None` when no code context was fetched or the fetch returned empty.
+    pub code_context: Option<String>,
+}
+
+/// Borrow-lens over all fields needed for compaction and summarization operations.
 ///
-/// # TODO(review): enumerate full field set in Step 8 migration
+/// Every field maps to a specific sub-field of `Agent<C>` and uses a type from a
+/// crate below `zeph-core` in the dependency graph. Constructed in `zeph-core` using
+/// one literal struct expression; the borrow checker verifies disjointness.
+///
+/// The view covers: message history mutation, deferred summary queues, context-manager
+/// compaction state, provider handles for LLM calls, memory persistence for flushing,
+/// subgoal registry for context-compression strategies, and background task handles for
+/// non-blocking goal/subgoal extraction.
 pub struct ContextSummarizationView<'a> {
-    #[doc(hidden)]
-    pub _phantom: std::marker::PhantomData<&'a ()>,
+    // ── Message window ────────────────────────────────────────────────────────
+    /// Full conversation history. Mutated by pruning, compaction, and deferred summary
+    /// application.
+    pub messages: &'a mut Vec<Message>,
+    /// `SQLite` row IDs to be soft-deleted after deferred summaries are applied.
+    pub deferred_db_hide_ids: &'a mut Vec<i64>,
+    /// Summary strings paired with the hide IDs above — flushed to `SQLite` as a batch.
+    pub deferred_db_summaries: &'a mut Vec<String>,
+    /// Running token count for the current prompt window. Updated after every mutation
+    /// that changes message content.
+    pub cached_prompt_tokens: &'a mut u64,
+
+    // ── Context manager ───────────────────────────────────────────────────────
+    /// Full context manager — contains compaction state, thresholds, strategy config.
+    pub context_manager: &'a mut ContextManager,
+
+    // ── Runtime ───────────────────────────────────────────────────────────────
+    /// Whether server-side compaction is currently active (skip client compaction when
+    /// true, unless context has grown past the safety fallback threshold).
+    pub server_compaction_active: bool,
+    /// Token counter used for budget calculations and prompt recomputation.
+    pub token_counter: Arc<TokenCounter>,
+    /// Pre-built summarization deps (provider + timeout + `token_counter` + callbacks).
+    /// Built by the `zeph-core` shim from `build_summarization_deps()` before constructing
+    /// the view, so the view does not need to hold a raw `DebugDumper` reference.
+    pub summarization_deps: SummarizationDeps,
+    /// Background task supervisor for spawning non-blocking goal/subgoal extractions.
+    pub task_supervisor: Arc<TaskSupervisor>,
+
+    // ── Memory persistence ────────────────────────────────────────────────────
+    /// Semantic memory store — used to flush deferred summaries and store session digests.
+    pub memory: Option<Arc<SemanticMemory>>,
+    /// Conversation ID for all SQLite/Qdrant persistence calls.
+    pub conversation_id: Option<ConversationId>,
+    /// Maximum unsummarized tool-call pairs before forced deferred summarization kicks in.
+    pub tool_call_cutoff: usize,
+
+    // ── Context-compression (SubgoalRegistry + task handles) ─────────────────
+    /// In-memory registry of all subgoals in the current session.
+    pub subgoal_registry: &'a mut SubgoalRegistry,
+    /// Handle to the background task-goal extraction spawned last turn.
+    pub pending_task_goal: &'a mut Option<BlockingHandle<Option<String>>>,
+    /// Handle to the background subgoal extraction spawned last turn.
+    pub pending_subgoal: &'a mut Option<BlockingHandle<Option<SubgoalExtractionResult>>>,
+    /// Cached task goal for `TaskAware`/`MIG` pruning. `None` before first extraction.
+    pub current_task_goal: &'a mut Option<String>,
+    /// Hash of the last user message when `current_task_goal` was populated.
+    /// Used to detect when a new extraction is needed.
+    pub task_goal_user_msg_hash: &'a mut Option<u64>,
+    /// Hash of the last user message when subgoal extraction was scheduled.
+    pub subgoal_user_msg_hash: &'a mut Option<u64>,
+    /// TUI / channel status sender for spinner messages. `None` when TUI is disabled.
+    pub status_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+
+    // ── Credential scrubber ───────────────────────────────────────────────────
+    /// Function pointer for scrubbing credentials from summary text.
+    ///
+    /// Set to `crate::redact::scrub_content` by the `zeph-core` shim when
+    /// `redact_credentials = true`, or to a no-op identity function otherwise.
+    pub scrub: fn(&str) -> Cow<'_, str>,
 }
 
 /// Bundle of LLM provider handles needed for async context operations.
@@ -216,4 +318,23 @@ pub trait StatusSink: Send + Sync {
 pub trait TrustGate: Send + Sync {
     /// Apply the given trust level to the underlying tool executor.
     fn set_effective_trust(&self, level: zeph_common::SkillTrustLevel);
+}
+
+/// Return type from `compact_context()` that distinguishes between successful compaction,
+/// probe rejection, and no-op.
+///
+/// Gives `maybe_compact()` enough information to handle probe rejection without triggering
+/// the `Exhausted` state — which would only be correct if summarization itself is stuck.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactionOutcome {
+    /// Messages were drained and replaced with a summary.
+    Compacted,
+    /// Messages were drained and replaced with a summary, but persisting the result failed.
+    /// The in-memory state is correct; only persistence to storage failed.
+    CompactedWithPersistError,
+    /// Probe rejected the summary — original messages are preserved.
+    /// Caller must NOT check `freed_tokens` or transition to `Exhausted`.
+    ProbeRejected,
+    /// No compaction was performed (too few messages, empty `to_compact`, etc.).
+    NoChange,
 }

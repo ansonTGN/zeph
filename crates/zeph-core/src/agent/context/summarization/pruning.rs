@@ -8,6 +8,101 @@ use crate::agent::Agent;
 use crate::channel::Channel;
 
 impl<C: Channel> Agent<C> {
+    /// Inline pruning for tool loops: clear tool output bodies from messages
+    /// older than the last `keep_recent` messages. Called after each tool iteration
+    /// to prevent context growth during long tool loops.
+    ///
+    /// # Invariant
+    ///
+    /// This method MUST be called AFTER `maybe_summarize_tool_pair()`. The summarizer
+    /// reads `msg.content` to build the LLM prompt; pruning replaces that content with
+    /// `"[pruned]"`. Calling prune first would cause the summarizer to produce useless
+    /// summaries. After summarization, the processed pair has `deferred_summary` set and
+    /// is skipped by `count_unsummarized_pairs`. The pruning loop may still clear their
+    /// bodies for token savings, but the content has already been captured in the summary.
+    pub(crate) fn prune_stale_tool_outputs(&mut self, keep_recent: usize) -> usize {
+        if self.msg.messages.len() <= keep_recent + 1 {
+            return 0;
+        }
+        let boundary = self.msg.messages.len().saturating_sub(keep_recent);
+        let mut freed = 0usize;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            .cast_signed();
+        // Skip system prompt (index 0), prune from 1..boundary.
+        // Also skip focus-pinned Knowledge block messages (#1850 S1 fix).
+        for msg in &mut self.msg.messages[1..boundary] {
+            if msg.metadata.focus_pinned {
+                continue;
+            }
+            let mut modified = false;
+            for part in &mut msg.parts {
+                match part {
+                    MessagePart::ToolOutput {
+                        body, compacted_at, ..
+                    } if compacted_at.is_none() && !body.is_empty() => {
+                        freed += self.runtime.metrics.token_counter.count_tokens(body);
+                        let ref_notice = extract_overflow_ref(body)
+                            .map(|p| {
+                                format!("[tool output pruned; use read_overflow {p} to retrieve]")
+                            })
+                            .unwrap_or_default();
+                        freed -= self.runtime.metrics.token_counter.count_tokens(&ref_notice);
+                        *compacted_at = Some(now);
+                        *body = ref_notice;
+                        modified = true;
+                    }
+                    MessagePart::ToolResult { content, .. } => {
+                        let tokens = self.runtime.metrics.token_counter.count_tokens(content);
+                        if tokens > 20 {
+                            freed += tokens;
+                            let ref_notice = extract_overflow_ref(content).map_or_else(
+                                || String::from("[pruned]"),
+                                |p| {
+                                    format!(
+                                        "[tool output pruned; use read_overflow {p} to retrieve]"
+                                    )
+                                },
+                            );
+                            freed -= self.runtime.metrics.token_counter.count_tokens(&ref_notice);
+                            *content = ref_notice;
+                            modified = true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if modified {
+                msg.rebuild_content();
+            }
+        }
+        if freed > 0 {
+            self.update_metrics(|m| m.tool_output_prunes += 1);
+            tracing::debug!(
+                freed,
+                boundary,
+                keep_recent,
+                "inline pruned stale tool outputs"
+            );
+        }
+        freed
+    }
+}
+
+// ── Test-only pruning helpers ─────────────────────────────────────────────────
+//
+// Production pruning goes through ContextService (via ContextSummarizationView) which
+// calls the free functions in `zeph-agent-context::summarization::pruning` directly.
+// These Agent<C> wrappers exist solely for integration tests in context/tests/ that
+// test pruning invariants on the Agent<C> surface before the test suite is migrated
+// to use the service path directly.
+//
+// TODO(review): migrate context/tests/ pruning tests to use ContextService path, then
+// delete this cfg(test) impl block entirely.
+#[cfg(test)]
+impl<C: Channel> Agent<C> {
     /// Prune tool output bodies.
     ///
     /// Dispatches to scored pruning when `context-compression` is enabled and the configured
@@ -145,8 +240,8 @@ impl<C: Channel> Agent<C> {
     /// at the pruning level. `SideQuest` uses the same `focus_pinned` protection to avoid evicting
     /// Knowledge block content.
     pub(in crate::agent) fn prune_tool_outputs_scored(&mut self, min_to_free: usize) -> usize {
-        use crate::agent::compaction_strategy::score_blocks_task_aware;
         use crate::config::PruningStrategy;
+        use zeph_agent_context::score_blocks_task_aware;
 
         let goal = match &self.context_manager.compression.pruning_strategy {
             PruningStrategy::TaskAware => self.services.compression.current_task_goal.clone(),
@@ -241,7 +336,7 @@ impl<C: Channel> Agent<C> {
     /// MIG-scored pruning. Uses relevance − redundancy scoring to identify the best eviction
     /// candidates. Requires `context-compression` feature.
     pub(in crate::agent) fn prune_tool_outputs_mig(&mut self, min_to_free: usize) -> usize {
-        use crate::agent::compaction_strategy::score_blocks_mig;
+        use zeph_agent_context::score_blocks_mig;
 
         let goal = self.services.compression.current_task_goal.as_deref();
         let mut scores = score_blocks_mig(
@@ -328,7 +423,7 @@ impl<C: Channel> Agent<C> {
     /// Active-subgoal tool outputs receive relevance 1.0 and are effectively protected
     /// from eviction as long as lower-tier outputs can satisfy `min_to_free`.
     pub(in crate::agent) fn prune_tool_outputs_subgoal(&mut self, min_to_free: usize) -> usize {
-        use crate::agent::compaction_strategy::score_blocks_subgoal;
+        use zeph_agent_context::score_blocks_subgoal;
 
         if let Some(ref d) = self.runtime.debug.debug_dumper {
             d.dump_subgoal_registry(&self.services.compression.subgoal_registry);
@@ -358,7 +453,7 @@ impl<C: Channel> Agent<C> {
     /// Subgoal + MIG hybrid pruning: combines subgoal tier relevance with pairwise
     /// redundancy scoring (MIG = relevance − redundancy).
     pub(in crate::agent) fn prune_tool_outputs_subgoal_mig(&mut self, min_to_free: usize) -> usize {
-        use crate::agent::compaction_strategy::score_blocks_subgoal_mig;
+        use zeph_agent_context::score_blocks_subgoal_mig;
 
         if let Some(ref d) = self.runtime.debug.debug_dumper {
             d.dump_subgoal_registry(&self.services.compression.subgoal_registry);
@@ -392,7 +487,7 @@ impl<C: Channel> Agent<C> {
     /// `prune_tool_outputs_mig`, and the new subgoal pruning variants.
     fn evict_sorted_blocks(
         &mut self,
-        sorted_scores: &[crate::agent::compaction_strategy::BlockScore],
+        sorted_scores: &[zeph_agent_context::BlockScore],
         min_to_free: usize,
         strategy: &str,
     ) -> usize {
@@ -447,88 +542,6 @@ impl<C: Channel> Agent<C> {
                 "pruned tool outputs"
             );
             self.update_metrics(|m| m.tool_output_prunes += 1);
-        }
-        freed
-    }
-
-    /// Inline pruning for tool loops: clear tool output bodies from messages
-    /// older than the last `keep_recent` messages. Called after each tool iteration
-    /// to prevent context growth during long tool loops.
-    ///
-    /// # Invariant
-    ///
-    /// This method MUST be called AFTER `maybe_summarize_tool_pair()`. The summarizer
-    /// reads `msg.content` to build the LLM prompt; pruning replaces that content with
-    /// `"[pruned]"`. Calling prune first would cause the summarizer to produce useless
-    /// summaries. After summarization, the processed pair has `deferred_summary` set and
-    /// is skipped by `count_unsummarized_pairs`. The pruning loop may still clear their
-    /// bodies for token savings, but the content has already been captured in the summary.
-    pub(crate) fn prune_stale_tool_outputs(&mut self, keep_recent: usize) -> usize {
-        if self.msg.messages.len() <= keep_recent + 1 {
-            return 0;
-        }
-        let boundary = self.msg.messages.len().saturating_sub(keep_recent);
-        let mut freed = 0usize;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs()
-            .cast_signed();
-        // Skip system prompt (index 0), prune from 1..boundary.
-        // Also skip focus-pinned Knowledge block messages (#1850 S1 fix).
-        for msg in &mut self.msg.messages[1..boundary] {
-            if msg.metadata.focus_pinned {
-                continue;
-            }
-            let mut modified = false;
-            for part in &mut msg.parts {
-                match part {
-                    MessagePart::ToolOutput {
-                        body, compacted_at, ..
-                    } if compacted_at.is_none() && !body.is_empty() => {
-                        freed += self.runtime.metrics.token_counter.count_tokens(body);
-                        let ref_notice = extract_overflow_ref(body)
-                            .map(|p| {
-                                format!("[tool output pruned; use read_overflow {p} to retrieve]")
-                            })
-                            .unwrap_or_default();
-                        freed -= self.runtime.metrics.token_counter.count_tokens(&ref_notice);
-                        *compacted_at = Some(now);
-                        *body = ref_notice;
-                        modified = true;
-                    }
-                    MessagePart::ToolResult { content, .. } => {
-                        let tokens = self.runtime.metrics.token_counter.count_tokens(content);
-                        if tokens > 20 {
-                            freed += tokens;
-                            let ref_notice = extract_overflow_ref(content).map_or_else(
-                                || String::from("[pruned]"),
-                                |p| {
-                                    format!(
-                                        "[tool output pruned; use read_overflow {p} to retrieve]"
-                                    )
-                                },
-                            );
-                            freed -= self.runtime.metrics.token_counter.count_tokens(&ref_notice);
-                            *content = ref_notice;
-                            modified = true;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            if modified {
-                msg.rebuild_content();
-            }
-        }
-        if freed > 0 {
-            self.update_metrics(|m| m.tool_output_prunes += 1);
-            tracing::debug!(
-                freed,
-                boundary,
-                keep_recent,
-                "inline pruned stale tool outputs"
-            );
         }
         freed
     }
