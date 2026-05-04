@@ -156,6 +156,8 @@ impl<T: ToolExecutor> PolicyGateExecutor<T> {
             policy_match: None,
             correlation_id: None,
             vigil_risk: None,
+            execution_env: None,
+            resolved_cwd: None,
             scope_at_definition: None,
             scope_at_dispatch: None,
         };
@@ -209,6 +211,8 @@ impl<T: ToolExecutor> PolicyGateExecutor<T> {
                         policy_match: Some(trace.clone()),
                         correlation_id: None,
                         vigil_risk: None,
+                        execution_env: None,
+                        resolved_cwd: None,
                         scope_at_definition: None,
                         scope_at_dispatch: None,
                     };
@@ -244,6 +248,8 @@ impl<T: ToolExecutor> PolicyGateExecutor<T> {
                         policy_match: Some(trace.clone()),
                         correlation_id: None,
                         vigil_risk: None,
+                        execution_env: None,
+                        resolved_cwd: None,
                         scope_at_definition: None,
                         scope_at_dispatch: None,
                     };
@@ -312,6 +318,8 @@ impl<T: ToolExecutor> ToolExecutor for PolicyGateExecutor<T> {
                     policy_match: None,
                     correlation_id: None,
                     vigil_risk: None,
+                    execution_env: None,
+                    resolved_cwd: None,
                     scope_at_definition: None,
                     scope_at_dispatch: None,
                 };
@@ -406,6 +414,7 @@ mod tests {
             tool_id: tool_id.into(),
             params: serde_json::Map::new(),
             caller_id: None,
+            context: None,
         }
     }
 
@@ -416,6 +425,7 @@ mod tests {
             tool_id: tool_id.into(),
             params,
             caller_id: None,
+            context: None,
         }
     }
 

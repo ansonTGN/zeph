@@ -507,6 +507,8 @@ impl<E: ToolExecutor> ToolExecutor for ScopedToolExecutor<E> {
                     policy_match: None,
                     correlation_id: None,
                     vigil_risk: None,
+                    execution_env: None,
+                    resolved_cwd: None,
                     scope_at_definition: scope_def,
                     scope_at_dispatch: scope_name,
                 };
@@ -557,6 +559,8 @@ impl<E: ToolExecutor> ToolExecutor for ScopedToolExecutor<E> {
                     policy_match: None,
                     correlation_id: None,
                     vigil_risk: None,
+                    execution_env: None,
+                    resolved_cwd: None,
                     scope_at_definition: scope_def,
                     scope_at_dispatch: scope_name,
                 };
@@ -719,6 +723,7 @@ mod tests {
             tool_id: ToolName::new(tool_id),
             params: serde_json::Map::new(),
             caller_id: None,
+            context: None,
         }
     }
 

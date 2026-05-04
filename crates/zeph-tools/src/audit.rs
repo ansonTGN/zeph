@@ -188,6 +188,14 @@ pub struct AuditEntry {
     /// `None` when VIGIL did not fire (output was clean or tool was exempt).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vigil_risk: Option<VigilRiskLevel>,
+    /// Name of the resolved execution environment (from `[[execution.environments]]`).
+    /// `None` when no named environment was selected for this invocation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_env: Option<String>,
+    /// Canonical absolute working directory actually used for this shell invocation.
+    /// `None` for non-shell tools or legacy path without a resolved context.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_cwd: Option<String>,
     /// Name of the capability scope active at `tool_definitions()` time (for scope-at-definition audit).
     /// `None` when `ScopedToolExecutor` is not in the chain or the scope is the identity (`general`).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -428,6 +436,8 @@ mod tests {
             correlation_id: None,
             caller_id: None,
             vigil_risk: None,
+            execution_env: None,
+            resolved_cwd: None,
             scope_at_definition: None,
             scope_at_dispatch: None,
         };
@@ -462,6 +472,8 @@ mod tests {
             correlation_id: None,
             caller_id: None,
             vigil_risk: None,
+            execution_env: None,
+            resolved_cwd: None,
             scope_at_definition: None,
             scope_at_dispatch: None,
         };
@@ -495,6 +507,8 @@ mod tests {
             correlation_id: None,
             caller_id: None,
             vigil_risk: None,
+            execution_env: None,
+            resolved_cwd: None,
             scope_at_definition: None,
             scope_at_dispatch: None,
         };
@@ -525,6 +539,8 @@ mod tests {
             correlation_id: None,
             caller_id: None,
             vigil_risk: None,
+            execution_env: None,
+            resolved_cwd: None,
             scope_at_definition: None,
             scope_at_dispatch: None,
         };
@@ -561,6 +577,8 @@ mod tests {
             correlation_id: None,
             caller_id: None,
             vigil_risk: None,
+            execution_env: None,
+            resolved_cwd: None,
             scope_at_definition: None,
             scope_at_dispatch: None,
         };
@@ -598,6 +616,8 @@ mod tests {
             correlation_id: None,
             caller_id: None,
             vigil_risk: None,
+            execution_env: None,
+            resolved_cwd: None,
             scope_at_definition: None,
             scope_at_dispatch: None,
         };
@@ -662,6 +682,8 @@ mod tests {
             correlation_id: None,
             caller_id: None,
             vigil_risk: None,
+            execution_env: None,
+            resolved_cwd: None,
             scope_at_definition: None,
             scope_at_dispatch: None,
         };
@@ -696,6 +718,8 @@ mod tests {
             correlation_id: None,
             caller_id: None,
             vigil_risk: None,
+            execution_env: None,
+            resolved_cwd: None,
             scope_at_definition: None,
             scope_at_dispatch: None,
         };
@@ -739,6 +763,8 @@ mod tests {
                 correlation_id: None,
                 caller_id: None,
                 vigil_risk: None,
+                execution_env: None,
+                resolved_cwd: None,
                 scope_at_definition: None,
                 scope_at_dispatch: None,
             };
@@ -772,6 +798,8 @@ mod tests {
             correlation_id: None,
             caller_id: None,
             vigil_risk: None,
+            execution_env: None,
+            resolved_cwd: None,
             scope_at_definition: None,
             scope_at_dispatch: None,
         };
@@ -805,6 +833,8 @@ mod tests {
             correlation_id: None,
             caller_id: None,
             vigil_risk: None,
+            execution_env: None,
+            resolved_cwd: None,
             scope_at_definition: None,
             scope_at_dispatch: None,
         };

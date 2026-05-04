@@ -1380,6 +1380,8 @@ impl<C: Channel> Agent<C> {
                 policy_match: None,
                 correlation_id: None,
                 vigil_risk: None,
+                execution_env: None,
+                resolved_cwd: None,
                 scope_at_definition: None,
                 scope_at_dispatch: None,
             };
