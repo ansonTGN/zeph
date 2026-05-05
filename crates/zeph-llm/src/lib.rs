@@ -82,6 +82,8 @@ pub(crate) mod embed;
 pub mod error;
 pub mod extractor;
 pub mod gemini;
+#[cfg(feature = "gonka")]
+pub mod gonka;
 pub mod http;
 #[cfg(any(test, feature = "testing"))]
 pub mod mock;
