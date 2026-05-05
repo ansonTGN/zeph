@@ -76,7 +76,7 @@ Example GonkaGate provider:
 name = "gonkagate"
 type = "compatible"
 base_url = "https://api.gonkagate.com/v1"
-model = "gonka/llama-3.1-8b"
+model = "Qwen/Qwen3-235B-A22B-Instruct-2507-FP8"
 default = true
 ```
 
