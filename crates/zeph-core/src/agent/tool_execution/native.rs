@@ -753,30 +753,6 @@ impl<C: Channel> Agent<C> {
         self.services.tool_state.current_tool_iteration = iteration;
         self.channel.send_typing().await?;
 
-        // Inject any pending LSP notes as a Role::System message before calling
-        // the LLM. Stale notes are cleared unconditionally each iteration so they
-        // never accumulate when no new notes were produced.
-        // Role::System ensures they are skipped by tool-pair summarization.
-        //
-        // Skip injection when the last non-System message contains ToolResult parts:
-        // OpenAI rejects a System message placed between Assistant(tool_calls) and
-        // User(tool_results) with HTTP 400.
-        if self.services.session.lsp_hooks.is_some() {
-            self.remove_lsp_messages();
-            if !last_msg_has_tool_results(&self.msg.messages) {
-                let tc = std::sync::Arc::clone(&self.runtime.metrics.token_counter);
-                if let Some(ref mut lsp) = self.services.session.lsp_hooks
-                    && let Some(note_text) = lsp.drain_notes(&tc)
-                {
-                    self.push_message(zeph_llm::provider::Message::from_legacy(
-                        zeph_llm::provider::Role::System,
-                        &note_text,
-                    ));
-                    self.recompute_prompt_tokens();
-                }
-            }
-        }
-
         if let Some(ref budget) = self.context_manager.budget {
             let used =
                 usize::try_from(self.runtime.providers.cached_prompt_tokens).unwrap_or(usize::MAX);
@@ -899,6 +875,26 @@ impl<C: Channel> Agent<C> {
         // RuntimeLayer before_chat hooks (MVP: empty vec = zero iterations).
         if let Some(sc) = self.run_before_chat_layers(tool_defs).await? {
             return Ok(Some(sc));
+        }
+
+        // Inject accumulated LSP notes (hover, diagnostics) as a Role::System message
+        // immediately before the LLM call. At this point all tool results from the previous
+        // iteration are committed to history and there is no pending ToolUse/ToolResult pair,
+        // so inserting a System message is safe for all providers (OpenAI, Claude, Ollama).
+        // Stale notes from a prior call_chat_with_tools invocation are removed first so they
+        // never accumulate; Role::System is skipped by tool-pair summarization.
+        if self.services.session.lsp_hooks.is_some() {
+            self.remove_lsp_messages();
+            let tc = std::sync::Arc::clone(&self.runtime.metrics.token_counter);
+            if let Some(ref mut lsp) = self.services.session.lsp_hooks
+                && let Some(note_text) = lsp.drain_notes(&tc)
+            {
+                self.push_message(zeph_llm::provider::Message::from_legacy(
+                    zeph_llm::provider::Role::System,
+                    &note_text,
+                ));
+                self.recompute_prompt_tokens();
+            }
         }
 
         // CR-01: open LLM span before the call.
@@ -3874,21 +3870,6 @@ fn truncate_utf8(s: &str, max_bytes: usize) -> String {
     s[..end].to_owned()
 }
 
-/// Returns `true` when the last non-System message in `messages` contains at least one
-/// `ToolResult` part. Used to detect an active pending tool chain: injecting a System message
-/// at that point would violate the `OpenAI` message ordering constraint (HTTP 400).
-fn last_msg_has_tool_results(messages: &[Message]) -> bool {
-    messages
-        .iter()
-        .rev()
-        .find(|m| m.role != Role::System)
-        .is_some_and(|m| {
-            m.parts
-                .iter()
-                .any(|p| matches!(p, MessagePart::ToolResult { .. }))
-        })
-}
-
 // T-CRIT-02: handle_focus_tool tests — happy path, error paths, checkpoint pinning (S5 fix).
 #[cfg(test)]
 mod tests {
@@ -3896,9 +3877,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{Duration, Instant};
 
-    use zeph_llm::provider::{ChatResponse, Message, MessageMetadata, MessagePart, Role};
-
-    use super::last_msg_has_tool_results;
+    use zeph_llm::provider::{ChatResponse, Message, MessagePart, Role};
 
     use crate::agent::Agent;
     use crate::agent::tests::agent_tests::{
@@ -4432,81 +4411,119 @@ mod tests {
         );
     }
 
-    #[test]
-    fn last_msg_has_tool_results_detects_pending_tool_chain() {
-        let tool_result_msg = Message {
-            role: Role::User,
-            content: String::new(),
-            parts: vec![MessagePart::ToolResult {
-                tool_use_id: "id1".to_owned(),
-                content: String::new(),
-                is_error: false,
-            }],
-            metadata: MessageMetadata::default(),
-        };
-        let messages = vec![
-            Message::from_legacy(Role::System, "sys"),
-            Message::from_legacy(Role::User, "hello"),
-            Message::from_legacy(Role::Assistant, "response"),
-            tool_result_msg,
-        ];
+    // --- LSP hover injection path (#3595) ---
+
+    fn make_agent_with_lsp_note(note: &'static str) -> Agent<MockChannel> {
+        use std::sync::Arc;
+        let mut agent = Agent::new(
+            mock_provider(vec![String::new()]),
+            MockChannel::new(vec![]),
+            create_test_registry(),
+            None,
+            5,
+            MockToolExecutor::no_tools(),
+        );
+        let enforcer = zeph_mcp::PolicyEnforcer::new(vec![]);
+        let manager = Arc::new(zeph_mcp::McpManager::new(vec![], vec![], enforcer));
+        let mut lsp_runner = crate::lsp_hooks::LspHookRunner::new(
+            manager,
+            crate::lsp_hooks::LspConfig {
+                enabled: true,
+                token_budget: 500,
+                ..crate::lsp_hooks::LspConfig::default()
+            },
+        );
+        lsp_runner.push_note("hover", note, 5);
+        agent.services.session.lsp_hooks = Some(lsp_runner);
+        agent
+            .msg
+            .messages
+            .push(Message::from_legacy(Role::System, "system"));
+        agent
+    }
+
+    /// Regression test for #3595: LSP notes queued in `lsp_hooks.pending_notes` must be
+    /// injected as a `Role::System` message into `self.msg.messages` inside
+    /// `call_chat_with_tools`, before the LLM provider is called.
+    ///
+    /// The old guard (`last_msg_has_tool_results`) was evaluated at the top of
+    /// `process_single_native_turn` on the *next* iteration, when tool results had
+    /// already been committed to history, so it always fired and prevented injection.
+    /// The fix moves injection unconditionally into `call_chat_with_tools`.
+    #[tokio::test]
+    async fn lsp_notes_injected_before_llm_call_in_call_chat_with_tools() {
+        let mut agent = make_agent_with_lsp_note("fn foo() -> u32");
+
+        let _ = agent.call_chat_with_tools(&[]).await;
+
+        let lsp_msg = agent
+            .msg
+            .messages
+            .iter()
+            .find(|m| m.role == Role::System && m.content.starts_with("[lsp "));
         assert!(
-            last_msg_has_tool_results(&messages),
-            "must return true when last non-System message has ToolResult"
+            lsp_msg.is_some(),
+            "call_chat_with_tools must inject a [lsp hover] System message before the LLM call"
+        );
+        assert!(
+            lsp_msg.unwrap().content.contains("fn foo() -> u32"),
+            "injected LSP message must contain the queued note content"
         );
     }
 
-    #[test]
-    fn last_msg_has_tool_results_false_when_last_is_text() {
-        let messages = vec![
-            Message::from_legacy(Role::User, "hello"),
-            Message::from_legacy(Role::Assistant, "response"),
-        ];
-        assert!(
-            !last_msg_has_tool_results(&messages),
-            "must return false when last non-System message has no ToolResult"
-        );
-    }
+    /// On a retry attempt the note queue is already empty (drained on the first call),
+    /// so `call_chat_with_tools` must remove the stale LSP message and not re-inject.
+    /// This verifies that notes never accumulate across retry iterations.
+    #[tokio::test]
+    async fn lsp_notes_not_duplicated_on_retry() {
+        use zeph_llm::LlmError;
+        use zeph_llm::any::AnyProvider;
+        use zeph_llm::mock::MockProvider;
 
-    #[test]
-    fn last_msg_has_tool_results_ignores_trailing_system() {
-        let tool_result_msg = Message {
-            role: Role::User,
-            content: String::new(),
-            parts: vec![MessagePart::ToolResult {
-                tool_use_id: "id2".to_owned(),
-                content: String::new(),
-                is_error: false,
-            }],
-            metadata: MessageMetadata::default(),
-        };
-        let messages = vec![
-            tool_result_msg,
-            Message::from_legacy(Role::System, "lsp note"),
-        ];
-        assert!(
-            last_msg_has_tool_results(&messages),
-            "must look past trailing System messages to find ToolResult"
+        // First call → ContextLengthExceeded, second call → success.
+        let provider = AnyProvider::Mock(
+            MockProvider::with_responses(vec![String::new()])
+                .with_errors(vec![LlmError::ContextLengthExceeded]),
         );
-    }
-
-    #[test]
-    fn last_msg_has_tool_results_empty_slice_returns_false() {
-        assert!(
-            !last_msg_has_tool_results(&[]),
-            "empty slice must return false"
+        let enforcer = zeph_mcp::PolicyEnforcer::new(vec![]);
+        let manager = Arc::new(zeph_mcp::McpManager::new(vec![], vec![], enforcer));
+        let mut lsp_runner = crate::lsp_hooks::LspHookRunner::new(
+            manager,
+            crate::lsp_hooks::LspConfig {
+                enabled: true,
+                token_budget: 500,
+                ..crate::lsp_hooks::LspConfig::default()
+            },
         );
-    }
+        lsp_runner.push_note("hover", "fn bar() -> bool", 5);
 
-    #[test]
-    fn last_msg_has_tool_results_only_system_messages_returns_false() {
-        let messages = vec![
-            Message::from_legacy(Role::System, "system prompt"),
-            Message::from_legacy(Role::System, "lsp note"),
-        ];
-        assert!(
-            !last_msg_has_tool_results(&messages),
-            "slice with only System messages must return false"
+        let mut agent = Agent::new(
+            provider,
+            MockChannel::new(vec![]),
+            create_test_registry(),
+            None,
+            5,
+            MockToolExecutor::no_tools(),
+        );
+        agent.services.session.lsp_hooks = Some(lsp_runner);
+        agent
+            .msg
+            .messages
+            .push(Message::from_legacy(Role::System, "system"));
+        agent.context_manager.budget = Some(crate::context::ContextBudget::new(200_000, 0.20));
+
+        let _ = agent.call_chat_with_tools_retry(&[], 2).await;
+
+        let lsp_count = agent
+            .msg
+            .messages
+            .iter()
+            .filter(|m| m.role == Role::System && m.content.starts_with("[lsp "))
+            .count();
+        assert_eq!(
+            lsp_count, 0,
+            "after retry the stale LSP message must be removed and not re-injected \
+            (queue was drained on first attempt)"
         );
     }
 }
