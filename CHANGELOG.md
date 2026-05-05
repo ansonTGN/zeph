@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- docs(readme): reposition the project README around memory-first operation, low-resource
+  deployment, multi-provider routing, and the current Gonka.ai integration path.
+
 ### Fixed
 
 - fix(memory.graph): add `extract_provider` to `[memory.graph]` config. Graph extraction tasks
