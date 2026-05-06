@@ -1,0 +1,197 @@
+---
+aliases:
+  - Speculation Engine
+  - Speculative Tool Execution
+  - PASTE Skill Activation
+  - Decoding Speculation
+tags:
+  - sdd
+  - spec
+  - core
+  - performance
+  - tools
+  - contract
+created: 2026-05-06
+status: implemented
+related:
+  - "[[MOC-specs]]"
+  - "[[constitution]]"
+  - "[[001-system-invariants/spec]]"
+  - "[[002-agent-loop/spec]]"
+  - "[[006-tools/spec]]"
+  - "[[003-llm-providers/spec]]"
+---
+
+# Spec: SpeculationEngine — Speculative Tool Execution
+
+> [!info]
+> Reduces tool-dispatch latency by pre-executing tool calls before the LLM finishes
+> generating them. Two complementary strategies share one bounded cache and one sweeper.
+> Landed across PRs #3636, #3640, #3647, #3651, #3654.
+
+## Sources
+
+### Internal
+
+| File | Contents |
+|---|---|
+| `crates/zeph-core/src/agent/speculative/mod.rs` | `SpeculationEngine` — main entry point, `try_dispatch`, `try_commit`, `end_turn` |
+| `crates/zeph-core/src/agent/speculative/cache.rs` | `SpeculativeCache`, `SpeculativeHandle`, TTL enforcement |
+| `crates/zeph-core/src/agent/speculative/partial_json.rs` | `PartialJsonParser` — streaming SSE JSON accumulation |
+| `crates/zeph-core/src/agent/speculative/stream_drainer.rs` | SSE stream integration — fires `try_dispatch` on partial tool completions |
+| `crates/zeph-core/src/agent/speculative/paste.rs` | PASTE path — `try_dispatch` at skill activation boundary |
+| `crates/zeph-core/src/agent/speculative/prediction.rs` | `Prediction`, `PredictionSource` |
+| `crates/zeph-config/src/tools.rs` | `SpeculativeConfig`, `SpeculationMode` |
+
+---
+
+## 1. Overview
+
+### Problem Statement
+
+Tool dispatch is synchronous with the LLM generation stream: the agent waits for the
+full tool-call JSON to arrive, then executes. For deterministic or near-deterministic
+tools (read-only filesystem reads, shell commands with known args), this is wasted
+latency — the arguments are often known from partial SSE output, or predictable from
+skill activation patterns.
+
+### Goal
+
+Pre-execute tool calls speculatively while the LLM is still generating, so that when
+the confirmed call arrives the result is already cached. On a commit hit, the confirmed
+call returns the pre-computed result immediately.
+
+### Out of Scope
+
+- Speculative writes to shared mutable state that cannot be rolled back
+- Any form of dry-run execution (confirmation is a pure policy query, not a sandbox run)
+- Speculation on tools from untrusted skills
+- Speculation in channels where trust cannot be established
+
+---
+
+## 2. Speculation Modes
+
+`SpeculationMode` is an enum in `zeph-config`:
+
+| Variant | Trigger |
+|---|---|
+| `Off` (default) | No speculation; engine is a no-op |
+| `Decoding` | SSE stream — `PartialJsonParser` accumulates tokens; `try_dispatch` fires when all required JSON fields are complete |
+| `Pattern` | PASTE — `try_dispatch` fires at skill-activation time using historical invocation sequences from SQLite |
+
+Both modes share the same `SpeculationEngine::try_dispatch` / `try_commit` API and the same `SpeculativeCache`.
+
+---
+
+## 3. Functional Requirements
+
+| ID | Requirement | Priority |
+|----|------------|----------|
+| FR-SE-001 | WHEN `mode = off` THE SYSTEM SHALL perform no speculative work — no allocations, no background tasks beyond the sweeper | must |
+| FR-SE-002 | WHEN `mode = decoding` THE SYSTEM SHALL parse partial SSE tool-call JSON via `PartialJsonParser::push()` and call `engine.try_dispatch()` as soon as all required fields (`tool_id`, `params`) are parseable | must |
+| FR-SE-003 | WHEN `mode = pattern` (PASTE) THE SYSTEM SHALL call `engine.try_dispatch()` at skill activation with a `PredictionSource::SkillActivation` prediction | must |
+| FR-SE-004 | WHEN `try_dispatch` is called AND `trust_level != Trusted` THE SYSTEM SHALL skip dispatch and return `false` | must |
+| FR-SE-005 | WHEN `try_dispatch` is called AND `executor.requires_confirmation_erased(&call)` returns `true` THE SYSTEM SHALL skip dispatch, increment `skipped_confirmation` metric, and return `false` — no tool is executed | must |
+| FR-SE-006 | WHEN `try_dispatch` is called AND all gates pass THE SYSTEM SHALL execute the tool in a background task via `TaskSupervisor::spawn_oneshot`, store the handle in `SpeculativeCache`, and return `true` | must |
+| FR-SE-007 | WHEN `try_commit` is called THE SYSTEM SHALL look up the cache by `(tool_id, args_hash, context_hash)`; on a hit, await the handle result and return it; on a miss return `None` | must |
+| FR-SE-008 | WHEN `end_turn` is called THE SYSTEM SHALL cancel all in-flight handles via `CancellationToken` and reset `SpeculativeMetrics` | must |
+| FR-SE-009 | WHEN the sweeper interval fires (every 5 s) THE SYSTEM SHALL evict handles whose `ttl_deadline` has passed | must |
+| FR-SE-010 | WHEN `SpeculationEngine` is dropped THE SYSTEM SHALL abort the sweeper task and cancel all cache handles | must |
+| FR-SE-011 | WHEN a `ToolStartEvent` is emitted for a speculatively dispatched call THE SYSTEM SHALL set `speculative: true` on the event | must |
+
+---
+
+## 4. Safety Invariants
+
+1. **Trust gate first.** `try_dispatch` returns `false` immediately when `trust_level != Trusted` — before any tool metadata is read.
+2. **Confirmation gate is a pure policy query.** `executor.requires_confirmation_erased(&call)` is a metadata read; it does NOT execute the tool. No double side-effects.
+3. **Speculative dispatch uses `execute_tool_call`, never `execute_tool_call_confirmed`.** There is no fenced-block bypass.
+4. **All handles are cancelled at turn boundary.** `end_turn()` calls `cache.cancel_all()`. No handle outlives its turn.
+5. **Sweeper shares the same cache inner `Arc`.** The sweeper operates on the live handle set, not a stale snapshot (C2 invariant).
+6. **Cache is bounded.** `max_in_flight` (config, default 8) is enforced by `SpeculativeCache::insert`; when full, the oldest handle is evicted and its task aborted.
+7. **TTL is per-handle.** Default `ttl_seconds = 30`. The sweeper enforces TTL independently of turn boundaries.
+
+---
+
+## 5. Config Schema
+
+```toml
+[tools.speculation]
+mode                = "off"     # "off" | "decoding" | "pattern"
+max_in_flight       = 8         # max concurrent speculative handles
+ttl_seconds         = 30        # per-handle TTL (sweeper enforced)
+confidence_threshold = 0.7      # minimum Prediction.confidence to dispatch
+```
+
+---
+
+## 6. Metrics (`SpeculativeMetrics`)
+
+Collected per turn and reset by `end_turn()`:
+
+| Field | Description |
+|---|---|
+| `committed` | Handles that matched and returned a cached result |
+| `cancelled` | Handles cancelled (mismatch, TTL, turn end) |
+| `evicted_oldest` | Handles evicted because `max_in_flight` was saturated |
+| `skipped_confirmation` | Calls skipped because `requires_confirmation` returned `true` |
+| `wasted_ms` | Total wall-clock ms spent in cancelled speculative work |
+
+---
+
+## 7. Wiring
+
+### SSE Decoding Path (`mode = decoding`)
+
+```
+LLM SSE stream
+    │
+    ▼
+stream_drainer::drain_stream()
+    │  PartialJsonParser::push(token)
+    │  → if complete_tool_args → engine.try_dispatch(prediction, trust_level)
+    │
+    ▼
+normal tool dispatch → engine.try_commit(call)
+    │  hit  → return cached result
+    │  miss → executor.execute_tool_call(call)
+```
+
+### PASTE Path (`mode = pattern`)
+
+```
+skill activation boundary (assembly.rs:1284)
+    │
+    ▼
+observe_paste_transition(native.rs:3576)
+    │  predict likely next tool calls from SQLite
+    │  → engine.try_dispatch(prediction, trust_level)
+    │
+    ▼
+normal tool dispatch → engine.try_commit(call)
+```
+
+---
+
+## 8. Key Invariants
+
+- NEVER dispatch speculatively when `trust_level != Trusted`
+- NEVER use `execute_tool_call_confirmed` (fenced-block path) for speculative dispatch
+- NEVER retain in-flight handles beyond turn boundary — `end_turn()` is mandatory
+- NEVER reuse a stale TTL-expired handle — sweeper evicts them within 5 s
+- NEVER share a sweeper operating on an empty clone of the cache (the sweeper arc is the same as the engine's cache arc)
+- NEVER set `speculative: false` on `ToolStartEvent` when the call originated from speculative dispatch
+
+---
+
+## 9. Acceptance Criteria
+
+- `cargo nextest run -p zeph-core -E 'test(speculation)'` passes
+- A `mode = decoding` session: SSE tool-call tokens accumulate in `PartialJsonParser`; `try_dispatch` fires before the LLM finishes; `try_commit` returns the cached result (committed counter > 0)
+- A `mode = pattern` session: PASTE activation calls `try_dispatch`; committed counter reflects hits
+- An untrusted skill call: `skipped_confirmation` or dispatch skipped entirely; no speculative task spawned
+- After `end_turn()`: `cache.is_empty()` is `true`; metrics reset to zero
+- `SpeculationEngine` drop: sweeper task aborted without panic (both supervised and raw paths)
+- `ToolStartEvent { speculative: true }` appears in the event stream for a speculative dispatch
+- `mode = off`: no background tasks spawned; `is_active()` returns `false`
