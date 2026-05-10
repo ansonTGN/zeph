@@ -233,6 +233,7 @@ impl Channel for TuiChannel {
         let _ = self.agent_event_tx.try_send(AgentEvent::ToolStart {
             tool_name: event.tool_name,
             command,
+            tool_call_id: event.tool_call_id,
         });
         Ok(())
     }
@@ -254,6 +255,7 @@ impl Channel for TuiChannel {
             diff: event.diff,
             filter_stats: event.filter_stats,
             kept_lines: event.kept_lines,
+            tool_call_id: event.tool_call_id,
         };
         match tokio::time::timeout(
             std::time::Duration::from_millis(100),
@@ -504,7 +506,7 @@ mod tests {
         .unwrap();
         let evt = agent_rx.recv().await.unwrap();
         assert!(
-            matches!(evt, AgentEvent::ToolStart { ref tool_name, ref command }
+            matches!(evt, AgentEvent::ToolStart { ref tool_name, ref command, .. }
                 if tool_name == "bash" && command == "ls -la"),
             "expected ToolStart with command from params"
         );
@@ -527,10 +529,34 @@ mod tests {
         .unwrap();
         let evt = agent_rx.recv().await.unwrap();
         assert!(
-            matches!(evt, AgentEvent::ToolStart { ref tool_name, ref command }
+            matches!(evt, AgentEvent::ToolStart { ref tool_name, ref command, .. }
                 if tool_name == "memory_search" && command == "memory_search"),
             "expected ToolStart with tool_name as fallback command"
         );
+    }
+
+    #[tokio::test]
+    async fn send_tool_start_forwards_tool_call_id_value() {
+        use zeph_core::channel::ToolStartEvent;
+        let (mut ch, _user_tx, mut agent_rx) = make_channel();
+        ch.send_tool_start(ToolStartEvent {
+            tool_name: "bash".into(),
+            tool_call_id: "uuid-abc-123".into(),
+            params: Some(serde_json::json!({"command": "echo hi"})),
+            parent_tool_use_id: None,
+            started_at: std::time::Instant::now(),
+            speculative: false,
+            sandbox_profile: None,
+        })
+        .await
+        .unwrap();
+        let evt = agent_rx.recv().await.unwrap();
+        match evt {
+            AgentEvent::ToolStart { tool_call_id, .. } => {
+                assert_eq!(tool_call_id, "uuid-abc-123");
+            }
+            other => panic!("expected ToolStart, got {other:?}"),
+        }
     }
 
     #[tokio::test]

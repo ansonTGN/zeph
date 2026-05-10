@@ -115,24 +115,47 @@ impl App {
                     if text.is_empty() { None } else { Some(text) };
                 self.auto_scroll();
             }
-            AgentEvent::ToolStart { tool_name, command } => {
+            AgentEvent::ToolStart {
+                tool_name,
+                command,
+                tool_call_id,
+            } => {
                 self.sessions.current_mut().status_label = None;
                 self.sessions.current_mut().messages.push(
                     ChatMessage::new(MessageRole::Tool, format!("$ {command}\n"))
                         .streaming()
-                        .with_tool(tool_name),
+                        .with_tool(tool_name)
+                        .with_tool_call_id(tool_call_id),
                 );
                 self.trim_messages();
                 self.auto_scroll();
             }
-            AgentEvent::ToolOutputChunk { chunk, .. } => {
-                if let Some(pos) = self
-                    .sessions
-                    .current_mut()
-                    .messages
-                    .iter()
-                    .rposition(|m| m.role == MessageRole::Tool && m.streaming)
-                {
+            AgentEvent::ToolOutputChunk {
+                chunk,
+                tool_call_id,
+                ..
+            } => {
+                let pos = if tool_call_id.is_empty() {
+                    // Legacy path: no tool_call_id, fall back to rposition.
+                    self.sessions
+                        .current()
+                        .messages
+                        .iter()
+                        .rposition(|m| m.role == MessageRole::Tool && m.streaming)
+                } else {
+                    let found =
+                        self.sessions.current().messages.iter().rposition(|m| {
+                            m.tool_call_id.as_deref() == Some(tool_call_id.as_str())
+                        });
+                    if found.is_none() {
+                        tracing::warn!(
+                            %tool_call_id,
+                            "ToolOutputChunk: no message with matching tool_call_id — dropping chunk"
+                        );
+                    }
+                    found
+                };
+                if let Some(pos) = pos {
                     self.sessions.current_mut().messages[pos]
                         .content
                         .push_str(&chunk);
@@ -146,9 +169,17 @@ impl App {
                 diff,
                 filter_stats,
                 kept_lines,
+                tool_call_id,
                 ..
             } => {
-                self.handle_tool_output_event(tool_name, output, diff, filter_stats, kept_lines);
+                self.handle_tool_output_event(
+                    tool_name,
+                    output,
+                    diff,
+                    filter_stats,
+                    kept_lines,
+                    &tool_call_id,
+                );
             }
             AgentEvent::ConfirmRequest {
                 prompt,
@@ -212,6 +243,7 @@ impl App {
         diff: Option<zeph_core::DiffData>,
         filter_stats: Option<String>,
         kept_lines: Option<Vec<usize>>,
+        tool_call_id: &str,
     ) {
         debug!(
             %tool_name,
@@ -220,13 +252,30 @@ impl App {
             output_len = output.len(),
             "TUI ToolOutput event received"
         );
-        if let Some(pos) = self
-            .sessions
-            .current_mut()
-            .messages
-            .iter()
-            .rposition(|m| m.role == MessageRole::Tool && m.streaming)
-        {
+        // Locate the streaming tool message: prefer id-based lookup, fall back to rposition
+        // for legacy paths where tool_call_id is empty.
+        let pos = if tool_call_id.is_empty() {
+            self.sessions
+                .current()
+                .messages
+                .iter()
+                .rposition(|m| m.role == MessageRole::Tool && m.streaming)
+        } else {
+            let found = self
+                .sessions
+                .current()
+                .messages
+                .iter()
+                .rposition(|m| m.tool_call_id.as_deref() == Some(tool_call_id));
+            if found.is_none() {
+                tracing::warn!(
+                    tool_call_id,
+                    "ToolOutput: no message with matching tool_call_id — skipping finalization"
+                );
+            }
+            found
+        };
+        if let Some(pos) = pos {
             // Finalize existing streaming tool message (shell or native path with ToolStart).
             // Replace content after the header line ("$ cmd\n") with the canonical body_display
             // from ToolOutputEvent. Streaming chunks (Path B) may already occupy that space;
@@ -273,5 +322,109 @@ impl App {
     #[must_use]
     pub fn confirm_state(&self) -> Option<&ConfirmState> {
         self.confirm_state.as_ref()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::sync::mpsc;
+
+    use crate::event::AgentEvent;
+    use crate::types::MessageRole;
+
+    use super::super::{App, ChatMessage};
+
+    fn make_app() -> App {
+        let (user_tx, user_rx) = mpsc::channel(16);
+        let (_, agent_rx) = mpsc::channel(16);
+        let mut app = App::new(user_tx, agent_rx);
+        let _ = user_rx;
+        app.sessions.current_mut().messages.clear();
+        app
+    }
+
+    /// Push a streaming Tool message with a specific `tool_call_id` directly onto the session.
+    fn push_tool_msg(app: &mut App, id: &str) {
+        let msg = ChatMessage::new(MessageRole::Tool, format!("$ cmd_{id}\n"))
+            .streaming()
+            .with_tool_call_id(id.to_owned());
+        app.sessions.current_mut().messages.push(msg);
+    }
+
+    #[test]
+    fn tool_output_chunk_routes_by_id_out_of_order() {
+        let mut app = make_app();
+        push_tool_msg(&mut app, "a");
+        push_tool_msg(&mut app, "b");
+        push_tool_msg(&mut app, "c");
+
+        // Deliver chunks out of order: c, a, b, a, c
+        for (id, chunk) in [
+            ("c", "c1"),
+            ("a", "a1"),
+            ("b", "b1"),
+            ("a", "a2"),
+            ("c", "c2"),
+        ] {
+            app.handle_agent_event(AgentEvent::ToolOutputChunk {
+                tool_name: "bash".into(),
+                command: String::new(),
+                chunk: chunk.to_owned(),
+                tool_call_id: id.to_owned(),
+            });
+        }
+
+        let msgs = app.messages();
+        assert_eq!(msgs.len(), 3);
+        // Message order: a=0, b=1, c=2
+        assert_eq!(msgs[0].content, "$ cmd_a\na1a2");
+        assert_eq!(msgs[1].content, "$ cmd_b\nb1");
+        assert_eq!(msgs[2].content, "$ cmd_c\nc1c2");
+    }
+
+    #[test]
+    fn tool_output_chunk_with_unknown_id_is_dropped() {
+        let mut app = make_app();
+        push_tool_msg(&mut app, "known");
+
+        // Chunk for an id that has no matching message — must be silently dropped.
+        app.handle_agent_event(AgentEvent::ToolOutputChunk {
+            tool_name: "bash".into(),
+            command: String::new(),
+            chunk: "should-not-appear".to_owned(),
+            tool_call_id: "unknown-xyz".to_owned(),
+        });
+
+        // The known message must be unchanged.
+        assert_eq!(app.messages().len(), 1);
+        assert_eq!(app.messages()[0].content, "$ cmd_known\n");
+    }
+
+    #[test]
+    fn tool_output_finalizes_correct_message_by_id() {
+        let mut app = make_app();
+        push_tool_msg(&mut app, "t1");
+        push_tool_msg(&mut app, "t2");
+
+        // Finalize t1 with ToolOutput.
+        app.handle_agent_event(AgentEvent::ToolOutput {
+            tool_name: "bash".into(),
+            command: "$ cmd_t1\n".into(),
+            output: "final-output-t1".to_owned(),
+            success: true,
+            diff: None,
+            filter_stats: None,
+            kept_lines: None,
+            tool_call_id: "t1".to_owned(),
+        });
+
+        let msgs = app.messages();
+        assert_eq!(msgs.len(), 2);
+        // t1 must be finalized (not streaming) with the canonical output.
+        assert!(!msgs[0].streaming);
+        assert!(msgs[0].content.contains("final-output-t1"));
+        // t2 must still be streaming and unchanged.
+        assert!(msgs[1].streaming);
+        assert_eq!(msgs[1].content, "$ cmd_t2\n");
     }
 }
