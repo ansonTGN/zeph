@@ -41,7 +41,7 @@ related:
 
 ### External
 
-- [Cocoon project — Telegram](https://cocoon.tg)
+- [Cocoon](https://cocoon.org)
 - [TON blockchain documentation](https://docs.ton.org)
 - [Intel TDX overview](https://www.intel.com/content/www/us/en/developer/articles/technical/intel-trust-domain-extensions.html)
 - [OpenAI Chat Completions API reference](https://platform.openai.com/docs/api-reference/chat)

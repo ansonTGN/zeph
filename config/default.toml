@@ -126,7 +126,7 @@ embedding_model = "qwen3-embedding"
 # model = "Qwen/Qwen3-235B-A22B-Instruct-2507-FP8"
 # max_tokens = 4096
 
-# Cocoon — decentralized AI inference via local TEE sidecar (https://cocoon.tg)
+# Cocoon — decentralized AI inference via local TEE sidecar (https://cocoon.org)
 # Requires the Cocoon client runner at localhost:10000 (--features cocoon).
 # Set access hash in vault: zeph vault set ZEPH_COCOON_ACCESS_HASH <hash>
 # [[llm.providers]]

@@ -1,6 +1,6 @@
 # Cocoon Decentralized TEE Provider
 
-[Cocoon](https://cocoon.ai) is a decentralized inference network that executes LLM requests in Trusted Execution Environments (TEEs) on a peer-to-peer network of secure nodes. Zeph supports native integration with optional speech-to-text transcription via the Cocoon sidecar.
+[Cocoon](https://cocoon.org) is a decentralized inference network that executes LLM requests in Trusted Execution Environments (TEEs) on a peer-to-peer network of secure nodes. Zeph supports native integration with optional speech-to-text transcription via the Cocoon sidecar.
 
 Cocoon is particularly useful for:
 
@@ -15,7 +15,7 @@ Cocoon is particularly useful for:
 
 1. Install the Cocoon sidecar (local deployment only):
    ```bash
-   # Download from https://cocoon.ai or build from source
+   # Download from https://cocoon.org or build from source
    cocoon --version
    ```
 
