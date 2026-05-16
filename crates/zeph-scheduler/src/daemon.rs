@@ -21,6 +21,7 @@
 
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::time::Duration;
 
 use crate::error::SchedulerError;
 use crate::pidfile::PidFile;
@@ -42,6 +43,7 @@ use crate::scheduler::Scheduler;
 ///     catch_up: true,
 ///     tick_secs: 60,
 ///     shutdown_grace_secs: 30,
+///     handler_timeout_secs: 300,
 /// };
 /// ```
 #[derive(Debug, Clone)]
@@ -60,6 +62,9 @@ pub struct DaemonConfig {
     /// Clamped to 60 s internally by [`Scheduler::run_with_interval_and_grace`].
     /// Values above 60 are accepted without error but have no additional effect.
     pub shutdown_grace_secs: u64,
+    /// Maximum seconds a task handler may run before being forcibly cancelled.
+    /// Set to `0` to disable the timeout entirely.
+    pub handler_timeout_secs: u64,
 }
 
 /// Status of the scheduler daemon, returned by [`daemon_status`].
@@ -136,6 +141,7 @@ pub async fn run_foreground(
         "scheduler daemon started (foreground)"
     );
 
+    scheduler = scheduler.with_handler_timeout(Duration::from_secs(cfg.handler_timeout_secs));
     scheduler.init().await?;
 
     if cfg.catch_up {
@@ -346,6 +352,7 @@ mod tests {
             catch_up: true,
             tick_secs: 60,
             shutdown_grace_secs: 30,
+            handler_timeout_secs: 300,
         }
     }
 
