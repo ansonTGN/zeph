@@ -134,7 +134,6 @@ async fn handle_run_baseline(
         scenario,
         base_completed_ids,
         provider.clone(),
-        no_deterministic,
     )
     .await?;
 
@@ -146,7 +145,6 @@ async fn handle_run_baseline(
         &data_dir,
         &config.llm.embedding_model.clone(),
         provider,
-        no_deterministic,
     )
     .await?;
 
@@ -176,7 +174,6 @@ async fn run_memory_off_pass(
     scenario: Option<&str>,
     completed_ids: std::collections::HashSet<String>,
     provider: zeph_llm::any::AnyProvider,
-    no_deterministic: bool,
 ) -> anyhow::Result<(BenchRun, ResultWriter)> {
     let dir = output.join("baseline").join("memory-off");
     let writer = ResultWriter::new(&dir)?;
@@ -185,7 +182,7 @@ async fn run_memory_off_pass(
         completed_ids,
         memory_mode: MemoryMode::Off,
     };
-    let runner = BenchRunner::new(provider, no_deterministic);
+    let runner = BenchRunner::new(provider);
     let mut run = dispatch_run(&runner, dataset, data_path, opts).await?;
     run.status = RunStatus::Completed;
     run.finished_at = finished_at_now();
@@ -208,7 +205,6 @@ async fn run_memory_on_pass(
     data_dir: &std::path::Path,
     embedding_model: &str,
     provider: zeph_llm::any::AnyProvider,
-    no_deterministic: bool,
 ) -> anyhow::Result<(BenchRun, ResultWriter)> {
     let run_id = format!("bench-on-{}", baseline_run_id_suffix());
     let memory_params = BenchMemoryParams {
@@ -224,7 +220,7 @@ async fn run_memory_on_pass(
         completed_ids: std::collections::HashSet::new(),
         memory_mode: MemoryMode::On,
     };
-    let runner = BenchRunner::new(provider, no_deterministic).with_memory_params(memory_params);
+    let runner = BenchRunner::new(provider).with_memory_params(memory_params);
     let mut run = dispatch_run(&runner, dataset, data_path, opts).await?;
     run.status = RunStatus::Completed;
     run.finished_at = finished_at_now();
@@ -416,7 +412,7 @@ async fn handle_run(
         memory_mode: MemoryMode::Off,
     };
 
-    let runner = BenchRunner::new(provider, no_deterministic);
+    let runner = BenchRunner::new(provider);
     let mut run = dispatch_run(&runner, dataset, &data_path, opts).await?;
 
     run.status = RunStatus::Completed;
