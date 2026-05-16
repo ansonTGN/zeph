@@ -29,6 +29,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- fix(scheduler): replace sync `EnterGuard` held across `.await` in `catch_up_missed` with `.instrument()` to comply with tracing invariant (#4024)
+- fix(gateway): rate limiter now supports `trusted_proxy_cidrs` config — when set, uses rightmost-untrusted XFF IP instead of TCP peer address to prevent bypass behind reverse proxies (#3909)
+- refactor(gateway): `spawn_gateway_server` now returns both `JoinHandle`s to the caller; panics propagate and tasks can be joined during shutdown (#3907)
 - `zeph-subagent` hooks: eliminated a deadlock in `fire_shell_hook` where `tokio::join!` caused
   `read_fut` to block on stdout EOF while `child.kill()` was gated behind the same join, preventing
   the process from ever exiting. Replaced with a sequential await pattern: wait with timeout first,
