@@ -51,8 +51,16 @@ pub mod background;
 pub use background::BackgroundRunSnapshot;
 use background::{BackgroundCompletion, BackgroundHandle, RunId};
 
+pub mod deobfuscate;
+pub use deobfuscate::deobfuscate as deobfuscate_command;
+
+pub mod safe_fix;
+pub use safe_fix::SafeFixSuggestion;
+
 mod transaction;
 use transaction::{TransactionSnapshot, affected_paths, build_scope_matchers, is_write_command};
+
+use crate::risk_chain::RiskChainAccumulator;
 
 const DEFAULT_BLOCKED: &[&str] = &[
     "rm -rf /", "sudo", "mkfs", "dd if=", "curl", "wget", "nc ", "ncat", "netcat", "shutdown",
@@ -276,6 +284,10 @@ pub struct ShellExecutor {
     allowed_paths_canonical: Vec<PathBuf>,
     /// Optional default environment name (from `[execution] default_env`).
     default_env: Option<String>,
+    /// Optional per-turn risk chain accumulator for multi-step attack detection.
+    risk_chain: Option<Arc<RiskChainAccumulator>>,
+    /// Cumulative score threshold above which the risk chain blocks execution.
+    risk_chain_threshold: f32,
 }
 
 /// Fully resolved execution context for a single shell invocation.
@@ -346,6 +358,8 @@ impl ShellExecutor {
             environments: Arc::new(HashMap::new()),
             allowed_paths_canonical,
             default_env: None,
+            risk_chain: None,
+            risk_chain_threshold: config.risk_chain_threshold.unwrap_or(0.7),
         }
     }
 
@@ -357,6 +371,16 @@ impl ShellExecutor {
     pub fn with_sandbox(mut self, sandbox: Arc<dyn Sandbox>, policy: SandboxPolicy) -> Self {
         self.sandbox = Some(sandbox);
         self.sandbox_policy = Some(policy);
+        self
+    }
+
+    /// Attach a per-turn risk chain accumulator for multi-step attack detection.
+    ///
+    /// When set, each command is recorded into the accumulator. If the cumulative
+    /// risk score exceeds `threshold`, the command is blocked before execution.
+    #[must_use]
+    pub fn with_risk_chain(mut self, accumulator: Arc<RiskChainAccumulator>) -> Self {
+        self.risk_chain = Some(accumulator);
         self
     }
 
@@ -1009,32 +1033,66 @@ impl ShellExecutor {
     }
 
     /// Check blocklist, permission policy, and confirmation requirements for `block`.
+    #[allow(clippy::too_many_lines)]
     async fn check_permissions(&self, block: &str, skip_confirm: bool) -> Result<(), ToolError> {
+        // Deobfuscate before any policy check to prevent bypass via encoding tricks.
+        let normalized = deobfuscate::deobfuscate(block);
+        let effective = normalized.as_str();
+
         // Always check the blocklist first — it is a hard security boundary
         // that must not be bypassed by the PermissionPolicy layer.
-        if let Some(blocked) = self.find_blocked_command(block) {
-            let err = ToolError::Blocked {
-                command: blocked.clone(),
+        // Check both the original block (handles subshell metachar detection) and the
+        // normalized form (handles hex/octal bypass). First match wins.
+        let blocked_cmd = self
+            .find_blocked_command(block)
+            .or_else(|| self.find_blocked_command(effective));
+        if let Some(blocked) = blocked_cmd {
+            let fix = safe_fix::suggest_fix(effective);
+            let err = if let Some(suggestion) = fix {
+                let reason = format!("{blocked} — suggestion: {}", suggestion.alternative);
+                self.log_audit(
+                    block,
+                    AuditResult::Blocked {
+                        reason: format!("blocked command: {reason}"),
+                    },
+                    0,
+                    None,
+                    None,
+                    false,
+                )
+                .await;
+                ToolError::BlockedWithFix {
+                    command: blocked,
+                    suggestion: Some(suggestion),
+                }
+            } else {
+                self.log_audit(
+                    block,
+                    AuditResult::Blocked {
+                        reason: format!("blocked command: {blocked}"),
+                    },
+                    0,
+                    None,
+                    None,
+                    false,
+                )
+                .await;
+                ToolError::Blocked { command: blocked }
             };
-            self.log_audit(
-                block,
-                AuditResult::Blocked {
-                    reason: format!("blocked command: {blocked}"),
-                },
-                0,
-                Some(&err),
-                None,
-                false,
-            )
-            .await;
             return Err(err);
         }
 
         if let Some(ref policy) = self.permission_policy {
-            match policy.check("bash", block) {
+            match policy.check("bash", effective) {
                 PermissionAction::Deny => {
-                    let err = ToolError::Blocked {
-                        command: block.to_owned(),
+                    let err = match safe_fix::suggest_fix(effective) {
+                        Some(suggestion) => ToolError::BlockedWithFix {
+                            command: effective.to_owned(),
+                            suggestion: Some(suggestion),
+                        },
+                        None => ToolError::Blocked {
+                            command: effective.to_owned(),
+                        },
                     };
                     self.log_audit(
                         block,
@@ -1042,7 +1100,7 @@ impl ShellExecutor {
                             reason: "denied by permission policy".to_owned(),
                         },
                         0,
-                        Some(&err),
+                        None,
                         None,
                         false,
                     )
@@ -1051,15 +1109,43 @@ impl ShellExecutor {
                 }
                 PermissionAction::Ask if !skip_confirm => {
                     return Err(ToolError::ConfirmationRequired {
-                        command: block.to_owned(),
+                        command: effective.to_owned(),
                     });
                 }
                 _ => {}
             }
-        } else if !skip_confirm && let Some(pattern) = self.find_confirm_command(block) {
-            return Err(ToolError::ConfirmationRequired {
-                command: pattern.to_owned(),
-            });
+        } else if !skip_confirm {
+            // Check original block first (catches subshell metacharacters like `` ` ``),
+            // then normalized form (catches obfuscated confirmation-required patterns).
+            let confirm_pattern = self
+                .find_confirm_command(block)
+                .or_else(|| self.find_confirm_command(effective));
+            if let Some(pattern) = confirm_pattern {
+                return Err(ToolError::ConfirmationRequired {
+                    command: pattern.to_owned(),
+                });
+            }
+        }
+
+        // Risk chain check — record the call and block if threshold exceeded.
+        if let Some(ref chain) = self.risk_chain {
+            let verdict = chain.record("bash", effective, self.risk_chain_threshold);
+            if verdict.should_block {
+                let chain_name = verdict
+                    .chain_pattern
+                    .unwrap_or_else(|| "unknown".to_owned());
+                tracing::warn!(
+                    chain = chain_name,
+                    score = verdict.cumulative_score,
+                    "risk chain threshold exceeded"
+                );
+                return Err(ToolError::Blocked {
+                    command: format!(
+                        "risk chain blocked: {} (score {:.2})",
+                        chain_name, verdict.cumulative_score
+                    ),
+                });
+            }
         }
 
         Ok(())
