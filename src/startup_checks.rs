@@ -90,6 +90,7 @@ mod tests {
                 bot_to_bot: false,
                 allowed_bots: vec![],
                 max_bot_chain_depth: 3,
+                allowed_tools: None,
             }),
             ..Default::default()
         };
@@ -128,6 +129,7 @@ mod tests {
                 allowed_role_ids: vec![],
                 allowed_channel_ids: vec![],
                 skills: ChannelSkillsConfig::default(),
+                allowed_tools: None,
             }),
             ..Default::default()
         };
@@ -148,6 +150,7 @@ mod tests {
                 allowed_user_ids: vec![],
                 allowed_channel_ids: vec![],
                 skills: ChannelSkillsConfig::default(),
+                allowed_tools: None,
             }),
             ..Default::default()
         };
