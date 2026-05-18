@@ -6,7 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### Fixed
+### Changed
+
+- `zeph-core`: rename `ShadowEvent` → `SentinelEvent` in `shadow_sentinel` module to eliminate
+  naming collision with `zeph_sanitizer::ShadowMemory`; `ShadowEventStore` and `ShadowEventRow`
+  retain their names (closes #4379).### Fixed
 
 - `zeph-core`: `memory_save` tool now returns "Saved to session memory (ephemeral — not
   available after session ends)." in `--bare` mode instead of the persistent-mode message that
@@ -20,7 +24,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
-- `zeph-memory`, `zeph-config`: Five-signal SYNAPSE retrieval (#4374). Extends the recall
+- `zeph-common`: new `http_middleware` module (feature `http-middleware`) — shared bearer-token
+  auth and per-IP rate-limit axum middleware extracted from `zeph-gateway` and `zeph-a2a`;
+  eliminates duplicated `AuthConfig`, `RateLimitState`, `Cidr`, `auth_middleware`,
+  `rate_limit_middleware` implementations; gateway's pre-hashing + `subtle::ConstantTimeEq`
+  approach is canonical (closes #4387).- `zeph-memory`, `zeph-config`: Five-signal SYNAPSE retrieval (#4374). Extends the recall
   pipeline with three signals beyond the two-signal baseline (recency + relevance): access
   frequency (facts queried more often rank higher), causal distance (facts closer to the current
   goal entity in the MAGMA graph rank higher), and novelty (facts created earlier in the session
