@@ -2841,6 +2841,7 @@ async fn shutdown_terminates_long_running_background() {
 }
 
 #[tokio::test]
+#[cfg(not(target_os = "windows"))]
 async fn background_runs_snapshot_returns_active_run() {
     use std::time::Duration;
 
@@ -2881,6 +2882,7 @@ mod resolve_context {
 
     use super::*;
     use crate::ExecutionContext;
+    #[cfg(not(target_os = "windows"))]
     use crate::executor::ToolCall;
 
     /// Build a `ShellExecutor` whose only `allowed_path` is `dir`, so sandbox checks
