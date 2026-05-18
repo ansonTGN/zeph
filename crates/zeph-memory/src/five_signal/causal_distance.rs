@@ -50,6 +50,11 @@ impl CausalDistanceComputer {
     /// # Errors
     ///
     /// Returns an error if the graph BFS query fails.
+    #[tracing::instrument(
+        name = "memory.five_signal.causal_distance.compute",
+        skip(self, entity_ids),
+        fields(goal_entity_id, candidate_count = entity_ids.len())
+    )]
     pub async fn compute(
         &mut self,
         goal_entity_id: Option<i64>,

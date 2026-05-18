@@ -35,6 +35,11 @@ impl AccessFrequencyCache {
     /// # Errors
     ///
     /// Returns an error if the database query fails.
+    #[tracing::instrument(
+        name = "memory.five_signal.access_frequency.load",
+        skip(self, fact_ids),
+        fields(fact_count = fact_ids.len())
+    )]
     pub async fn load_for_candidates(
         &self,
         session_id: &str,
@@ -95,6 +100,11 @@ impl AccessFrequencyCache {
     /// Record a fact access event in `fact_access_log`.
     ///
     /// Failures are logged as `WARN` and do not propagate — access logging is non-critical.
+    #[tracing::instrument(
+        name = "memory.five_signal.access_frequency.log",
+        skip(self, fact_type, session_id),
+        fields(fact_id = fact_id.0)
+    )]
     pub async fn log_access(&self, fact_id: MessageId, fact_type: &str, session_id: &str) {
         tracing::debug!("five_signal: logging access");
 

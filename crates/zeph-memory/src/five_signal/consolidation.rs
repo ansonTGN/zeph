@@ -82,20 +82,16 @@ impl TaskHandler for ConsolidationHandler {
 
 #[cfg(feature = "scheduler")]
 impl ConsolidationHandler {
+    #[tracing::instrument(name = "memory.five_signal.consolidation.run_once", skip(self))]
     async fn run_once(&self) -> Result<(), MemoryError> {
         use sqlx::Row as _;
 
         tracing::info!("five_signal: consolidation daemon run started");
-
         let start = std::time::Instant::now();
         let rt = &self.runtime;
         rt.metrics.inc_consolidation_run();
 
-        // Query the most recent top-K episodic facts.
-        // NOTE: ORDER BY id DESC retrieves the newest facts, not the highest-scoring ones.
-        // This is a known MVP trade-off: scoring the full episodic table would violate
-        // NFR-004 runtime bounds. High-value older facts are evaluated in subsequent runs
-        // as the session grows.
+        // NOTE: ORDER BY id DESC retrieves newest facts — known MVP trade-off per NFR-004.
         let rows = sqlx::query(
             "SELECT id, created_at, qdrant_promoted, memory_tier \
              FROM messages \
@@ -109,41 +105,42 @@ impl ConsolidationHandler {
         .await
         .map_err(|e| MemoryError::Db(e.into()))?;
 
+        let batch: Vec<_> = rows.iter().take(self.config.batch_size).collect();
+        let processed = batch.len();
+        let candidate_ids: Vec<MessageId> = batch
+            .iter()
+            .map(|row| MessageId(row.get::<i64, _>("id")))
+            .collect();
+        let freq_scores = rt
+            .access_cache
+            .load_for_candidates(&rt.session_id, &candidate_ids)
+            .await
+            .unwrap_or_default();
+        let neutral_causal =
+            crate::five_signal::causal_distance::CausalDistanceComputer::distance_to_score(
+                rt.config.neutral_causal_distance,
+            );
+
         let mut promote_ids: Vec<i64> = Vec::new();
         let mut demote_ids: Vec<MessageId> = Vec::new();
-        let mut processed: usize = 0;
 
-        for row in &rows {
-            if processed >= self.config.batch_size {
-                break;
-            }
-            processed += 1;
-
+        for row in &batch {
             let fact_id: i64 = row.get("id");
-            let created_at: i64 = row.get("created_at");
-            let qdrant_promoted: i64 = row.get("qdrant_promoted");
-            let memory_tier: Option<String> = row.try_get("memory_tier").ok().flatten();
-
-            let novelty = rt.novelty_computer.compute(created_at);
-            // Frequency and causal signals require per-fact async I/O. The daemon uses
-            // neutral values (0.5) to keep runtime bounded (NFR-004). A future
-            // enhancement can hydrate signals with a batched pre-fetch.
-            let frequency = 0.5_f64;
-            let causal =
-                crate::five_signal::causal_distance::CausalDistanceComputer::distance_to_score(
-                    rt.config.neutral_causal_distance,
-                );
-            let recency = novelty;
-
+            let novelty = rt.novelty_computer.compute(row.get("created_at"));
+            let frequency = freq_scores.get(&MessageId(fact_id)).copied().unwrap_or(0.0);
             let w = &rt.weights;
-            let score = w.w_recency * recency
+            let score = w.w_recency * novelty
                 + w.w_relevance * 0.5 // neutral relevance — no embedding at daemon time
                 + w.w_frequency * frequency
-                + w.w_causal * causal
+                + w.w_causal * neutral_causal
                 + w.w_novelty * novelty;
-
-            let already_promoted =
-                qdrant_promoted != 0 || memory_tier.as_deref() == Some("semantic");
+            let already_promoted = row.get::<i64, _>("qdrant_promoted") != 0
+                || row
+                    .try_get::<Option<String>, _>("memory_tier")
+                    .ok()
+                    .flatten()
+                    .as_deref()
+                    == Some("semantic");
 
             if score >= self.config.promotion_score_threshold && !already_promoted {
                 promote_ids.push(fact_id);
@@ -152,9 +149,24 @@ impl ConsolidationHandler {
             }
         }
 
-        // Promote: update SQLite tier (Qdrant upsert requires embedding; deferred to write path).
-        let mut promoted: u64 = 0;
-        for fact_id in &promote_ids {
+        let promoted = self.apply_promotions(&promote_ids, rt).await;
+        let demoted = self.apply_demotions(&demote_ids, rt).await;
+
+        rt.metrics.add_promoted(promoted);
+        rt.metrics.add_demoted(demoted);
+        tracing::info!(
+            promoted,
+            demoted,
+            processed,
+            run_duration_ms = start.elapsed().as_millis(),
+            "five_signal consolidation daemon run complete"
+        );
+        Ok(())
+    }
+
+    async fn apply_promotions(&self, promote_ids: &[i64], rt: &FiveSignalRuntime) -> u64 {
+        let mut count: u64 = 0;
+        for fact_id in promote_ids {
             tracing::debug!(fact_id, "five_signal: promoting fact");
             let res = sqlx::query(
                 "UPDATE messages SET memory_tier = 'semantic', qdrant_promoted = 1 WHERE id = ?1",
@@ -165,22 +177,25 @@ impl ConsolidationHandler {
             if let Err(e) = res {
                 tracing::warn!(fact_id, error = %e, "five_signal: failed to promote fact");
             } else {
-                promoted += 1;
+                count += 1;
             }
         }
+        count
+    }
 
-        // Demote: remove from Qdrant if available, update SQLite tier.
-        let mut demoted: u64 = 0;
+    async fn apply_demotions(&self, demote_ids: &[MessageId], rt: &FiveSignalRuntime) -> u64 {
         if let Some(qdrant) = &rt.qdrant
             && !demote_ids.is_empty()
-            && let Err(e) = qdrant.delete_by_message_ids(&demote_ids).await
+            && let Err(e) = qdrant.delete_by_message_ids(demote_ids).await
         {
             tracing::warn!(error = %e, "five_signal: Qdrant delete failed during demotion");
         }
-        for msg_id in &demote_ids {
+        let mut count: u64 = 0;
+        for msg_id in demote_ids {
             tracing::debug!(fact_id = msg_id.0, "five_signal: demoting fact");
             let res = sqlx::query(
-                "UPDATE messages SET memory_tier = 'episodic_only', qdrant_promoted = 0 WHERE id = ?1",
+                "UPDATE messages SET memory_tier = 'episodic_only', qdrant_promoted = 0 \
+                 WHERE id = ?1",
             )
             .bind(msg_id.0)
             .execute(&rt.pool)
@@ -188,21 +203,9 @@ impl ConsolidationHandler {
             if let Err(e) = res {
                 tracing::warn!(fact_id = msg_id.0, error = %e, "five_signal: failed to demote fact");
             } else {
-                demoted += 1;
+                count += 1;
             }
         }
-
-        rt.metrics.add_promoted(promoted);
-        rt.metrics.add_demoted(demoted);
-
-        tracing::info!(
-            promoted,
-            demoted,
-            processed,
-            run_duration_ms = start.elapsed().as_millis(),
-            "five_signal consolidation daemon run complete"
-        );
-
-        Ok(())
+        count
     }
 }
