@@ -140,7 +140,6 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
 
     use super::*;
     use crate::loader::{Skill, SkillMeta};
@@ -149,16 +148,7 @@ mod tests {
         Skill {
             meta: SkillMeta {
                 name: name.into(),
-                description: String::new(),
-                compatibility: None,
-                license: None,
-                metadata: Vec::new(),
-                allowed_tools: Vec::new(),
-                requires_secrets: Vec::new(),
-                skill_dir: PathBuf::new(),
-                source_url: None,
-                git_hash: None,
-                category: None,
+                ..Default::default()
             },
             body: String::new(),
         }

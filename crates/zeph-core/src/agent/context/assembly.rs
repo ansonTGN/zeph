@@ -1864,7 +1864,6 @@ mod tests {
     #[test]
     fn group_structured_branch_produces_active_skill_tags_when_above_threshold() {
         use std::collections::HashMap;
-        use std::path::PathBuf;
         use zeph_common::SkillTrustLevel;
         use zeph_skills::group::{GroupResult, group_skills};
         use zeph_skills::loader::{Skill, SkillMeta};
@@ -1875,15 +1874,7 @@ mod tests {
                 meta: SkillMeta {
                     name: name.into(),
                     description: "desc".into(),
-                    compatibility: None,
-                    license: None,
-                    metadata: vec![],
-                    allowed_tools: vec![],
-                    requires_secrets: vec![],
-                    skill_dir: PathBuf::new(),
-                    source_url: None,
-                    git_hash: None,
-                    category: None,
+                    ..Default::default()
                 },
                 body: "body".into(),
             }
@@ -1942,7 +1933,6 @@ mod tests {
 
     #[test]
     fn group_structured_branch_falls_back_to_flat_when_below_threshold() {
-        use std::path::PathBuf;
         use zeph_skills::group::{GroupResult, group_skills};
         use zeph_skills::loader::{Skill, SkillMeta};
 
@@ -1951,15 +1941,7 @@ mod tests {
                 meta: SkillMeta {
                     name: name.into(),
                     description: "desc".into(),
-                    compatibility: None,
-                    license: None,
-                    metadata: vec![],
-                    allowed_tools: vec![],
-                    requires_secrets: vec![],
-                    skill_dir: PathBuf::new(),
-                    source_url: None,
-                    git_hash: None,
-                    category: None,
+                    ..Default::default()
                 },
                 body: "body".into(),
             }
@@ -2004,15 +1986,7 @@ mod tests {
         let make_meta = |name: &str| SkillMeta {
             name: name.to_owned(),
             description: "desc".to_owned(),
-            compatibility: None,
-            license: None,
-            metadata: vec![],
-            allowed_tools: vec![],
-            requires_secrets: vec![],
-            skill_dir: std::path::PathBuf::new(),
-            source_url: None,
-            git_hash: None,
-            category: None,
+            ..Default::default()
         };
         let skills = [make_meta("blocked-skill"), make_meta("allowed-skill")];
 
@@ -2044,7 +2018,6 @@ mod tests {
     /// so `group_skills()` looks up the wrong embedding and produces incorrect support groups.
     #[test]
     fn channel_allowlist_filter_rebuilds_matched_indices() {
-        use std::path::PathBuf;
         use zeph_skills::group::{GroupResult, group_skills};
         use zeph_skills::loader::{Skill, SkillMeta};
 
@@ -2053,15 +2026,7 @@ mod tests {
                 meta: SkillMeta {
                     name: name.into(),
                     description: "desc".into(),
-                    compatibility: None,
-                    license: None,
-                    metadata: vec![],
-                    allowed_tools: vec![],
-                    requires_secrets: vec![],
-                    skill_dir: PathBuf::new(),
-                    source_url: None,
-                    git_hash: None,
-                    category: None,
+                    ..Default::default()
                 },
                 body: "body".into(),
             }
