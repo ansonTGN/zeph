@@ -18,6 +18,8 @@ exclude = [
   "https://gist.github.com/egmontkob/.*",
   # VS Marketplace — blocks CI user-agents
   "https://marketplace.visualstudio.com/.*",
+  # openmetrics.io — resets connections from CI runners
+  "https://openmetrics.io/.*",
 ]
 
 # Skip URLs that require authentication
