@@ -107,6 +107,11 @@ pub struct SkillMeta {
     ///
     /// Max 20 triggers per skill; each 3–200 chars. Excess or invalid entries are silently dropped.
     pub triggers: Vec<String>,
+    /// Originating skill name for heuristic-promoted skills (`parent_skill` frontmatter field).
+    ///
+    /// Set when `source = "heuristic_promotion"`. Used for traceability only — no effect on
+    /// skill matching or trust governance.
+    pub parent_skill: Option<String>,
 }
 
 /// A fully loaded skill: metadata plus the raw Markdown body.
@@ -154,6 +159,7 @@ impl Default for SkillMeta {
             git_hash: None,
             category: None,
             triggers: vec![],
+            parent_skill: None,
         }
     }
 }
@@ -222,6 +228,7 @@ struct RawFrontmatter {
     git_hash: Option<String>,
     category: Option<String>,
     triggers: Vec<String>,
+    parent_skill: Option<String>,
 }
 
 /// Validate a skill category name.
@@ -443,6 +450,11 @@ fn apply_field(raw: &mut RawFrontmatter, key: &str, value: String) {
                 .collect();
             raw.triggers = parsed;
         }
+        "parent_skill" => {
+            if !value.is_empty() {
+                raw.parent_skill = Some(value);
+            }
+        }
         "metadata" if value.is_empty() => {
             // Handled by caller — sets in_metadata flag.
         }
@@ -471,6 +483,7 @@ fn parse_frontmatter(yaml_str: &str) -> RawFrontmatter {
         git_hash: None,
         category: None,
         triggers: Vec::new(),
+        parent_skill: None,
     };
     let mut in_metadata = false;
 
@@ -660,6 +673,7 @@ pub fn load_skill_meta_from_str(content: &str) -> Result<(SkillMeta, String), Sk
         git_hash: raw.git_hash,
         category: raw.category,
         triggers: raw.triggers,
+        parent_skill: raw.parent_skill,
     };
 
     Ok((meta, body.to_string()))
@@ -740,6 +754,7 @@ pub fn load_skill_meta(path: &Path) -> Result<SkillMeta, SkillError> {
         git_hash: raw.git_hash,
         category: raw.category,
         triggers: raw.triggers,
+        parent_skill: raw.parent_skill,
     })
 }
 
@@ -1659,5 +1674,34 @@ mod tests {
         );
         let meta = load_skill_meta(&path).unwrap();
         assert_eq!(meta.triggers, vec!["run shell command", "execute bash"]);
+    }
+
+    #[test]
+    fn parent_skill_parsed_from_frontmatter() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_skill(
+            dir.path(),
+            "git-v2",
+            "---\nname: git-v2\ndescription: Enhanced git skill.\nsource: heuristic_promotion\nparent_skill: git\n---\nbody",
+        );
+        let meta = load_skill_meta(&path).unwrap();
+        assert_eq!(
+            meta.parent_skill.as_deref(),
+            Some("git"),
+            "parent_skill must be parsed from frontmatter"
+        );
+        assert_eq!(meta.source, "heuristic_promotion");
+    }
+
+    #[test]
+    fn parent_skill_absent_when_not_in_frontmatter() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_skill(
+            dir.path(),
+            "regular-skill",
+            "---\nname: regular-skill\ndescription: A normal skill.\n---\nbody",
+        );
+        let meta = load_skill_meta(&path).unwrap();
+        assert!(meta.parent_skill.is_none());
     }
 }

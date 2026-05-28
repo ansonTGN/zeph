@@ -1176,6 +1176,124 @@ impl SqliteStore {
         .await?;
         Ok(())
     }
+
+    // --- AutoSkill A6: Heuristic promotion helpers (spec 061) ---
+
+    /// Return skills where the count of heuristics (above `min_confidence`) meets
+    /// `min_count`. Each entry is `(skill_name, heuristic_count)`.
+    ///
+    /// Used by the promotion background task to find qualifying skills.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query fails.
+    #[tracing::instrument(skip_all, name = "memory.skills.count_heuristics_by_skill")]
+    pub async fn count_heuristics_by_skill(
+        &self,
+        min_confidence: f64,
+        min_count: u32,
+    ) -> Result<Vec<(String, i64)>, MemoryError> {
+        let rows: Vec<(String, i64)> = zeph_db::query_as(sql!(
+            "SELECT skill_name, COUNT(*) AS cnt \
+             FROM skill_heuristics \
+             WHERE confidence >= ? \
+             GROUP BY skill_name \
+             HAVING cnt >= ?"
+        ))
+        .bind(min_confidence)
+        .bind(i64::from(min_count))
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    /// Load all heuristic texts for a specific skill above `min_confidence`.
+    ///
+    /// Returns heuristic texts sorted alphabetically (deterministic batch hash).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query fails.
+    #[tracing::instrument(skip_all, name = "memory.skills.load_heuristic_texts_for_promotion")]
+    pub async fn load_heuristic_texts_for_promotion(
+        &self,
+        skill_name: &str,
+        min_confidence: f64,
+    ) -> Result<Vec<String>, MemoryError> {
+        let rows: Vec<(String,)> = zeph_db::query_as(sql!(
+            "SELECT heuristic_text \
+             FROM skill_heuristics \
+             WHERE skill_name = ? AND confidence >= ? \
+             ORDER BY heuristic_text ASC"
+        ))
+        .bind(skill_name)
+        .bind(min_confidence)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|r| r.0).collect())
+    }
+
+    /// Check whether `(skill_name, batch_hash)` already exists in `skill_heuristic_promotions`.
+    ///
+    /// Returns `true` when the batch was already evaluated — the promotion loop should skip it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query fails.
+    #[tracing::instrument(skip_all, name = "memory.skills.promotion_already_evaluated")]
+    pub async fn promotion_already_evaluated(
+        &self,
+        skill_name: &str,
+        batch_hash: &str,
+    ) -> Result<bool, MemoryError> {
+        let count: i64 = zeph_db::query_scalar(sql!(
+            "SELECT COUNT(*) FROM skill_heuristic_promotions \
+             WHERE skill_name = ? AND batch_hash = ?"
+        ))
+        .bind(skill_name)
+        .bind(batch_hash)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(count > 0)
+    }
+
+    /// Record a promotion evaluation result in `skill_heuristic_promotions`.
+    ///
+    /// Uses `INSERT OR IGNORE` so concurrent callers are safe (`batch_hash` is part of
+    /// the primary key).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query fails.
+    #[tracing::instrument(skip_all, name = "memory.skills.record_promotion_evaluation")]
+    pub async fn record_promotion_evaluation(
+        &self,
+        skill_name: &str,
+        batch_hash: &str,
+        recommendation: &str,
+        draft_skill_name: Option<&str>,
+    ) -> Result<(), MemoryError> {
+        let now = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        )
+        .unwrap_or(i64::MAX);
+        zeph_db::query(sql!(
+            "INSERT OR IGNORE INTO skill_heuristic_promotions \
+             (skill_name, batch_hash, evaluated_at, recommendation, draft_skill_name) \
+             VALUES (?, ?, ?, ?, ?)"
+        ))
+        .bind(skill_name)
+        .bind(batch_hash)
+        .bind(now)
+        .bind(recommendation)
+        .bind(draft_skill_name)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -2023,6 +2141,115 @@ mod tests {
             versions.iter().find(|v| v.is_active).unwrap().id,
             last_id,
             "the last saved version must be the active one"
+        );
+    }
+
+    // ── AutoSkill A6: heuristic promotion helpers ─────────────────────────
+
+    async fn insert_heuristic(store: &SqliteStore, skill: &str, text: &str, confidence: f64) {
+        zeph_db::query(sql!(
+            "INSERT INTO skill_heuristics (skill_name, heuristic_text, confidence) VALUES (?, ?, ?)"
+        ))
+        .bind(skill)
+        .bind(text)
+        .bind(confidence)
+        .execute(store.pool())
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn count_heuristics_by_skill_threshold_and_confidence() {
+        let store = test_store().await;
+
+        // "git" has 3 heuristics: 2 above min_confidence, 1 below
+        insert_heuristic(&store, "git", "use --no-pager", 0.8).await;
+        insert_heuristic(&store, "git", "check status first", 0.9).await;
+        insert_heuristic(&store, "git", "low confidence hint", 0.3).await;
+
+        // "docker" has 1 heuristic above confidence — below min_count=2
+        insert_heuristic(&store, "docker", "use --rm", 0.7).await;
+
+        let results = store.count_heuristics_by_skill(0.5, 2).await.unwrap();
+        assert_eq!(results.len(), 1, "only git meets threshold");
+        assert_eq!(results[0].0, "git");
+        assert_eq!(results[0].1, 2, "only heuristics >= 0.5 confidence counted");
+    }
+
+    #[tokio::test]
+    async fn load_heuristic_texts_sorted_for_deterministic_hash() {
+        let store = test_store().await;
+
+        insert_heuristic(&store, "git", "zebra", 0.8).await;
+        insert_heuristic(&store, "git", "alpha", 0.9).await;
+        insert_heuristic(&store, "git", "middle", 0.7).await;
+        insert_heuristic(&store, "git", "skipped", 0.2).await; // below min_confidence
+
+        let texts = store
+            .load_heuristic_texts_for_promotion("git", 0.5)
+            .await
+            .unwrap();
+
+        assert_eq!(texts.len(), 3);
+        assert_eq!(
+            texts,
+            vec!["alpha", "middle", "zebra"],
+            "must be sorted ASC"
+        );
+    }
+
+    #[tokio::test]
+    async fn promotion_already_evaluated_idempotency() {
+        let store = test_store().await;
+
+        // Not yet evaluated.
+        let found = store
+            .promotion_already_evaluated("git", "abc123")
+            .await
+            .unwrap();
+        assert!(!found);
+
+        store
+            .record_promotion_evaluation("git", "abc123", "none", None)
+            .await
+            .unwrap();
+
+        // Now it should be found.
+        let found = store
+            .promotion_already_evaluated("git", "abc123")
+            .await
+            .unwrap();
+        assert!(found);
+    }
+
+    #[tokio::test]
+    async fn record_promotion_evaluation_insert_or_ignore() {
+        let store = test_store().await;
+
+        // First insert — succeeds.
+        store
+            .record_promotion_evaluation("git", "hash1", "body_enrichment", Some("git-v2"))
+            .await
+            .unwrap();
+
+        // Duplicate insert — should not error (INSERT OR IGNORE).
+        store
+            .record_promotion_evaluation("git", "hash1", "new_skill", Some("git-extra"))
+            .await
+            .unwrap();
+
+        // Only one row should exist; recommendation is from the first insert.
+        let rec: (String,) = zeph_db::query_as(sql!(
+            "SELECT recommendation FROM skill_heuristic_promotions WHERE skill_name = ? AND batch_hash = ?"
+        ))
+        .bind("git")
+        .bind("hash1")
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            rec.0, "body_enrichment",
+            "first insert wins (INSERT OR IGNORE)"
         );
     }
 }
