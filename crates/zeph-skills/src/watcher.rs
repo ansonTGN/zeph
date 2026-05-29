@@ -25,6 +25,7 @@
 //! while let Some(event) = rx.recv().await {
 //!     match event {
 //!         SkillEvent::Changed => println!("skills changed, reloading"),
+//!         _ => {}
 //!     }
 //! }
 //! # Ok(())
@@ -40,6 +41,7 @@ use tokio::sync::mpsc;
 use crate::error::SkillError;
 
 /// Events emitted by [`SkillWatcher`] when a `SKILL.md` file is created, modified, or removed.
+#[non_exhaustive]
 #[derive(Clone)]
 pub enum SkillEvent {
     /// At least one `SKILL.md` file changed within the watched directories.
