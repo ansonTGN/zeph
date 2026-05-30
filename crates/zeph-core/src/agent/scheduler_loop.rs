@@ -69,10 +69,7 @@ impl<C: crate::channel::Channel> Agent<C> {
                     }
                 }
                 SchedulerAction::Done { status } => return Some(status),
-                SchedulerAction::Spawn { .. }
-                | SchedulerAction::RunInline { .. }
-                | SchedulerAction::Verify { .. }
-                | SchedulerAction::VerifyPredicate { .. } => {}
+                _ => {} // non_exhaustive: unrecognised variants are no-ops
             }
         }
         None
@@ -501,6 +498,7 @@ impl<C: crate::channel::Channel> Agent<C> {
                             }
                         }
                     }
+                    _ => {} // non_exhaustive: unrecognised variants are no-ops
                 }
             }
 
