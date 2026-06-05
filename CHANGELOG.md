@@ -18,12 +18,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `OpenAiProvider::context_window()` now returns `Some(200_000)` for o-series models
   (o1, o1-mini, o3, o3-mini, o4-mini) instead of `None`, preventing silent context overflow (#4801)
 
+- `zeph-config`: extract `section_header_present(src, name)` helper in the migration module to
+  correctly detect active TOML section headers, covering exact matches (`[name]`), inline-comment
+  headers (`[name] # ...`), and implicit parent sections via subtables (`[name.foo]`), while
+  rejecting commented-out headers (`# [name]`) and value substrings. Apply the helper to all
+  worktree migration guards (steps 54–55). Fix migration step 55 silently no-opping on
+  Windows-style CRLF line endings by anchoring `WORKTREE_HEADER_RE` to `(?m)^` and extending it to
+  match `\r?\n`. Adds 10 regression tests. Closes #4804, #4785.
+
 - `fix(orchestration)`: add `graph_dirty: bool` field to `DagScheduler` that is set on all durable
   graph mutations (task completion, failure, fatal spawn failure, cancel_all, timeout).
   `GraphPersistence::save()` in the scheduler loop now fires only when `graph_dirty` is true,
   ensuring task states (`TaskStatus` transitions, retry counts, predicate outcomes, lineage chains)
   survive mid-execution process crashes. Previously, a SIGKILL between task completions discarded
   all in-flight progress. Adds 8 unit tests for the flag lifecycle. Closes #4747.
+
 - `fix(memory,scheduler)`: `MemoryError` and `SchedulerError` now use distinct display strings for
   their `Sqlx` and `Db` variants (`"sqlx error: {0}"` and `"db error: {0}"` respectively), making
   it possible to distinguish raw SQLx query failures from zeph-db lifecycle/migration errors in log
