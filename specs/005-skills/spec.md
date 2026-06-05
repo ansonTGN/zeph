@@ -568,7 +568,127 @@ blocks invocation.
 requires_trust_check = true
 ```
 
-### Stage-1 Advisory SKILL.md Scan (#4132)
+### Recursive Nested Skill Discovery (#4682, #4684)
+
+`WalkDir`-based discovery replaces the flat `read_dir` loop in the skill scanner. The traversal uses
+pre-order DFS with lexicographic sibling ordering (max depth 16, no symlink follow). The first skill
+with a given name wins; deeper duplicates are silently skipped. The existing `RecursiveMode::Recursive`
+hot-reload watcher already covers subdirectories, so no watcher change is needed.
+
+### Key Invariants
+
+- Max walkdir depth is 16 — NEVER recurse further (prevents cycles on unusual filesystems)
+- First-name-wins rule applies across depths — NEVER accept a deeper skill that duplicates a shallower name
+- Symlinks are NOT followed — `follow_links(false)` is non-negotiable
+
+---
+
+## Skill Extension Manifest (`SkillExtensions`) (#4705, #4683)
+
+`crates/zeph-skills/src/extensions.rs` adds an optional `extensions:` block in SKILL.md
+frontmatter. Fields:
+
+```
+SkillExtensions {
+    ui: Vec<SkillUiElement>,          // hotkey/button declarations
+    keybindings: Vec<SkillKeybinding>,
+    monitors: Vec<SkillMonitor>,      // background watch expressions
+}
+```
+
+`SkillMeta.extensions: Option<SkillExtensions>` is populated by `parse_extensions()` with an
+8 KiB byte cap. Parse failure returns `None` — existing SKILL.md files without an `extensions:`
+block load unchanged. `serde_norway` is used for runtime YAML parsing within the cap.
+
+### Key Invariants
+
+- Extensions block is optional — absent `extensions:` never fails skill load
+- 8 KiB cap is enforced before `serde_norway::from_str` — NEVER pass uncapped bytes to the deserializer
+- Parse errors are silently ignored (return `None`) — NEVER propagate extension parse failure as a skill load error
+
+---
+
+## Concurrent Semantic Scan (#4705, #4683)
+
+`semantic_scan_plugin_add` replaces sequential scanning with `buffer_unordered(4)` and a 300s
+aggregate `tokio::time::timeout`. Each future carries its own `(skill_name, verdict)` tuple so
+rejection messages always name the correct skill regardless of completion order.
+
+### Key Invariants
+
+- Scan concurrency cap is 4 — NEVER set above 4 without benchmarking under load
+- Aggregate timeout is 300s — NEVER lower it below the per-skill LLM call p99 latency
+- Rejection messages MUST include the specific skill name — never a positional index
+
+---
+
+## Skill Egress Attribution (#4682, #4684)
+
+`ToolCall`, `AuditEntry`, and `EgressEvent` gain `skill_name: Option<Vec<String>>` carrying the
+names of all skills injected into the system prompt for the current turn. Attribution is
+turn-scoped, not per-call. All decorator executors (`ScopedToolExecutor`, policy gate, adversarial
+gate) and all `scrape.rs` egress sites propagate the field. `ToolCall` derives `Default` to avoid
+breaking existing struct literals.
+
+### Key Invariants
+
+- Attribution is turn-scoped — NEVER per-call attribution (that would require per-tool injection tracking)
+- All executor decorators must propagate `skill_name` — single-path propagation is incomplete
+- NEVER emit a non-`None` `skill_name` for turns with no injected skills
+
+---
+
+## Stage-2 LLM Semantic Scan for Third-Party Skills (#3947, #4696)
+
+Defends against Semantic Compliance Hijacking (SCH) attacks (arXiv:2605.14460) where malicious
+third-party skills encode harmful instructions in SKILL.md without explicit code payloads that
+Stage-1 regex patterns would catch.
+
+### `SkillSemanticScanner`
+
+`crates/zeph-skills/src/semantic_scanner.rs`. Uses `chat_typed_erased` with a configurable
+fast provider. Content cap: 8 KiB with head+tail sampling for larger skills.
+
+XML delimiter-escape neutralization: any `</skill_content>` sequences in the skill body are
+neutralized before interpolation into the prompt to prevent prompt-frame escapes.
+
+Verdicts:
+
+| `ScanVerdict` | Action |
+|--------------|--------|
+| `Allow` | Skill passes; proceed with installation/execution |
+| `Warn` | Advisory; skill logged at WARN but not blocked |
+| `Block` | Skill blocked; installation or execution rejected |
+
+Unknown LLM output tokens fall back to `Block` (fail-closed).
+
+### Integration Points
+
+- **Plugin add**: `zeph-plugins` calls `scan_targets()` to extract SKILL.md candidates from an
+  archive before installation. The `zeph-plugins` crate itself remains LLM-free; the scan
+  is performed in `zeph-core` via `semantic_scan_plugin_add`, which wires the scanner.
+- **Fail-closed on config error**: `semantic_scan = true` with an empty `semantic_scan_provider`
+  returns a config error — never proceeds with an unconfigured scanner.
+
+### Config
+
+```toml
+[skills]
+semantic_scan = false              # opt-in Stage-2 semantic scan
+semantic_scan_provider = ""        # [[llm.providers]] name (required when semantic_scan = true)
+```
+
+### Key Invariants
+
+- NEVER proceed when `semantic_scan = true` and `semantic_scan_provider` is empty
+- XML delimiter-escape neutralization (`</skill_content>` → escaped form) MUST run before interpolation — NEVER interpolate raw skill content
+- Unknown scanner output tokens MUST produce `Block` verdict — NEVER default to `Allow` on parse failure
+- `scan_targets()` in `zeph-plugins` extracts candidates without LLM calls — keeps `zeph-plugins` LLM-free
+- NEVER apply Stage-2 scan to bundled skills (`.bundled` marker) — bundled skills are pre-vetted
+
+---
+
+## Stage-1 Advisory SKILL.md Scan (#4132)
 
 Before executing a skill, the system runs a lightweight static scan over the SKILL.md body
 to detect high-risk patterns (e.g., `eval`, `exec`, `import os`, network exfil keywords)
@@ -583,6 +703,7 @@ and emits an advisory `SecurityEvent::SkillAdvisory` with severity and matched p
 - Blake3 re-hash only applies to skills with `requires_trust_check = true`; normal skills use load-time trust only
 - Advisory scan result MUST NOT block skill invocation in v1 — advisory only
 - NEVER store the raw unsanitized description in the system prompt
+- NEVER proceed when `semantic_scan = true` but `semantic_scan_provider` is empty — return a config error (fail-closed, #4706, #4709)
 
 ---
 

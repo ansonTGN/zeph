@@ -90,6 +90,7 @@ agent in the wrong repository tree.
 - **NEVER** allow `base_ref = fresh` to silently fall back to HEAD when a fetch fails; fail with a clear error.
 - **NEVER** add the `set_working_directory` tool to the allowed list for a worktree-opted agent, even if the caller explicitly requests it.
 - **NEVER** skip the capability probe when `worktree.enabled = true`; a missing `git` must be caught at bootstrap, not at first spawn.
+- **NEVER** allow `git_timeout_secs = 0`; the value is clamped to `max(1, configured_value)` in `DefaultGitRunner`.
 
 ---
 
@@ -104,6 +105,7 @@ root = ".claude/worktrees"         # relative to repo root; canonicalised at boo
 branch_prefix = "agent/"           # branch = "{prefix}{subagent_id}"
 prune_branch_on_remove = false     # delete the branch after removing the worktree
 cleanup_on_completion = true       # remove worktree when agent completes or is cancelled
+git_timeout_secs = 30              # per-git-invocation timeout; clamped to ≥ 1 (#4784)
 ```
 
 Per-agent opt-in in subagent definition frontmatter:
@@ -294,6 +296,17 @@ New file `crates/zeph-config/src/worktree.rs`:
 
 - Add `WorktreeCommand { List, Clean }` under `zeph worktree` (or extend `zeph agents`)
 - `--worktree-base-ref <fresh|head>` session override flag
+
+### `--init` Wizard (#4656, #4847)
+
+`step_worktree()` is added to the interactive configuration wizard. The step asks the user:
+1. Whether to enable worktree isolation (`worktree.enabled`)
+2. Which background isolation mode to use (`bg_isolation: None | Worktree`) — deferred child-process isolation knob
+3. Which base ref to use (`base_ref: head | fresh`)
+
+`build_config()` maps the wizard state to `WorktreeConfig`. The `[worktree]` section is emitted
+only when the user opts in (`enabled = true`). Two unit tests cover the disabled-default path
+and the enabled+None+Fresh path.
 
 ### TUI
 
