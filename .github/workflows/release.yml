@@ -182,8 +182,8 @@ jobs:
             fi
 
             if [ "$FIRST" = "false" ]; then
-              echo "Waiting 60s for crates.io sparse index propagation..."
-              sleep 60
+              echo "Waiting 10s for crates.io sparse index propagation..."
+              sleep 10
             fi
             FIRST=false
 
