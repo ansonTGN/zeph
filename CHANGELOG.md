@@ -28,6 +28,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Refactored
 
+- `zeph-config`: split `providers.rs` (2969 lines) into `providers/{mod,thinking,llm,router,candle,entry,tests}.rs` grouped by provider family. Public API unchanged — all types re-exported from `providers/mod.rs`, so `zeph_config::providers::*` paths remain stable. (#4879)
 - `refactor(config)`: split `migrate/mod.rs` (6380 lines, 56 `migrate_*` functions) into
   subsystem submodules — `migrate/{llm,memory,mcp,tools,session,infra,features}.rs` — and moved
   the test module to `migrate/tests.rs`. `mod.rs` (now 718 lines) retains only the shared TOML
