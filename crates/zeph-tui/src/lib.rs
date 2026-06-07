@@ -298,17 +298,19 @@ mod tests {
 
     #[test]
     fn alternate_scroll_enable_ansi() {
+        use crate::EnableAlternateScroll;
         use crossterm::Command as _;
         let mut buf = String::new();
-        super::EnableAlternateScroll.write_ansi(&mut buf).unwrap();
+        EnableAlternateScroll.write_ansi(&mut buf).unwrap();
         assert_eq!(buf, "\x1b[?1007h");
     }
 
     #[test]
     fn alternate_scroll_disable_ansi() {
+        use crate::DisableAlternateScroll;
         use crossterm::Command as _;
         let mut buf = String::new();
-        super::DisableAlternateScroll.write_ansi(&mut buf).unwrap();
+        DisableAlternateScroll.write_ansi(&mut buf).unwrap();
         assert_eq!(buf, "\x1b[?1007l");
     }
 }

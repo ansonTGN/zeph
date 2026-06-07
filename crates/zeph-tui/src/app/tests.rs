@@ -2836,3 +2836,89 @@ fn paste_state_consumed_on_submit() {
         "paste_line_count must be set on submitted message"
     );
 }
+
+#[test]
+fn insert_mode_page_up_scrolls_transcript() {
+    let (mut app, _rx, _tx) = make_app();
+    app.sessions.current_mut().input_mode = InputMode::Insert;
+    app.sessions.current_mut().scroll_offset = 0;
+    app.handle_event(AppEvent::Key(KeyEvent::new(
+        KeyCode::PageUp,
+        KeyModifiers::NONE,
+    )));
+    assert_eq!(
+        app.scroll_offset(),
+        10,
+        "PageUp in Insert mode must scroll transcript up by 10"
+    );
+}
+
+#[test]
+fn insert_mode_page_down_scrolls_transcript() {
+    let (mut app, _rx, _tx) = make_app();
+    app.sessions.current_mut().input_mode = InputMode::Insert;
+    app.sessions.current_mut().scroll_offset = 20;
+    app.handle_event(AppEvent::Key(KeyEvent::new(
+        KeyCode::PageDown,
+        KeyModifiers::NONE,
+    )));
+    assert_eq!(
+        app.scroll_offset(),
+        10,
+        "PageDown in Insert mode must scroll transcript down by 10"
+    );
+}
+
+#[test]
+fn insert_mode_page_down_saturates_at_zero() {
+    let (mut app, _rx, _tx) = make_app();
+    app.sessions.current_mut().input_mode = InputMode::Insert;
+    app.sessions.current_mut().scroll_offset = 5;
+    app.handle_event(AppEvent::Key(KeyEvent::new(
+        KeyCode::PageDown,
+        KeyModifiers::NONE,
+    )));
+    assert_eq!(app.scroll_offset(), 0, "PageDown must not underflow past 0");
+}
+
+#[test]
+fn insert_mode_up_does_not_scroll_transcript() {
+    let (mut app, _rx, _tx) = make_app();
+    app.sessions.current_mut().input_mode = InputMode::Insert;
+    app.sessions.current_mut().scroll_offset = 0;
+    // Up in Insert mode navigates input history, not transcript scroll.
+    app.handle_event(AppEvent::Key(KeyEvent::new(
+        KeyCode::Up,
+        KeyModifiers::NONE,
+    )));
+    assert_eq!(
+        app.scroll_offset(),
+        0,
+        "Up in Insert mode must not change scroll_offset"
+    );
+}
+
+#[test]
+fn auto_scroll_suppressed_when_scrolled_up() {
+    let (mut app, _rx, _tx) = make_app();
+    // User has scrolled up past threshold — auto_scroll must not reset offset.
+    app.sessions.current_mut().scroll_offset = 5;
+    app.auto_scroll();
+    assert_eq!(
+        app.scroll_offset(),
+        5,
+        "auto_scroll must not move scroll when offset > 1"
+    );
+}
+
+#[test]
+fn auto_scroll_snaps_to_bottom_when_near_end() {
+    let (mut app, _rx, _tx) = make_app();
+    app.sessions.current_mut().scroll_offset = 1;
+    app.auto_scroll();
+    assert_eq!(
+        app.scroll_offset(),
+        0,
+        "auto_scroll must snap to bottom when offset <= 1"
+    );
+}
