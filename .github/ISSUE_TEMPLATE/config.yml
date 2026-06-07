@@ -1,5 +1,8 @@
 blank_issues_enabled: false
 contact_links:
+  - name: Questions & Discussions
+    url: https://github.com/bug-ops/zeph/discussions
+    about: Ask questions, share ideas, and discuss usage here
   - name: Documentation
     url: https://github.com/bug-ops/zeph#readme
     about: Check the documentation before opening an issue
