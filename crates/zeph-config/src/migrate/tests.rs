@@ -9,8 +9,8 @@ use super::*;
 fn migrations_registry_has_all_steps() {
     assert_eq!(
         MIGRATIONS.len(),
-        60,
-        "MIGRATIONS registry must contain all 60 sequential steps"
+        61,
+        "MIGRATIONS registry must contain all 61 sequential steps"
     );
     for m in MIGRATIONS.iter() {
         assert!(
@@ -1645,7 +1645,7 @@ fn migrate_focus_auto_consolidate_noop_when_only_commented_section() {
 
 #[test]
 fn registry_has_fifty_entries() {
-    assert_eq!(MIGRATIONS.len(), 60);
+    assert_eq!(MIGRATIONS.len(), 61);
 }
 
 #[test]
@@ -1746,6 +1746,7 @@ fn registry_preserves_order_matches_dispatch() {
         "migrate_eval_model_to_provider",
         "migrate_caveman_config",
         "migrate_shell_checkpoints_config",
+        "migrate_knowledge_config",
     ];
     let actual: Vec<&str> = MIGRATIONS.iter().map(|m| m.name()).collect();
     assert_eq!(actual, expected);
@@ -2510,4 +2511,40 @@ fn migrate_caveman_config_noop_when_commented_block_present() {
         "must be idempotent when commented block already present"
     );
     assert_eq!(result.output, src);
+}
+
+// ── migrate_knowledge_config tests (step 61, spec-067, #5017) ─────────────────────────────
+
+#[test]
+fn step_61_adds_knowledge_block_when_absent() {
+    let src = "[agent]\nname = \"Zeph\"\n";
+    let result = migrate_knowledge_config(src).unwrap();
+    assert_eq!(result.changed_count, 1);
+    assert!(result.output.contains("# [knowledge]"));
+}
+
+#[test]
+fn step_61_noop_when_knowledge_section_present() {
+    let src = "[agent]\nname = \"Zeph\"\n[knowledge]\nmax_documents = 10\n";
+    let result = migrate_knowledge_config(src).unwrap();
+    assert_eq!(result.changed_count, 0);
+    assert_eq!(result.output, src);
+}
+
+#[test]
+fn step_61_noop_when_commented_knowledge_section_present() {
+    let src = "[agent]\nname = \"Zeph\"\n# [knowledge]\n# max_documents = 0\n";
+    let result = migrate_knowledge_config(src).unwrap();
+    assert_eq!(result.changed_count, 0);
+}
+
+#[test]
+fn step_61_idempotent_on_own_output() {
+    let src = "[agent]\nname = \"Zeph\"\n";
+    let first = migrate_knowledge_config(src).unwrap();
+    let second = migrate_knowledge_config(&first.output).unwrap();
+    assert_eq!(
+        second.changed_count, 0,
+        "step_61 must be idempotent on its own output"
+    );
 }
