@@ -36,6 +36,12 @@ pub(crate) struct TuiRunParams<'a> {
     pub(crate) task_supervisor: Option<zeph_common::task_supervisor::TaskSupervisor>,
     /// Fleet session ID to mark completed/failed when the TUI session exits.
     pub(crate) fleet_session_id: String,
+    /// URI that triggered this session via `url-open` deep-link dispatch.
+    ///
+    /// When `Some`, a one-shot status notification is emitted in the TUI status area within
+    /// 1 s of launch per spec §9 (TASK-8).
+    #[cfg(feature = "deep-link")]
+    pub(crate) deep_link_uri: Option<String>,
 }
 
 /// Phase-1 TUI handle: TUI is rendering but the agent hasn't started yet.
@@ -337,6 +343,13 @@ pub(crate) async fn run_tui_agent<C: Channel + 'static>(
         agent_tx.clone(),
     ));
 
+    // TASK-8: emit a one-shot deep-link notification within 1 s of launch.
+    // Tracked in `forwarders` so it is aborted cleanly when the TUI or agent exits.
+    #[cfg(feature = "deep-link")]
+    if let Some(uri) = params.deep_link_uri.take() {
+        forwarders.spawn(deep_link_notification_task(agent_tx.clone(), uri));
+    }
+
     let mut agent = agent.with_warmup_ready(warmup_rx);
     let agent_future = agent.run();
 
@@ -368,6 +381,22 @@ pub(crate) async fn run_tui_agent<C: Channel + 'static>(
     }
 
     run_result
+}
+
+/// Emits a deep-link launch notification in the TUI status bar, then clears it after 3 s.
+#[cfg(feature = "deep-link")]
+async fn deep_link_notification_task(
+    tx: tokio::sync::mpsc::Sender<zeph_tui::AgentEvent>,
+    uri: String,
+) {
+    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+    let _ = tx
+        .send(zeph_tui::AgentEvent::Status(format!(
+            "Opened via deep link: {uri}"
+        )))
+        .await;
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    let _ = tx.send(zeph_tui::AgentEvent::Status(String::new())).await;
 }
 
 pub(crate) async fn forward_status_to_stderr(mut rx: tokio::sync::mpsc::UnboundedReceiver<String>) {
