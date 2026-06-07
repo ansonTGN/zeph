@@ -33,6 +33,7 @@ async fn setup_with_qdrant() -> (SqliteStore, EmbeddingStore, ContainerAsync<Gen
 }
 
 #[tokio::test]
+#[ignore = "requires Docker for Qdrant"]
 async fn ensure_collection_is_idempotent() {
     let (_sqlite, qdrant, _container) = setup_with_qdrant().await;
 
@@ -41,6 +42,7 @@ async fn ensure_collection_is_idempotent() {
 }
 
 #[tokio::test]
+#[ignore = "requires Docker for Qdrant"]
 async fn store_and_search_vector() {
     let (sqlite, qdrant, _container) = setup_with_qdrant().await;
 
@@ -75,6 +77,7 @@ async fn store_and_search_vector() {
 }
 
 #[tokio::test]
+#[ignore = "requires Docker for Qdrant"]
 async fn search_with_conversation_filter() {
     let (sqlite, qdrant, _container) = setup_with_qdrant().await;
 
