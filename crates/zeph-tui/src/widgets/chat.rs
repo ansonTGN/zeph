@@ -29,7 +29,7 @@ pub fn render(app: &mut App, frame: &mut Frame, area: Rect, cache: &mut RenderCa
         return 0;
     }
 
-    let theme = Theme::default();
+    let theme = &app.theme;
     let inner_height = area.height.saturating_sub(2) as usize;
     // 2 for block borders + 2 for accent prefix ("▎ ") added per line
     let wrap_width = area.width.saturating_sub(4) as usize;
@@ -49,7 +49,7 @@ pub fn render(app: &mut App, frame: &mut Frame, area: Rect, cache: &mut RenderCa
         cache,
         area.width,
         wrap_width,
-        &theme,
+        theme,
         app.tool_expanded(),
         app.tool_density(),
         app.show_source_labels(),
@@ -655,7 +655,12 @@ fn render_tool_message(
         } else {
             let diff_lines =
                 super::diff::compute_diff(&diff_data.old_content, &diff_data.new_content);
-            let rendered = super::diff::render_diff_lines(&diff_lines, &diff_data.file_path, theme);
+            let rendered = super::diff::render_diff_lines(
+                &diff_lines,
+                &diff_data.file_path,
+                theme,
+                &theme.syntax_theme,
+            );
             let mut wrapped: Vec<Line<'static>> = Vec::new();
             for line in rendered {
                 let mut prefixed_spans = vec![Span::styled(indent.to_string(), Style::default())];
