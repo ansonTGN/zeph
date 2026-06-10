@@ -309,6 +309,7 @@ mod tests {
 
     // NFR-DE-06: a CSPRNG nonce of 192 bits must not repeat across 10^6 seals.
     #[test]
+    #[ignore = "slow: 1M seal iterations — run explicitly or in integration suite"]
     fn one_million_seals_produce_distinct_nonces() {
         const SEALS: usize = 1_000_000;
         let cipher = XChaCha20Poly1305Cipher::new(0, [4u8; 32]);
