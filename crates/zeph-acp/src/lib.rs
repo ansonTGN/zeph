@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Andrei G <bug-ops>
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+#![recursion_limit = "256"]
+
 //! ACP (Agent Client Protocol) server for IDE embedding.
 //!
 //! `zeph-acp` exposes the Zeph agent over the Agent Client Protocol so that
