@@ -38,7 +38,7 @@ use std::sync::Mutex;
 use tempfile::NamedTempFile;
 
 use landlock::{
-    Access, AccessFs, BitFlags, PathBeneath, PathFd, RestrictionStatus, Ruleset, RulesetAttr,
+    Access, AccessFs, PathBeneath, PathFd, RestrictionStatus, Ruleset, RulesetAttr,
     RulesetCreatedAttr,
 };
 use seccompiler::{BpfProgram, SeccompAction, SeccompFilter, TargetArch};
