@@ -6,6 +6,53 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- `fix(ci)`: unblock the workspace lint/build/doc gates. Pin `ollama-rs` back to 0.3.4 (an
+  accidental 0.3.5 bump deprecated `Ollama::new_with_client`, failing `zeph-llm` under
+  `-D warnings` and cascading to every downstream job) and resolve two pedantic clippy findings
+  surfaced once `zeph-llm` compiled again: `cast_precision_loss` in `context_gauge::build_bar`
+  and `format_push_string` in `resources.rs` (now `write!` into the buffer).
+
+- `fix(tui)`: keep the equalizer animating during LLM streaming and background activity.
+  The render loop now drains at most `AGENT_DRAIN_BATCH` (64) agent events per iteration instead
+  of the whole backlog, so a fast token stream repaints smoothly (was: frozen until the backlog
+  fully drained, then a jump) and the animation/input arms are serviced between batches. The
+  internal 100 ms interval now advances the wave clock as a heartbeat independent of the
+  `EventReader`, and the `AnimationOnly` redraw gate also fires while background/external requests
+  are inflight (`background_inflight() > 0`) — previously gated on `is_agent_busy()` alone, which
+  left the violet `Network` wave frozen when the agent itself was idle. See `crates/zeph-tui/src/lib.rs`.
+
+### Changed
+
+- `feat(tui)`: give background/external requests a visually distinct equalizer wave. The
+  `WaveState::Parallel` variant is replaced by `WaveState::Network`, which now triggers on any
+  in-flight task-supervisor work (`bg_inflight >= 1` plus background shell runs) instead of only
+  `>= 2`. It renders in a **violet** gradient (vs the teal of foreground `Swell`/`Streaming`/`Tool`)
+  so concurrent background activity is separable at a glance, and the equalizer slot stays visible
+  while background requests run even when the agent itself is idle. See
+  `crates/zeph-tui/src/widgets/wave.rs` and `app/state.rs` (`wave_state`, `background_inflight`).
+
+- `fix(tui)`: correct and de-clutter the input separator row. The Insert-mode hint now reads
+  `esc for normal mode` (Esc switches Insert→Normal; it does not cancel input). The busy verb is
+  no longer duplicated on this row — it already appears in the bottom status bar and the side-panel
+  wave — so the separator shows only the prompt glyph, mode hint, token estimate, spinner, and the
+  interrupt hint. A status change (sub-agent start/complete, file indexing) now refreshes the
+  progress clock so the wave animates instead of reading as `Stalled` (a flat line). See
+  `crates/zeph-tui/src/widgets/input.rs`, `app/events.rs`, `app/keys.rs`.
+
+### Added
+
+- `feat(tui)`: move the inference visualiser from the input separator to the right-panel
+  dashboard and redesign it as an animated braille waveform — a continuous wave mirrored about
+  the centre axis (rendered with `U+2800` braille for 2×4 sub-pixel resolution) that jerks up
+  and down in time to a sharp beat envelope, with a teal gradient brightening toward the peaks.
+  A 4-row slot is carved from the bottom of the subagents panel while the agent is busy and
+  collapses when idle. `Motion::Full` busy mode now shows an animated spinner in the input row
+  (same as `Minimal`). `TuiCommand::ToggleEqualizer` / `app:equalizer` hides or shows the slot.
+  Removes `EQ_ROWS`/`EQ_W_MAX` constants. See `crates/zeph-tui/src/widgets/wave.rs` and
+  `crates/zeph-tui/src/app/draw.rs`.
+
 ### Research
 
 - `docs(cocoon)`: add stable non-positional threat IDs (`T-BIN-SUBST`, `T-COMP-ATTEST`,

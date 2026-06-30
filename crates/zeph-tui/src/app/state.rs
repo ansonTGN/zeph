@@ -105,7 +105,7 @@ impl App {
             motion: zeph_config::Motion::Full,
             wave_tick: 0,
             last_progress_at: Instant::now(),
-            wave_buf: Vec::new(),
+            show_equalizer: true,
             delights: zeph_config::DelightsConfig::default(),
             stream_rate: crate::delights::StreamRate::new(),
             toasts: crate::delights::ToastQueue::new(),
@@ -1042,6 +1042,17 @@ impl App {
         self.wave_tick
     }
 
+    /// Advance the wave animation clock by one tick.
+    ///
+    /// Called from the render loop's internal interval as an animation heartbeat
+    /// that is independent of the `EventReader`'s `AppEvent::Tick`s, so the
+    /// equalizer keeps moving even when the event channel is briefly starved by a
+    /// streaming burst. Only the wave counter is advanced here — the throbber and
+    /// micro-delights stay driven by `AppEvent::Tick`.
+    pub fn advance_wave_tick(&mut self) {
+        self.wave_tick = self.wave_tick.saturating_add(1);
+    }
+
     /// Apply micro-delight configuration (#5104).
     ///
     /// Called at construction time from `tui_bridge` to propagate `[tui.delights]` config.
@@ -1156,28 +1167,32 @@ impl App {
     pub fn wave_state(&self) -> crate::widgets::wave::WaveState {
         use crate::widgets::wave::WaveState;
 
-        if !self.is_agent_busy() {
+        let foreground = self.is_agent_busy();
+        let bg = self.background_inflight();
+
+        // Nothing running at all → flat baseline.
+        if !foreground && bg == 0 {
             return WaveState::Idle;
         }
 
-        // Stalled: no progress for longer than the threshold.
-        if self.last_progress_at.elapsed() > STALL_THRESHOLD {
+        // Stalled: a foreground turn with no progress past the threshold. Checked
+        // before background so a genuinely hung turn still surfaces the warning.
+        if foreground && self.last_progress_at.elapsed() > STALL_THRESHOLD {
             return WaveState::Stalled;
         }
 
-        // Tool execution.
-        if self.has_running_tool() {
+        // Foreground tool execution takes priority over background requests.
+        if foreground && self.has_running_tool() {
             return WaveState::Tool;
         }
 
-        // Parallel background tasks.
-        // Use bg_inflight (all-classes total) — avoids double-counting since
-        // bg_enrichment_inflight and bg_telemetry_inflight are already included in bg_inflight.
-        let bg = self.metrics.bg_inflight;
-        if bg >= 2 {
+        // External/background requests (task-supervisor work: enrichment, telemetry,
+        // MCP, egress, background shell). Rendered in violet so concurrent background
+        // activity is visually distinct from the agent's own foreground turn.
+        if bg >= 1 {
             #[allow(clippy::cast_possible_truncation)]
-            return WaveState::Parallel {
-                sines: (bg as u8).clamp(2, 3),
+            return WaveState::Network {
+                sines: (bg as u8).clamp(1, 3),
             };
         }
 
@@ -1194,6 +1209,18 @@ impl App {
 
         // Swell: busy but awaiting first token.
         WaveState::Swell
+    }
+
+    /// Count in-flight background/external requests for the wave equalizer.
+    ///
+    /// Combines the task-supervisor inflight gauge (`bg_inflight` — all classes,
+    /// already includes enrichment + telemetry) with in-flight background shell
+    /// runs. Used by [`Self::wave_state`] to drive the violet `Network` wave and
+    /// by the draw loop to keep the equalizer visible while background work runs
+    /// even when the agent itself is idle.
+    #[must_use]
+    pub fn background_inflight(&self) -> u64 {
+        self.metrics.bg_inflight + self.metrics.shell_background_runs.len() as u64
     }
 
     /// Advance all micro-delight animations by one tick.

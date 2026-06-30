@@ -11,21 +11,21 @@ use zeph_config::Motion;
 use crate::app::{App, InputMode};
 use crate::theme::Theme;
 use crate::widgets::spinner::breeze_frame;
-use crate::widgets::status_verbs::humanize;
-use crate::widgets::wave::{WaveState, glyphs};
 use zeph_common::text::format_tokens;
 
 /// Prompt glyph shown at the beginning of the separator line.
-const PROMPT_GLYPH: &str = "›";
+const PROMPT_GLYPH: &str = "you ▸";
 
-/// Append human-voice label spans to the separator line (no animated glyph).
+/// Append the animated spinner glyph and interrupt hint to a busy separator row.
 ///
-/// Used by `Motion::Minimal` (breeze spinner) and `Motion::Off` (static).
-/// Callers pass `animated_glyph = false` for `Off`.
-fn push_label_spans<'a>(
+/// No activity label is shown here — the busy verb already lives in the bottom
+/// status bar ([`crate::widgets::status`]) and the wave equalizer in the side
+/// panel, so duplicating it on this row would be redundant.
+///
+/// Used by `Motion::Minimal` (breeze spinner) and `Motion::Off` (static `·`).
+fn push_busy_tail<'a>(
     spans: &mut Vec<Span<'a>>,
     spinner_idx: u8,
-    activity_label: Option<&'a str>,
     app: &App,
     theme: &'a Theme,
     animated: bool,
@@ -33,113 +33,34 @@ fn push_label_spans<'a>(
     let symbol = if animated {
         breeze_frame(u64::from(spinner_idx), app.is_ascii_only())
     } else {
-        // Static glyph — no animated symbol under Motion::Off; other separator content (token estimate, label) still reflects live state.
         "·"
     };
-    if let Some(label) = activity_label {
-        let phrase = humanize(label);
-        if phrase.verb.is_empty() {
-            spans.push(Span::styled(format!("  {symbol}"), theme.highlight));
-        } else {
-            spans.push(Span::styled(
-                format!("  {symbol} {}", phrase.verb),
-                theme.highlight,
-            ));
-            if !phrase.detail.is_empty() {
-                spans.push(Span::styled(
-                    format!(" · {}", phrase.detail),
-                    theme.system_message,
-                ));
-            }
-        }
-    } else {
-        spans.push(Span::styled(format!("  {symbol}"), theme.highlight));
-    }
+    spans.push(Span::styled(format!("  {symbol}"), theme.highlight));
     spans.push(Span::styled("  esc to interrupt", theme.system_message));
 }
 
-/// Build the busy separator row for `Motion::Full`.
+/// Mode hint shown on the separator row, accurate to what the keys actually do.
 ///
-/// Layout (left → right):
-/// 1. `› ` prompt glyph (2 columns, always present).
-/// 2. Activity label: `verb · detail  esc to interrupt` — measured via unicode width.
-/// 3. Wave right-fills the remaining columns (`wave_w = width - prompt_w - label_w - 1`).
-///    The `+1` is a space gutter between label and wave. `wave_w = 0` → wave skipped.
-///
-/// The `~N tokens` estimate and mode hint are deliberately omitted while busy+Full to
-/// free width for the wave.
-fn build_full_busy_sep<'a>(
-    area_width: u16,
-    activity_label: Option<&'a str>,
-    app: &'a App,
-    wave_state: WaveState,
-    wave_tick: u64,
-    theme: &'a Theme,
-    wave_buf: &mut Vec<Span<'static>>,
-) -> Vec<Span<'static>> {
-    const PROMPT_W: u16 = 2; // "› " width
-
-    // Build the human-voice label text first so we can measure it.
-    let label_text: String = if let Some(label) = activity_label {
-        let phrase = humanize(label);
-        if phrase.verb.is_empty() {
-            "  esc to interrupt".to_owned()
-        } else if phrase.detail.is_empty() {
-            format!("  {} · esc to interrupt", phrase.verb)
-        } else {
-            format!("  {} · {}  esc to interrupt", phrase.verb, phrase.detail)
-        }
-    } else {
-        "  esc to interrupt".to_owned()
-    };
-
-    #[allow(clippy::cast_possible_truncation)]
-    let label_w = label_text.width() as u16;
-
-    let wave_w = area_width
-        .saturating_sub(PROMPT_W)
-        .saturating_sub(label_w)
-        .saturating_sub(1); // gutter
-
-    // Build spans — all 'static lifetime via owned Strings.
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    spans.push(Span::styled(format!("{PROMPT_GLYPH} "), theme.highlight));
-    spans.push(Span::styled(label_text, theme.system_message));
-
-    if wave_w > 0 {
-        spans.push(Span::raw(" ")); // gutter
-        let color_mode = app.effective_color_mode();
-        let ascii = app.is_ascii_only();
-        glyphs(
-            wave_state,
-            u32::from(wave_w),
-            wave_tick,
-            color_mode,
-            ascii,
-            wave_buf,
-            theme,
-        );
-        spans.extend_from_slice(wave_buf);
+/// `Normal` → press `i` to start typing; `Insert` → `Esc` switches back to
+/// Normal mode (it does not cancel input or interrupt the agent).
+fn mode_hint(app: &App) -> &'static str {
+    match app.input_mode() {
+        InputMode::Normal => "press 'i' to type",
+        InputMode::Insert => "esc for normal mode",
     }
-
-    spans
 }
 
 /// Build the busy separator row for `Motion::Minimal` (animated) and `Motion::Off` (static).
 ///
-/// Both modes share the same layout — prompt glyph + mode hint + token estimate + queued badge
-/// + activity label. The only difference is whether the label glyph animates (`animated = true`).
+/// Layout: prompt glyph + mode hint + token estimate + queued badge + spinner +
+/// interrupt hint. The only difference between modes is whether the spinner glyph
+/// animates (`animated = true`).
 fn build_spinner_busy_sep<'a>(
     spinner_idx: u8,
-    activity_label: Option<&'a str>,
     app: &'a App,
     theme: &'a Theme,
     animated: bool,
 ) -> Vec<Span<'a>> {
-    let mode_hint = match app.input_mode() {
-        InputMode::Normal => "press 'i' to type",
-        InputMode::Insert => "esc to cancel",
-    };
     let estimate = app.context_token_estimate();
     let meta = if estimate > 0 {
         format!("  ~{} tokens", format_tokens(estimate as u64))
@@ -147,8 +68,8 @@ fn build_spinner_busy_sep<'a>(
         String::new()
     };
     let mut spans: Vec<Span<'_>> = vec![
-        Span::styled(format!("{PROMPT_GLYPH} "), theme.highlight),
-        Span::styled(mode_hint, theme.system_message),
+        Span::styled(format!("{PROMPT_GLYPH} "), theme.system_message),
+        Span::styled(mode_hint(app), theme.system_message),
         Span::styled(meta, theme.system_message),
     ];
     if app.queued_count() > 0 {
@@ -160,23 +81,12 @@ fn build_spinner_busy_sep<'a>(
     if app.editing_queued() {
         spans.push(Span::styled("  [editing queued]", theme.highlight));
     }
-    push_label_spans(
-        &mut spans,
-        spinner_idx,
-        activity_label,
-        app,
-        theme,
-        animated,
-    );
+    push_busy_tail(&mut spans, spinner_idx, app, theme, animated);
     spans
 }
 
 /// Build the idle separator row (agent not busy, all motion modes share this layout).
 fn build_idle_sep<'a>(app: &'a App, theme: &'a Theme) -> Vec<Span<'a>> {
-    let mode_hint = match app.input_mode() {
-        InputMode::Normal => "press 'i' to type",
-        InputMode::Insert => "esc to cancel",
-    };
     let estimate = app.context_token_estimate();
     let meta = if estimate > 0 {
         format!("  ~{} tokens", format_tokens(estimate as u64))
@@ -184,8 +94,8 @@ fn build_idle_sep<'a>(app: &'a App, theme: &'a Theme) -> Vec<Span<'a>> {
         String::new()
     };
     let mut spans: Vec<Span<'_>> = vec![
-        Span::styled(format!("{PROMPT_GLYPH} "), theme.highlight),
-        Span::styled(mode_hint, theme.system_message),
+        Span::styled(format!("{PROMPT_GLYPH} "), theme.system_message),
+        Span::styled(mode_hint(app), theme.system_message),
         Span::styled(meta, theme.system_message),
     ];
     if app.queued_count() > 0 {
@@ -201,7 +111,7 @@ fn build_idle_sep<'a>(app: &'a App, theme: &'a Theme) -> Vec<Span<'a>> {
 }
 
 /// Render the editable text area and update the terminal cursor position.
-fn render_text_area(app: &App, frame: &mut Frame, text_area: Rect) {
+fn render_text_area(app: &App, frame: &mut Frame, text_area: Rect, busy: bool) {
     let theme = &app.theme;
     let block = Block::default();
 
@@ -235,7 +145,7 @@ fn render_text_area(app: &App, frame: &mut Frame, text_area: Rect) {
             .style(theme.system_message)
             .scroll((scroll, 0))
             .wrap(Wrap { trim: false })
-    } else if app.input().is_empty() && matches!(app.input_mode(), InputMode::Insert) {
+    } else if app.input().is_empty() && matches!(app.input_mode(), InputMode::Insert) && !busy {
         Paragraph::new("Type a message, / for commands, @ to mention")
             .block(block)
             .style(theme.system_message)
@@ -265,18 +175,13 @@ fn render_text_area(app: &App, frame: &mut Frame, text_area: Rect) {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn render(
     app: &App,
     frame: &mut Frame,
     area: Rect,
     busy: bool,
-    activity_label: Option<&str>,
     spinner_idx: u8,
-    wave_state: WaveState,
-    wave_tick: u64,
     motion: Motion,
-    wave_buf: &mut Vec<Span<'static>>,
 ) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -286,19 +191,8 @@ pub fn render(
 
     let sep_spans: Vec<Span<'_>> = if busy {
         match motion {
-            Motion::Full => build_full_busy_sep(
-                area.width,
-                activity_label,
-                app,
-                wave_state,
-                wave_tick,
-                theme,
-                wave_buf,
-            ),
-            Motion::Minimal => {
-                build_spinner_busy_sep(spinner_idx, activity_label, app, theme, true)
-            }
-            Motion::Off => build_spinner_busy_sep(spinner_idx, activity_label, app, theme, false),
+            Motion::Off => build_spinner_busy_sep(spinner_idx, app, theme, false),
+            _ => build_spinner_busy_sep(spinner_idx, app, theme, true),
         }
     } else {
         build_idle_sep(app, theme)
@@ -308,7 +202,6 @@ pub fn render(
         Paragraph::new(Line::from(sep_spans)),
         Rect { height: 1, ..area },
     );
-
     render_text_area(
         app,
         frame,
@@ -317,6 +210,7 @@ pub fn render(
             height: area.height.saturating_sub(1),
             ..area
         },
+        busy,
     );
 }
 
@@ -334,49 +228,22 @@ mod tests {
         App::new(user_tx, agent_rx)
     }
 
-    /// Thin wrapper so existing tests don't need to manage `wave_buf` themselves.
-    #[allow(clippy::too_many_arguments)]
     fn render_input(
         app: &App,
         frame: &mut ratatui::Frame,
         area: ratatui::layout::Rect,
         busy: bool,
-        activity_label: Option<&str>,
         spinner_idx: u8,
-        wave_state: crate::widgets::wave::WaveState,
-        wave_tick: u64,
         motion: zeph_config::Motion,
     ) {
-        let mut buf = Vec::new();
-        super::render(
-            app,
-            frame,
-            area,
-            busy,
-            activity_label,
-            spinner_idx,
-            wave_state,
-            wave_tick,
-            motion,
-            &mut buf,
-        );
+        super::render(app, frame, area, busy, spinner_idx, motion);
     }
 
     #[test]
     fn input_insert_mode() {
         let app = make_app();
         let output = render_to_string(40, 5, |frame, area| {
-            render_input(
-                &app,
-                frame,
-                area,
-                false,
-                None,
-                0,
-                crate::widgets::wave::WaveState::Idle,
-                0,
-                zeph_config::Motion::Full,
-            );
+            render_input(&app, frame, area, false, 0, zeph_config::Motion::Full);
         });
         assert_snapshot!(output);
     }
@@ -391,17 +258,7 @@ mod tests {
             ),
         ));
         let output = render_to_string(40, 5, |frame, area| {
-            render_input(
-                &app,
-                frame,
-                area,
-                false,
-                None,
-                0,
-                crate::widgets::wave::WaveState::Idle,
-                0,
-                zeph_config::Motion::Full,
-            );
+            render_input(&app, frame, area, false, 0, zeph_config::Motion::Full);
         });
         assert_snapshot!(output);
     }
@@ -410,17 +267,7 @@ mod tests {
     fn input_busy_shows_spinner() {
         let app = make_app();
         let output = render_to_string(60, 5, |frame, area| {
-            render_input(
-                &app,
-                frame,
-                area,
-                true,
-                Some("Thinking..."),
-                0,
-                crate::widgets::wave::WaveState::Swell,
-                0,
-                zeph_config::Motion::Minimal,
-            );
+            render_input(&app, frame, area, true, 0, zeph_config::Motion::Minimal);
         });
         assert!(
             output.contains("esc to interrupt"),
@@ -432,17 +279,7 @@ mod tests {
     fn input_idle_width_80() {
         let app = make_app();
         let output = render_to_string(80, 5, |frame, area| {
-            render_input(
-                &app,
-                frame,
-                area,
-                false,
-                None,
-                0,
-                crate::widgets::wave::WaveState::Idle,
-                0,
-                zeph_config::Motion::Full,
-            );
+            render_input(&app, frame, area, false, 0, zeph_config::Motion::Full);
         });
         assert_snapshot!(output);
     }
@@ -451,23 +288,17 @@ mod tests {
     fn input_busy_width_40() {
         let app = make_app();
         let output = render_to_string(40, 5, |frame, area| {
-            render_input(
-                &app,
-                frame,
-                area,
-                true,
-                Some("Thinking..."),
-                0,
-                crate::widgets::wave::WaveState::Swell,
-                0,
-                zeph_config::Motion::Minimal,
-            );
+            render_input(&app, frame, area, true, 0, zeph_config::Motion::Minimal);
         });
-        // On a 40-column terminal the full "esc to interrupt" hint may be truncated;
-        // humanize() lowercases the verb, so check for "thinking" (lowercase).
+        // The busy verb is NOT duplicated here (it lives in the status bar); the
+        // separator shows the prompt glyph + mode hint, which fit at width 40.
         assert!(
-            output.contains("thinking"),
-            "activity label must appear when busy; got: {output:?}"
+            output.contains("you ▸"),
+            "prompt glyph must appear when busy; got: {output:?}"
+        );
+        assert!(
+            !output.contains("thinking"),
+            "activity label must NOT be duplicated in the input separator; got: {output:?}"
         );
     }
 
@@ -475,17 +306,7 @@ mod tests {
     fn input_busy_width_80() {
         let app = make_app();
         let output = render_to_string(80, 5, |frame, area| {
-            render_input(
-                &app,
-                frame,
-                area,
-                true,
-                Some("Thinking..."),
-                0,
-                crate::widgets::wave::WaveState::Swell,
-                0,
-                zeph_config::Motion::Minimal,
-            );
+            render_input(&app, frame, area, true, 0, zeph_config::Motion::Minimal);
         });
         assert!(
             output.contains("esc to interrupt"),
@@ -500,17 +321,7 @@ mod tests {
             crate::event::AgentEvent::ContextEstimate(14_200),
         ));
         let output = render_to_string(80, 5, |frame, area| {
-            render_input(
-                &app,
-                frame,
-                area,
-                false,
-                None,
-                0,
-                crate::widgets::wave::WaveState::Idle,
-                0,
-                zeph_config::Motion::Full,
-            );
+            render_input(&app, frame, area, false, 0, zeph_config::Motion::Full);
         });
         assert!(
             output.contains("14.2k tokens"),
@@ -522,17 +333,7 @@ mod tests {
     fn input_hides_token_estimate_when_zero() {
         let app = make_app();
         let output = render_to_string(80, 5, |frame, area| {
-            render_input(
-                &app,
-                frame,
-                area,
-                false,
-                None,
-                0,
-                crate::widgets::wave::WaveState::Idle,
-                0,
-                zeph_config::Motion::Full,
-            );
+            render_input(&app, frame, area, false, 0, zeph_config::Motion::Full);
         });
         assert!(
             !output.contains("tokens"),
@@ -573,68 +374,37 @@ mod tests {
         );
     }
 
-    // C2: Motion::Full busy-path tests (wave render integration)
-
     #[test]
-    fn input_busy_full_streaming_width_80() {
+    fn input_busy_full_shows_spinner() {
+        // Motion::Full busy path — shows animated spinner same as Minimal.
+        // The equalizer is rendered in the side panel, not in the input area.
         let app = make_app();
         let output = render_to_string(80, 5, |frame, area| {
-            render_input(
-                &app,
-                frame,
-                area,
-                true,
-                Some("Streaming..."),
-                0,
-                crate::widgets::wave::WaveState::Streaming,
-                5,
-                zeph_config::Motion::Full,
-            );
+            render_input(&app, frame, area, true, 0, zeph_config::Motion::Full);
         });
-        // Separator must have the prompt glyph and label.
         assert!(
-            output.contains('›'),
+            output.contains("you ▸"),
             "prompt glyph must appear in Full+busy; got: {output:?}"
         );
         assert!(
             output.contains("esc to interrupt"),
-            "interrupt hint must appear; got: {output:?}"
-        );
-        // Wave glyphs OR the label fills the row — no block-element crash check.
-        assert!(
-            !output.is_empty(),
-            "render must not produce empty output; got: {output:?}"
+            "interrupt hint must appear in Full+busy mode; got: {output:?}"
         );
     }
 
     #[test]
-    fn input_busy_full_narrow_wave_skipped() {
-        // width=20 is narrow enough that wave_w saturates to 0 after prompt (2) + label (~18).
+    fn input_busy_full_narrow() {
         let app = make_app();
         let output = render_to_string(20, 5, |frame, area| {
-            render_input(
-                &app,
-                frame,
-                area,
-                true,
-                None,
-                0,
-                crate::widgets::wave::WaveState::Swell,
-                0,
-                zeph_config::Motion::Full,
-            );
+            render_input(&app, frame, area, true, 0, zeph_config::Motion::Full);
         });
-        // No wave block characters when wave_w == 0.
-        for glyph in &["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"] {
-            assert!(
-                !output.contains(glyph),
-                "no wave glyphs should appear on narrow terminal; got: {output:?}"
-            );
-        }
-        // Label must still be present.
         assert!(
-            output.contains('›'),
-            "prompt glyph must appear even on narrow terminal; got: {output:?}"
+            output.contains("you ▸"),
+            "prompt glyph must appear on narrow terminal; got: {output:?}"
+        );
+        assert!(
+            !output.contains("Type a message"),
+            "placeholder must be hidden when busy; got: {output:?}"
         );
     }
 
@@ -642,29 +412,15 @@ mod tests {
     fn input_busy_motion_off() {
         let app = make_app();
         let output = render_to_string(80, 5, |frame, area| {
-            render_input(
-                &app,
-                frame,
-                area,
-                true,
-                Some("Streaming..."),
-                0,
-                crate::widgets::wave::WaveState::Streaming,
-                5,
-                zeph_config::Motion::Off,
-            );
+            render_input(&app, frame, area, true, 0, zeph_config::Motion::Off);
         });
-        // Interrupt hint must be present.
         assert!(
             output.contains("esc to interrupt"),
             "interrupt hint must appear in Off mode; got: {output:?}"
         );
-        // No block-element wave glyphs.
-        for glyph in &["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"] {
-            assert!(
-                !output.contains(glyph),
-                "no wave glyphs should appear under Motion::Off; got: {output:?}"
-            );
-        }
+        assert!(
+            !output.contains('•'),
+            "no dot-matrix bullet should appear under Motion::Off; got: {output:?}"
+        );
     }
 }

@@ -1,15 +1,21 @@
 // SPDX-FileCopyrightText: 2026 Andrei G <bug-ops>
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+use ratatui::layout::Rect;
+
 use crate::layout::AppLayout;
 use crate::widgets;
+use crate::widgets::wave::EqualizerWidget;
 
 use super::{App, Panel};
 
 impl App {
     pub fn draw(&mut self, frame: &mut ratatui::Frame) {
+        // Height of the equalizer slot carved from the bottom of the subagents panel.
+        const EQ_PANEL_H: u16 = 4;
+
         let collapsed = self.effective_collapsed();
-        let layout = AppLayout::compute(
+        let mut layout = AppLayout::compute(
             frame.area(),
             self.show_side_panels,
             self.desired_input_height(),
@@ -44,31 +50,49 @@ impl App {
                 self.sessions.current().scroll_offset.min(max_scroll);
         }
         self.draw_separator(frame, layout.separator);
-        self.draw_side_panel(frame, &layout, collapsed);
-        let spinner_idx = self.throbber_state().index().cast_unsigned();
-        let busy = self.is_agent_busy();
-        let activity_label = self.status_label().map(str::to_owned);
-        let supervisor_label = self.supervisor_activity_label();
-        let effective_label = activity_label.or(supervisor_label);
+
+        // Carve the equalizer slot from the bottom of the subagents area. The slot
+        // appears while the agent is busy OR background/external requests are inflight
+        // (so concurrent background work is visible), unless the user has hidden it.
         let wave_state = self.wave_state();
         let wave_tick = self.wave_tick();
+        let wave_active = self.is_agent_busy() || self.background_inflight() > 0;
+        let eq_area =
+            if self.show_equalizer && wave_active && layout.subagents.height > EQ_PANEL_H + 2 {
+                let sub_h = layout.subagents.height - EQ_PANEL_H;
+                let eq = Rect {
+                    y: layout.subagents.y + sub_h,
+                    height: EQ_PANEL_H,
+                    ..layout.subagents
+                };
+                layout.subagents = Rect {
+                    height: sub_h,
+                    ..layout.subagents
+                };
+                eq
+            } else {
+                Rect::default()
+            };
+
+        self.draw_side_panel(frame, &layout, collapsed);
+
+        if eq_area.height > 0 {
+            frame.render_widget(
+                EqualizerWidget {
+                    state: wave_state,
+                    tick: wave_tick,
+                    theme: &self.theme,
+                    color_mode: self.effective_color_mode(),
+                    ascii_only: self.is_ascii_only(),
+                },
+                eq_area,
+            );
+        }
+
+        let spinner_idx = self.throbber_state().index().cast_unsigned();
+        let busy = self.is_agent_busy();
         let motion = self.motion();
-        // Take the reuse buffer out of self before the shared &App borrow starts so that
-        // build_full_busy_sep can write into it without conflicting with &self below.
-        let mut wave_buf = std::mem::take(&mut self.wave_buf);
-        widgets::input::render(
-            self,
-            frame,
-            layout.input,
-            busy,
-            effective_label.as_deref(),
-            spinner_idx,
-            wave_state,
-            wave_tick,
-            motion,
-            &mut wave_buf,
-        );
-        self.wave_buf = wave_buf;
+        widgets::input::render(self, frame, layout.input, busy, spinner_idx, motion);
         widgets::status::render(self, &self.metrics, frame, layout.status);
 
         if let Some(state) = &self.file_picker_state {
@@ -143,7 +167,8 @@ impl App {
         );
 
         let line = Line::from(vec![
-            Span::styled("⬡ zeph", brand_style),
+            Span::styled("≈ ", theme.user_message),
+            Span::styled("zeph", brand_style),
             Span::styled(meta, meta_style),
         ]);
 
@@ -222,13 +247,13 @@ impl App {
             let splits = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(3),
-                    Constraint::Length(3),
+                    Constraint::Length(1),
+                    Constraint::Length(1),
                     Constraint::Min(0),
                 ])
                 .split(resources_area);
-            widgets::context_gauge::render(&self.metrics, frame, splits[0]);
-            widgets::compaction_badge::render(&self.metrics, frame, splits[1]);
+            widgets::context_gauge::render(&self.metrics, frame, splits[0], &self.theme);
+            widgets::compaction_badge::render(&self.metrics, frame, splits[1], &self.theme);
             widgets::resources::render(&self.metrics, frame, splits[2], &self.theme);
         }
 
@@ -327,7 +352,7 @@ impl App {
             } else {
                 let theme = &self.theme;
                 let header = Line::from(vec![
-                    Span::styled("⬡ ", theme.highlight),
+                    Span::styled("≈ ", theme.highlight),
                     Span::styled("tasks  supervisor not available", theme.system_message),
                 ]);
                 frame.render_widget(Paragraph::new(header), area);
@@ -353,7 +378,7 @@ impl App {
         }
         let line = if focused {
             Line::from(vec![
-                Span::styled("⬡ ", self.theme.highlight),
+                Span::styled("≈ ", self.theme.highlight),
                 Span::styled(label, self.theme.highlight),
             ])
         } else {
@@ -379,7 +404,7 @@ impl App {
             return;
         }
         let line = Line::from(vec![
-            Span::styled("⬡ ", self.theme.highlight),
+            Span::styled("≈ ", self.theme.highlight),
             Span::styled(label, self.theme.highlight),
         ]);
         frame.render_widget(Paragraph::new(line), area);
