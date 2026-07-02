@@ -8496,6 +8496,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -10246,6 +10247,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-stream",
  "tokio-util",
  "toml 1.1.2+spec-1.1.0",
  "toml_edit",
@@ -10258,6 +10260,8 @@ dependencies = [
  "uuid",
  "zeph-a2a",
  "zeph-acp",
+ "zeph-agent-context",
+ "zeph-agent-persistence",
  "zeph-bench",
  "zeph-channels",
  "zeph-common",
@@ -10276,6 +10280,7 @@ dependencies = [
  "zeph-plugins",
  "zeph-sanitizer",
  "zeph-scheduler",
+ "zeph-session",
  "zeph-skills",
  "zeph-subagent",
  "zeph-tools",
@@ -10352,6 +10357,7 @@ dependencies = [
  "zeph-llm",
  "zeph-mcp",
  "zeph-memory",
+ "zeph-session",
  "zeph-tools",
 ]
 
@@ -10399,14 +10405,17 @@ version = "0.21.4"
 dependencies = [
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
  "zeph-common",
  "zeph-config",
  "zeph-context",
+ "zeph-db",
  "zeph-llm",
  "zeph-memory",
+ "zeph-session",
 ]
 
 [[package]]
@@ -10628,6 +10637,7 @@ dependencies = [
  "zeph-orchestration",
  "zeph-plugins",
  "zeph-sanitizer",
+ "zeph-session",
  "zeph-skills",
  "zeph-subagent",
  "zeph-tools",
@@ -10974,6 +10984,23 @@ dependencies = [
  "zeph-config",
  "zeph-db",
  "zeph-durable",
+]
+
+[[package]]
+name = "zeph-session"
+version = "0.21.4"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "zeph-common",
+ "zeph-context",
+ "zeph-db",
+ "zeph-llm",
 ]
 
 [[package]]
