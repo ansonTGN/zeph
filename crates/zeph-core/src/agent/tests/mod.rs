@@ -4,6 +4,8 @@
 pub mod agent_tests; // path-preserving — DO NOT rename (used by 24+ modules via crate::agent::agent_tests::*)
 
 #[cfg(test)]
+mod bare_mode_shutdown_tests;
+#[cfg(test)]
 mod compaction_e2e;
 #[cfg(test)]
 mod confirmation_propagation_tests;
@@ -15,6 +17,8 @@ mod inline_tool_loop_tests;
 mod pre_execution_audit_tests;
 #[cfg(test)]
 mod provider_override_masking_tests;
+#[cfg(test)]
+mod provider_override_timing_tests;
 #[cfg(test)]
 mod secret_reason_truncation;
 #[cfg(test)]
