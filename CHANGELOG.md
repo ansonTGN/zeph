@@ -55,6 +55,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `changed_count` and de-duplicates `sections_changed` across every named step plus the
   final pass. Closes #5429.
 
+- `fix(scheduler,durable)`: `zeph-scheduler`'s `durable.rs` test module opened a
+  `LocalBackend` over the `:memory:` sentinel without gating on the postgres-priority
+  dual-backend cfg model, so `--features postgres` routed `:memory:` into
+  `connect_postgres` and failed at runtime with `Configuration(RelativeUrlWithoutBase)`
+  (a `cargo check` could not catch it — only running the tests could). The two
+  backend-dependent tests now live in a `with_backend` submodule gated by
+  `#[cfg(all(feature = "sqlite", not(feature = "postgres")))]`, mirroring the pattern
+  already used by `zeph-durable`'s `writer.rs`/`replay.rs`/`backend/local.rs`/`handle.rs`
+  test modules (which were already correctly gated). `zeph-durable`'s `tests/nfr_gates.rs`
+  integration test shared the same unguarded `:memory:` pattern and is now gated the same
+  way at the file level. Closes #5603.
+
+- `fix(core)`: `reformat_tool_call` (`crates/zeph-core/src/agent/tool_execution/tier_loop.rs`)
+  still silently substituted the primary provider for `tools.retry.parameter_reformat_provider`
+  when the configured name matched an entry in `provider_pool` whose provider failed to build,
+  or when no `provider_config_snapshot` was available — masking the original tool error behind
+  a "corrected" call made with the wrong model. This extends #5604's fix for #5478 (which
+  guarded only the name-absent-from-pool case) with `Agent::resolve_pool_entry_provider`
+  (`crates/zeph-core/src/agent/learning/arise.rs`), which distinguishes: (1) the provider-pool
+  registry never having been wired for this `Agent` at all (empty `provider_pool`, no
+  snapshot — only possible for lightweight test/bootstrap agents, since
+  `zeph_config::providers::validate_pool` rejects an empty `[[llm.providers]]` list at
+  config-load time, so #5450 guarantees a non-empty pool for every real production agent) —
+  unchanged, still falls back to the primary provider, matching every other
+  `resolve_background_provider` call site such as `compress_provider`; from (2) a registry that
+  IS wired but the configured name doesn't resolve, whether absent from the pool or present but
+  unbuildable — a real misconfiguration, where `reformat_tool_call` now no-ops and preserves the
+  original tool error instead of silently swapping providers. The other ~19
+  `resolve_background_provider` call sites are unchanged. Closes #5600.
+
 - `fix(tools,core)`: live agent turns no longer stall indefinitely when Qdrant is
   unreachable (up to 240s observed, never dispatching the originally-requested tool). Two
   compounding defects: (1) `handle_tool_failure_outcomes` misclassified every structured
