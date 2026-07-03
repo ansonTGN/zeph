@@ -13,7 +13,7 @@ pub struct PersonaFactRow {
     pub category: String,
     pub content: String,
     pub confidence: f64,
-    pub evidence_count: i64,
+    pub evidence_count: i32,
     pub source_conversation_id: Option<i64>,
     pub supersedes_id: Option<i64>,
     pub created_at: String,
@@ -63,7 +63,7 @@ impl DbStore {
              VALUES
                 (?, ?, ?, 1, ?, ?, {now})
              ON CONFLICT(category, content) DO UPDATE SET
-                evidence_count = evidence_count + 1,
+                evidence_count = persona_memory.evidence_count + 1,
                 confidence     = excluded.confidence,
                 supersedes_id  = COALESCE(excluded.supersedes_id, persona_memory.supersedes_id),
                 updated_at     = {now}
@@ -95,9 +95,19 @@ impl DbStore {
     ) -> Result<Vec<PersonaFactRow>, MemoryError> {
         // Facts that appear in any other row's supersedes_id column are excluded:
         // they have been replaced by a newer, contradicting fact.
-        let rows: Vec<PersonaFactRow> = query_as(sql!(
-            "SELECT id, category, content, confidence, evidence_count,
-                    source_conversation_id, supersedes_id, created_at, updated_at
+        // `created_at`/`updated_at` are `TIMESTAMPTZ` on Postgres (`TEXT` on SQLite); project
+        // both through `Dialect::select_as_text`, aliased back to their original names so
+        // `#[derive(sqlx::FromRow)]` still binds them into the `String` fields below.
+        // `confidence` is `REAL` (`FLOAT4`) on Postgres but decodes into an `f64` field;
+        // `CAST(... AS DOUBLE PRECISION)` widens it (same idiom used elsewhere in this crate).
+        let created_at_sel =
+            <ActiveDialect as zeph_db::dialect::Dialect>::select_as_text("created_at");
+        let updated_at_sel =
+            <ActiveDialect as zeph_db::dialect::Dialect>::select_as_text("updated_at");
+        let raw = format!(
+            "SELECT id, category, content, CAST(confidence AS DOUBLE PRECISION) AS confidence,
+                    evidence_count, source_conversation_id, supersedes_id,
+                    {created_at_sel} AS created_at, {updated_at_sel} AS updated_at
              FROM persona_memory
              WHERE confidence >= ?
                AND id NOT IN (
@@ -105,10 +115,12 @@ impl DbStore {
                    WHERE supersedes_id IS NOT NULL
                )
              ORDER BY confidence DESC"
-        ))
-        .bind(min_confidence)
-        .fetch_all(self.pool())
-        .await?;
+        );
+        let query_sql = zeph_db::rewrite_placeholders(&raw);
+        let rows: Vec<PersonaFactRow> = query_as(sqlx::AssertSqlSafe(query_sql))
+            .bind(min_confidence)
+            .fetch_all(self.pool())
+            .await?;
 
         Ok(rows)
     }

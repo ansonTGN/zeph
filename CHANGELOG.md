@@ -710,6 +710,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   concurrency changes only lower how often the `StartupTimeout` leak triggers). **Re-check on any
   future `testcontainers` crate version bump** — this `StartupTimeout` leak-on-cancel path is a
   known upstream limitation, not something fixable from this workspace alone.
+- `fix(memory)`: full-crate sweep for the `TIMESTAMPTZ`->`String` decode defect (#5538), same
+  class as #5524/#5527/#5525 — extends `Dialect::select_as_text` (and, where a Rust-formatted
+  timestamp is bound against a `TIMESTAMPTZ` column, `Dialect::TIMESTAMPTZ_CAST`) to ~50
+  previously-unfixed call sites across `store/{corrections,trust,preferences,persona,trajectory,
+  session_digest,compression_guidelines,experiments,admission_training,memory_tree,skills,
+  retrieval_failures}.rs`, `store/messages/mod.rs::get_eviction_candidates`, and the bulk of
+  `graph/store/mod.rs`'s entity/edge/community/alias/episode queries (three new shared
+  `*_select_cols()` helpers replace ~20 duplicated inline column lists there). Several of the
+  same functions also had a *co-located, independent* `INTEGER`/`INT4`-vs-`i64` decode mismatch
+  in the very same tuple (`experiments.rs`'s `latency_ms`/`tokens_used`, `admission_training.rs`'s
+  `composite_score`/`was_admitted`/`was_recalled`, `persona.rs`'s `evidence_count`,
+  `preferences.rs`'s `evidence_count`, `session_digest.rs`'s `token_count`,
+  `compression_guidelines.rs`'s `version`, `skills.rs`'s `invocation_count`/`version`/
+  `success_count`/`failure_count` plus an `is_active` `BOOLEAN`-vs-`i64` mismatch in the same
+  tuple, `messages/mod.rs::get_eviction_candidates`'s `access_count`, `trust.rs`'s
+  `requires_trust_check`, and `graph/store/mod.rs`'s `EdgeRow.superseded_by`/`turn_index`) —
+  without these companion fixes the `TIMESTAMPTZ` fix in those functions would have shipped as
+  dead code on Postgres, still failing one column later. The `admission_training.rs` instance
+  was caught live by CI's Postgres integration job on this PR (`ColumnDecode` failure on
+  `was_admitted`); the rest were found by a follow-up audit of every `INTEGER`-typed column
+  against every touched decode site and fixed in the same pass. Also fixes
+  `store/mem_scenes.rs::find_unscened_semantic_messages` (#5544), which bypassed the `sql!()`
+  macro, so its `LIMIT ?` was never rewritten to Postgres's `$N` syntax.
 - `fix(memory)`: three more Postgres-dialect defects in `zeph-memory`, same class as #5508/#5524
   (SQLite-only SQL surfacing incorrectly under Postgres, live-verified via Docker testcontainers).
   `datetime('now')` (SQLite-only, no Postgres equivalent) was embedded as a literal in production
