@@ -45,6 +45,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   entirely because no gate stood in front of them at all. This is intentional and brings
   ACP/daemon in line with the CLI's existing, already-shipped behavior. Closes #5611.
   Refs #5610.
+- `fix(serve)`: `zeph serve`'s session reactivation retry-exhaustion fallback
+  (`hydrate_session_sink`, `src/serve/agent_factory.rs`) now increments
+  `metrics::counter!("serve.session.reactivation_lock_exhausted_total")` when the bounded
+  `AlreadyLocked` retry budget is exhausted and reactivation degrades to no-persistence for that
+  session — previously observable only via a `tracing::warn!` log line, with no countable signal
+  for operators at scale. Mirrors the existing `durable.journal.writer.degraded_appends_total`
+  degradation-counter pattern (`crates/zeph-durable`); no new metrics framework introduced. The
+  counter is currently write-only — no global `metrics` recorder is installed anywhere in the
+  process, so this delivers instrumentation parity, not yet end-to-end dashboard/alerting
+  observability. Follow-up to #5487/PR #5517. Closes #5518.
+- `fix(acp)`: ACP clients now learn about a degraded (no-persistence) session proactively at
+  session-creation time instead of only on their next prompt. New `SessionStatusNotifier`
+  (`crates/zeph-acp`) pushes the existing `AlreadyLocked` degradation status message through the
+  session's own notify-drainer channel as soon as hydration fails, wired into all 4
+  session-construction paths (`do_new_session`/`do_load_session`/`do_fork_session`/
+  `do_resume_session`); `spawn_acp_agent` (`src/acp.rs`) falls back to the previous
+  prompt-drain-time delivery only when no ACP context is present. Follow-up to #5487/PR #5517.
+  Closes #5519.
 - `fix(acp,daemon)`: `PolicyGateExecutor` (declarative `[tools.policy]`/`[tools.authorization]`
   deny rules) and `AdversarialPolicyGateExecutor` (LLM-based `[tools.adversarial_policy]` gate)
   were constructed only in `src/runner.rs` (CLI/TUI path) — `src/acp.rs` and `src/daemon.rs`
