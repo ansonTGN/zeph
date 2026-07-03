@@ -96,7 +96,9 @@ impl SqliteStore {
         &self,
         conversation_id: Option<ConversationId>,
     ) -> Result<(i64, String), MemoryError> {
-        let row = zeph_db::query_as::<_, (i64, String)>(sql!(
+        // `version` is `INTEGER` (`INT4`) on Postgres, so it decodes as `i32`, not `i64`;
+        // widened back to `i64` below to keep this function's public return type unchanged.
+        let row = zeph_db::query_as::<_, (i32, String)>(sql!(
             // When conversation_id is Some(cid): `conversation_id = cid` matches
             // conversation-specific rows; `conversation_id IS NULL` matches global rows.
             // The CASE ensures conversation-specific rows sort before global ones.
@@ -112,7 +114,9 @@ impl SqliteStore {
         .fetch_optional(&self.pool)
         .await?;
 
-        Ok(row.unwrap_or((0, String::new())))
+        Ok(row.map_or((0, String::new()), |(version, guidelines)| {
+            (i64::from(version), guidelines)
+        }))
     }
 
     /// Load only the version and creation timestamp of the latest active compression guidelines.
@@ -178,7 +182,10 @@ impl SqliteStore {
         // The INSERT...SELECT computes MAX(version)+1 across all rows (global + per-conversation)
         // and inserts it in a single statement. SQLite's single-writer WAL guarantee makes this
         // atomic — no concurrent writer can observe the same MAX and produce a duplicate version.
-        let new_version: i64 = zeph_db::query_scalar(
+        // `version` is `INTEGER` (`INT4`) on Postgres, so `RETURNING version` decodes as `i32`,
+        // not `i64`; widened back to `i64` below to keep this function's public return type
+        // unchanged.
+        let new_version: i32 = zeph_db::query_scalar(
             sql!("INSERT INTO compression_guidelines (version, guidelines, token_count, conversation_id) \
              SELECT COALESCE(MAX(version), 0) + 1, ?, ?, ? \
              FROM compression_guidelines \
@@ -189,7 +196,7 @@ impl SqliteStore {
         .bind(conversation_id.map(|c| c.0))
         .fetch_one(&self.pool)
         .await?;
-        Ok(new_version)
+        Ok(i64::from(new_version))
     }
 
     /// Log a compression failure pair.
@@ -350,7 +357,9 @@ impl SqliteStore {
         category: &str,
         conversation_id: Option<ConversationId>,
     ) -> Result<(i64, String), MemoryError> {
-        let row = zeph_db::query_as::<_, (i64, String)>(sql!(
+        // `version` is `INTEGER` (`INT4`) on Postgres, so it decodes as `i32`, not `i64`;
+        // widened back to `i64` below to keep this function's public return type unchanged.
+        let row = zeph_db::query_as::<_, (i32, String)>(sql!(
             "SELECT version, guidelines FROM compression_guidelines \
              WHERE category = ? \
              AND (conversation_id = ? OR conversation_id IS NULL) \
@@ -363,7 +372,9 @@ impl SqliteStore {
         .fetch_optional(&self.pool)
         .await?;
 
-        Ok(row.unwrap_or((0, String::new())))
+        Ok(row.map_or((0, String::new()), |(version, guidelines)| {
+            (i64::from(version), guidelines)
+        }))
     }
 
     /// Save a new version of compression guidelines for a specific category.
@@ -378,7 +389,10 @@ impl SqliteStore {
         category: &str,
         conversation_id: Option<ConversationId>,
     ) -> Result<i64, MemoryError> {
-        let new_version: i64 = zeph_db::query_scalar(sql!(
+        // `version` is `INTEGER` (`INT4`) on Postgres, so `RETURNING version` decodes as `i32`,
+        // not `i64`; widened back to `i64` below to keep this function's public return type
+        // unchanged.
+        let new_version: i32 = zeph_db::query_scalar(sql!(
             "INSERT INTO compression_guidelines \
              (version, category, guidelines, token_count, conversation_id) \
              SELECT COALESCE(MAX(version), 0) + 1, ?, ?, ?, ? \
@@ -391,7 +405,7 @@ impl SqliteStore {
         .bind(conversation_id.map(|c| c.0))
         .fetch_one(&self.pool)
         .await?;
-        Ok(new_version)
+        Ok(i64::from(new_version))
     }
 
     /// Mark failure pairs as consumed by the updater.
