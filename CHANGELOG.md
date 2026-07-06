@@ -139,6 +139,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- `refactor(channels)`: deduplicated the `Channel::confirm` timeout/deadline-loop logic that was
+  implemented near-identically in the Telegram, Discord, and Slack adapters (send prompt with
+  timeout suffix, compute deadline, loop on `tokio::time::timeout`, skip out-of-scope messages,
+  compare reply case-insensitively against `"yes"`, deny on timeout/channel-close). A new
+  `ConfirmLoop` trait (`crates/zeph-channels/src/confirm.rs`) — mirroring the existing
+  `StreamingSend` precedent (`crates/zeph-channels/src/streaming.rs`) — provides a default
+  `run_confirm` method encoding the shared loop; each adapter implements the small per-adapter
+  hooks (`confirm_receiver`, `confirm_accepts`, `confirm_reply_text`, `confirm_send_prompt`) and
+  its `Channel::confirm` now delegates to `run_confirm` in one line (#5652). Pure refactor, no
+  behavior change.
 - `refactor(common,core,scheduler)`: deduplicated the `flock(2)`-backed pid-file guard
   implemented independently in `zeph-core::daemon::PidGuard` and
   `zeph-scheduler::pidfile::PidFile` — both opened the pid file with the same
