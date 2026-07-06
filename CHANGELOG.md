@@ -36,6 +36,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- `refactor(memory,core)`: deduplicated three independently-drifting code paths in the graph
+  subsystem. `build_entity_graph_and_maps` (`crates/zeph-memory/src/graph/community.rs`) now
+  folds each edge into the graph/fact/id maps through a single `fold_edge` helper shared by its
+  streaming and paginated branches, instead of two identical inline copies (#5503). The
+  entity/edge/community count-then-publish sequence used by `Agent::sync_graph_counts` and the
+  two graph-count-sync sites in `persistence/extract.rs` is now a single `fetch_graph_counts`
+  helper (`crates/zeph-core/src/agent/utils.rs`), preserving the existing per-field
+  fallback-to-zero-on-error semantics at each of the 3 call sites (#5677). The relation/fact
+  sanitization pattern (`strip_control_chars` + trim/lowercase + `truncate_to_bytes_ref`) and its
+  `MAX_RELATION_BYTES`/`MAX_FACT_BYTES` caps are now defined once in
+  `crates/zeph-memory/src/graph/resolver/mod.rs` (`sanitize_relation`/`sanitize_fact`, both
+  `pub(crate)`) instead of being duplicated at 3 call sites across `graph/resolver/mod.rs` and
+  `semantic/graph.rs`, which previously carried a second independent `const` declaration tracked
+  only by a "mirrors the constant from..." doc comment. Pure refactor, no behavior change;
+  covered by 11 new unit tests targeting the extracted helpers directly. (#5503, #5677, #5492)
 - `refactor(common,memory,mcp,context,llm,core)`: deduplicated three hand-rolled utility
   patterns onto shared helpers. UTF-8 char-boundary truncation (5 call sites in
   `zeph-context`, `zeph-llm`, `zeph-memory`, `zeph-core`) now calls the existing
