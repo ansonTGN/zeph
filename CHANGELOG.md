@@ -41,6 +41,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- `build`: bumped `crossbeam-epoch` to 0.9.20 (from 0.9.18) to resolve RUSTSEC-2026-0204
+  (invalid pointer dereference in `fmt::Pointer`/`fmt::Display` impls for `Atomic`/`Shared`
+  when the underlying pointer is null), a newly-published advisory that started failing the
+  `cargo-deny` gate on every PR via the `ignore`/`rayon`/`zeph-index` dependency chain. Lockfile
+  bump only, no source changes.
 - `fix(orchestration)`: two `zeph-orchestration` test sites referenced `llm-planning`-gated items
   (`PlanCache`/`normalize_goal` in `plan_cache`, `crate::planner`) without being gated behind that
   feature themselves, so `cargo check -p zeph-orchestration --tests --no-default-features
@@ -99,6 +104,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- `feat(core)`: `Agent::match_and_rank_skills`'s RL re-rank success path now emits a
+  `tracing::debug!` on every turn it fires, logging the candidate count, the active
+  `vector_backend` (`"qdrant"`/`"sqlite"`), a per-skill `(name, pre_score, post_score)`
+  breakdown after `RoutingHead::rerank()` reorders `scored`, and a `blended` flag (with
+  `update_count`/`warmup` values) distinguishing genuine cosine+RL blended output from the
+  pure cosine passthrough `rerank()` returns while `update_count < warmup_updates` — without
+  it, a short live-testing session run entirely inside the warmup window would log as if
+  blending had occurred when it hadn't, reintroducing the same "success indistinguishable
+  from inactive" ambiguity one level deeper. Previously the three existing log sites on this
+  path (embed timeout, embed dim mismatch, and the embeddings-unavailable skip branch) only
+  covered failure/skip cases, so a successful RL re-rank was indistinguishable from the
+  feature being silently inactive — blocking live cross-backend parity verification for
+  #5812/#5805 (#5834).
 - `test(core)`: extracted a `build_daemon_agent`/`BuildDaemonAgentDeps`-taking function from
   `run_daemon()`'s `AgentBuilder` construction chain (`src/daemon.rs`), completing #5819's
   remaining half left out of PR #5831 (`build_agent`/`BuildAgentDeps` for the CLI path,
