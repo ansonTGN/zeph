@@ -33,6 +33,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   input-dependent embedding support in `zeph-llm`'s test mock, out of scope for this test-only
   change. Test-only change, no production code modified.
 
+### Removed
+
+- `refactor(memory)`: removed the `SqliteStore = DbStore` type alias in
+  `crates/zeph-memory/src/store/mod.rs` (#5550) by renaming the real struct `DbStore` back to
+  `SqliteStore` and migrating its 44 call sites, since the reverse migration (`SqliteStore` →
+  `DbStore`) documented in `/specs/031-database-abstraction/spec.md` never took hold in practice
+  — `SqliteStore` remained the dominant name at ~485 call sites vs. 44 for `DbStore` across the
+  workspace. This reverses that spec's Key Invariant #9 by explicit user decision (pre-1.0.0);
+  `/specs/031-database-abstraction/spec.md` is amended in the same commit to reconcile.
+- `refactor(memory)`: removed `WriteBuffer`/`BufferedWrite` (`crates/zeph-memory/src/semantic/write_buffer.rs`)
+  (#5552) — the session-scoped write-batching type had full unit test coverage but zero call
+  sites outside its own module; nothing in the persona/message write path ever constructed or
+  drained it. Deleted the module and its `semantic::mod` / crate-root re-exports.
+
 ### Fixed
 
 - `fix(acp,server,skills)`: ACP sessions (`src/acp.rs::spawn_acp_agent`) and HTTP `/sessions`
