@@ -49,8 +49,11 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'build.rs'
+              - 'docker/**'
             workflows:
               - '.github/workflows/**'
+              - '.github/nextest.toml'
+              - '.github/testcontainers-images.txt'
               - '.cargo/**'
             shell:
               - 'install/**'
@@ -61,23 +64,24 @@ jobs:
           SPECS="${{ steps.filter.outputs.specs }}"
           CODE="${{ steps.filter.outputs.code }}"
           WORKFLOWS="${{ steps.filter.outputs.workflows }}"
+          SHELL_SCRIPTS="${{ steps.filter.outputs.shell }}"
 
           # docs-only: docs or specs changed, nothing that requires building
-          if [[ "$CODE" == "false" && "$WORKFLOWS" == "false" && ("$DOCS" == "true" || "$SPECS" == "true") ]]; then
+          if [[ "$CODE" == "false" && "$WORKFLOWS" == "false" && "$SHELL_SCRIPTS" == "false" && ("$DOCS" == "true" || "$SPECS" == "true") ]]; then
             echo "docs-only=true" >> "$GITHUB_OUTPUT"
           else
             echo "docs-only=false" >> "$GITHUB_OUTPUT"
           fi
 
           # specs-only: specs changed, no code or workflow changes
-          if [[ "$SPECS" == "true" && "$CODE" == "false" && "$WORKFLOWS" == "false" && "$DOCS" == "false" ]]; then
+          if [[ "$SPECS" == "true" && "$CODE" == "false" && "$WORKFLOWS" == "false" && "$SHELL_SCRIPTS" == "false" && "$DOCS" == "false" ]]; then
             echo "specs-only=true" >> "$GITHUB_OUTPUT"
           else
             echo "specs-only=false" >> "$GITHUB_OUTPUT"
           fi
 
           # run-full-ci: any code, workflow, or shell change triggers full CI
-          if [[ "$CODE" == "true" || "$WORKFLOWS" == "true" ]]; then
+          if [[ "$CODE" == "true" || "$WORKFLOWS" == "true" || "$SHELL_SCRIPTS" == "true" ]]; then
             echo "run-full-ci=true" >> "$GITHUB_OUTPUT"
           else
             echo "run-full-ci=false" >> "$GITHUB_OUTPUT"
@@ -182,15 +186,14 @@ jobs:
         run: cargo check --workspace --all-targets --features ${{ matrix.features }} --locked
 
   build-tests:
-    name: Build Tests (${{ matrix.os }})
+    # Linux-only: macOS/Windows builds live in the on-demand ci-non-linux.yml
+    # workflow. The artifact name keeps the -ubuntu-latest suffix for naming
+    # parity with the per-OS archives produced there.
+    name: Build Tests
     needs: detect-changes
     if: needs.detect-changes.outputs.run-full-ci == 'true'
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     timeout-minutes: 25
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest]
     env:
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: "true"
@@ -210,14 +213,46 @@ jobs:
       - name: Upload test archive
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: nextest-archive-${{ matrix.os }}
+          name: nextest-archive-ubuntu-latest
           path: nextest-archive.tar.zst
           retention-days: 1
+      - name: Upload binary
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: zeph-binary
+          path: target/ci/zeph
+          retention-days: 1
+
+  build-tests-postgres:
+    # The three postgres archives build RUNNABLE test binaries (with
+    # test-utils = testcontainers) consumed by the integration matrix. They do
+    # not duplicate the build-postgres job, which is check-only: it type-checks
+    # the whole workspace under the postgres backend and produces no artifacts.
+    # Split out of build-tests so they compile in parallel with the (longer)
+    # main workspace archive instead of serially after it — integration jobs
+    # start as soon as the slower of the two build jobs finishes.
+    name: Build Tests (postgres archives)
+    needs: detect-changes
+    if: needs.detect-changes.outputs.run-full-ci == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          cache-targets: "false"
+          shared-key: "ci"
+      - uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+      - uses: taiki-e/install-action@83a8c001de7da72527da9df53f6ef9d3a1f5b3e2 # nextest
       - name: Build and archive zeph-db postgres integration tests
-        if: matrix.os == 'ubuntu-latest'
         run: cargo nextest archive --config-file .github/nextest.toml --cargo-profile ci -p zeph-db --no-default-features --features test-utils --tests --archive-file nextest-archive-zeph-db-postgres.tar.zst
       - name: Upload zeph-db postgres test archive
-        if: matrix.os == 'ubuntu-latest'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: nextest-archive-zeph-db-postgres
@@ -230,11 +265,10 @@ jobs:
         # previously pulled in via zeph-memory's default feature set.
         # --lib --bins (not just --tests) is required so cfg!(feature = "postgres")
         # branches inside src/ (e.g. dialect-selected SQL literals) get archived too —
-        # see the "Run zeph-memory postgres unit tests" step below (#5540).
-        if: matrix.os == 'ubuntu-latest'
+        # see the "Run zeph-memory postgres unit tests" step in the integration
+        # job (#5540).
         run: cargo nextest archive --config-file .github/nextest.toml --cargo-profile ci -p zeph-memory --no-default-features --features test-utils,jsonschema --lib --bins --tests --archive-file nextest-archive-zeph-memory-postgres.tar.zst
       - name: Upload zeph-memory postgres test archive
-        if: matrix.os == 'ubuntu-latest'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: nextest-archive-zeph-memory-postgres
@@ -243,21 +277,12 @@ jobs:
       - name: Build and archive zeph-index postgres integration tests
         # sqlite and postgres are mutually exclusive; default features (which
         # include "sqlite") must be disabled so only postgres is active.
-        if: matrix.os == 'ubuntu-latest'
         run: cargo nextest archive --config-file .github/nextest.toml --cargo-profile ci -p zeph-index --no-default-features --features test-utils --tests --archive-file nextest-archive-zeph-index-postgres.tar.zst
       - name: Upload zeph-index postgres test archive
-        if: matrix.os == 'ubuntu-latest'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: nextest-archive-zeph-index-postgres
           path: nextest-archive-zeph-index-postgres.tar.zst
-          retention-days: 1
-      - name: Upload binary
-        if: matrix.os == 'ubuntu-latest'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: zeph-binary
-          path: target/ci/zeph
           retention-days: 1
 
   test:
@@ -287,11 +312,48 @@ jobs:
             --partition hash:${{ matrix.partition }}
 
   integration:
-    name: Integration Tests
-    needs: [detect-changes, lint-fmt, lint-clippy, build-tests]
+    # One job per container-backed suite so the suites run in parallel instead
+    # of serially — the job was the tail of the critical path. Non-ignored
+    # tests in *integration* binaries (e.g. zeph-acp's stdio tests) already run
+    # in the sharded test job; only #[ignore]d container-backed tests run here.
+    name: Integration Tests (${{ matrix.suite }})
+    needs: [detect-changes, lint-fmt, lint-clippy, build-tests, build-tests-postgres]
     if: needs.detect-changes.outputs.run-full-ci == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: qdrant
+            # qdrant_integration and document_integration are both Qdrant-backed
+            # (document_integration fakes embeddings in-test — no extra services);
+            # without the second binary those #[ignore]d tests would run nowhere
+            # in CI. Container concurrency is capped by the qdrant-containers
+            # test-group in .github/nextest.toml.
+            archive: nextest-archive-ubuntu-latest
+            file: nextest-archive.tar.zst
+            run_args: "-E 'binary(qdrant_integration) or binary(document_integration)'"
+          - suite: zeph-db-postgres
+            archive: nextest-archive-zeph-db-postgres
+            file: nextest-archive-zeph-db-postgres.tar.zst
+            run_args: ""
+          - suite: zeph-memory-postgres
+            # Scoped to the postgres_integration binary: zeph-memory's archive also
+            # contains hela_spreading_activation.rs (SQLite `:memory:` ignored tests,
+            # unrelated to postgres). This archive is built postgres-only (sqlite is
+            # disabled, see the archive step's comment in build-tests-postgres) — the
+            # vast majority of zeph-memory's tests use a `SqliteStore::new(":memory:")`
+            # fixture unconditionally (not gated on `#[cfg(feature = "sqlite")]`), so
+            # they'd try to parse ":memory:" as a Postgres URL and fail; running
+            # crate-wide would hit those unrelated failures.
+            archive: nextest-archive-zeph-memory-postgres
+            file: nextest-archive-zeph-memory-postgres.tar.zst
+            run_args: "-E 'binary(postgres_integration)'"
+          - suite: zeph-index-postgres
+            archive: nextest-archive-zeph-index-postgres
+            file: nextest-archive-zeph-index-postgres.tar.zst
+            run_args: "-E 'binary(postgres_integration)'"
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - uses: taiki-e/install-action@83a8c001de7da72527da9df53f6ef9d3a1f5b3e2 # nextest
@@ -328,32 +390,13 @@ jobs:
       - name: Download test archive
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          name: nextest-archive-ubuntu-latest
+          name: ${{ matrix.archive }}
       - name: Run integration tests (testcontainers)
-        run: cargo nextest run --config-file .github/nextest.toml --archive-file nextest-archive.tar.zst --workspace-remap . --profile ci -E 'binary(~integration)'
-      - name: Download zeph-db postgres test archive
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: nextest-archive-zeph-db-postgres
-      - name: Run postgres integration tests (testcontainers)
-        run: cargo nextest run --config-file .github/nextest.toml --archive-file nextest-archive-zeph-db-postgres.tar.zst --workspace-remap . --profile ci --run-ignored ignored-only
-      - name: Download zeph-memory postgres test archive
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: nextest-archive-zeph-memory-postgres
-      - name: Run zeph-memory postgres integration tests (testcontainers)
-        # Scoped to the postgres_integration binary: zeph-memory's archive also
-        # contains hela_spreading_activation.rs (SQLite `:memory:` ignored tests,
-        # unrelated to postgres). This archive is built postgres-only (sqlite is
-        # disabled, see the archive step's comment in build-tests) — the vast
-        # majority of zeph-memory's tests use a `SqliteStore::new(":memory:")`
-        # fixture unconditionally (not gated on `#[cfg(feature = "sqlite")]`), so
-        # they'd try to parse ":memory:" as a Postgres URL and fail; running
-        # crate-wide would hit those unrelated failures.
-        run: cargo nextest run --config-file .github/nextest.toml --archive-file nextest-archive-zeph-memory-postgres.tar.zst --workspace-remap . --profile ci --run-ignored ignored-only -E 'binary(postgres_integration)'
+        run: cargo nextest run --config-file .github/nextest.toml --archive-file ${{ matrix.file }} --workspace-remap . --profile ci --run-ignored ignored-only ${{ matrix.run_args }}
       - name: Run zeph-memory postgres unit tests (#5540)
+        if: matrix.suite == 'zeph-memory-postgres'
         # Runs the --lib/--bins portion of the same archive (built postgres-only
-        # via test-utils, see the archive step in build-tests), so
+        # via test-utils, see the archive step in build-tests-postgres), so
         # cfg!(feature = "postgres") branches inside src/ get unit-test coverage in
         # CI, not just integration-test coverage that depends on happening to exercise
         # the right code path. Scoped by name (not `kind(lib) + kind(bin)`) because the
@@ -364,14 +407,6 @@ jobs:
         # (see store/overflow.rs) for pure dialect-literal pinning tests that take no
         # DB connection and are safe to run under either feature build.
         run: cargo nextest run --config-file .github/nextest.toml --archive-file nextest-archive-zeph-memory-postgres.tar.zst --workspace-remap . --profile ci -E 'kind(lib) and test(matches_active_dialect)'
-      - name: Download zeph-index postgres test archive
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: nextest-archive-zeph-index-postgres
-      - name: Run zeph-index postgres integration tests (testcontainers)
-        run: cargo nextest run --config-file .github/nextest.toml --archive-file nextest-archive-zeph-index-postgres.tar.zst --workspace-remap . --profile ci --run-ignored ignored-only -E 'binary(postgres_integration)'
-      - name: Run Qdrant integration tests (testcontainers)
-        run: cargo nextest run --config-file .github/nextest.toml --archive-file nextest-archive.tar.zst --workspace-remap . --profile ci --run-ignored ignored-only -E 'binary(qdrant_integration)'
       - name: Reap orphaned testcontainers
         # Defense-in-depth, not a fix: testcontainers-rs 0.27.3 (pinned) has no Ryuk
         # reaper and can leak containers on SIGKILL or a StartupTimeout cancel under
@@ -599,7 +634,7 @@ jobs:
   ci-status:
     name: CI Status
     if: always()
-    needs: [cla, lint-shellcheck, lint-fmt, lint-clippy, msrv, build-tests, test, integration, coverage, docker-build-and-scan, bundle-check, validate-specs, build-postgres, rustdoc, release-build]
+    needs: [cla, lint-shellcheck, lint-fmt, lint-clippy, msrv, build-tests, build-tests-postgres, test, integration, coverage, docker-build-and-scan, bundle-check, validate-specs, build-postgres, rustdoc, release-build]
     runs-on: ubuntu-latest
     timeout-minutes: 1
     steps:
@@ -612,6 +647,7 @@ jobs:
             "${{ needs.lint-clippy.result }}"
             "${{ needs.msrv.result }}"
             "${{ needs.build-tests.result }}"
+            "${{ needs.build-tests-postgres.result }}"
             "${{ needs.test.result }}"
             "${{ needs.integration.result }}"
             "${{ needs.coverage.result }}"
