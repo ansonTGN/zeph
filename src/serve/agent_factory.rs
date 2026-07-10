@@ -34,6 +34,7 @@ use std::sync::Arc;
 
 use zeph_core::agent::Agent;
 use zeph_core::channel::LoopbackChannel;
+use zeph_tools::ErasedToolExecutor;
 
 use super::deps::ServeAgentDeps;
 
@@ -65,6 +66,7 @@ const REACTIVATION_LOCK_RETRY_DELAY: std::time::Duration = std::time::Duration::
     level = "info",
     fields(session_id = session_id.as_str())
 )]
+#[allow(clippy::too_many_lines)]
 pub(crate) async fn build_agent_factory(
     deps: ServeAgentDeps,
     session_id: zeph_common::SessionId,
@@ -113,6 +115,50 @@ pub(crate) async fn build_agent_factory(
         // Capture before apply_session_config consumes deps.session_config (mirrors
         // spawn_acp_agent's debug_config capture in src/acp.rs).
         let debug_config = deps.session_config.debug_config.clone();
+
+        // Spec 050 F2 (#5913): `capability_scopes` wrapping (when configured) already happened
+        // once in `serve::deps::assemble_serve_deps` — `deps.tool_executor` is shared/static
+        // across every `/sessions*` agent (unlike ACP's per-session composite), so the
+        // dead-glob outcome (FR-CG-005/NFR-CG-004) is knowable at startup and made fatal there
+        // (impl-critic F1), rather than degraded per-session here.
+
+        // Spec 050 Phase 2 (#5913): wrap with ShadowProbeExecutor when
+        // shadow_sentinel.enabled = true — mirrors src/runner.rs/src/acp.rs. Keyed by this
+        // session's own `conversation_id`, since `ServeAgentDeps.tool_executor` (unlike
+        // ACP's per-connection base chain) is shared across every `/sessions*` agent.
+        let (final_tool_executor, shadow_sentinel_arc): (Arc<dyn ErasedToolExecutor>, _) =
+            if deps.shadow_sentinel_config.enabled {
+                let sentinel_cfg = &deps.shadow_sentinel_config;
+                let pool = deps.memory.sqlite().pool().clone();
+                let llm_probe = zeph_core::agent::shadow_sentinel::LlmSafetyProbe::new(
+                    Arc::new(deps.shadow_sentinel_probe_provider.clone()),
+                    sentinel_cfg.probe_timeout_ms,
+                    sentinel_cfg.deny_on_timeout,
+                );
+                let store = zeph_core::agent::shadow_sentinel::ShadowEventStore::new(pool);
+                let sentinel = Arc::new(zeph_core::agent::shadow_sentinel::ShadowSentinel::new(
+                    store,
+                    Box::new(llm_probe),
+                    sentinel_cfg.clone(),
+                    conversation_id.0.to_string(),
+                ));
+                let turn_number = Arc::new(std::sync::atomic::AtomicU64::new(0));
+                let risk_level = Arc::new(parking_lot::RwLock::new("calm".to_owned()));
+                let probe_gate: Arc<dyn zeph_tools::ProbeGate> =
+                    Arc::new(crate::runner::ShadowSentinelProbeGateAdapter {
+                        sentinel: Arc::clone(&sentinel),
+                    });
+                let shadow_exec = zeph_tools::ShadowProbeExecutor::new(
+                    zeph_tools::DynExecutor(deps.tool_executor.clone()),
+                    probe_gate,
+                    turn_number,
+                    risk_level,
+                );
+                (Arc::new(shadow_exec), Some(sentinel))
+            } else {
+                (deps.tool_executor.clone(), None)
+            };
+
         let mut agent = Agent::new_with_registry_arc(
             deps.provider,
             deps.embedding_provider,
@@ -120,7 +166,7 @@ pub(crate) async fn build_agent_factory(
             deps.registry,
             deps.matcher,
             deps.max_active_skills,
-            zeph_tools::DynExecutor(deps.tool_executor),
+            zeph_tools::DynExecutor(final_tool_executor),
         )
         .apply_session_config(deps.session_config)
         .with_skill_matching_config(
@@ -158,6 +204,11 @@ pub(crate) async fn build_agent_factory(
         .with_provider_pool(deps.provider_pool, deps.provider_config_snapshot);
         if !preloaded_messages.is_empty() {
             agent = agent.with_preloaded_messages(preloaded_messages);
+        }
+        // Spec 050 Phase 2 (#5913): wire ShadowSentinel into the agent so begin_turn() calls
+        // advance_turn(), matching src/runner.rs/src/acp.rs/src/daemon.rs.
+        if let Some(sentinel) = shadow_sentinel_arc {
+            agent = agent.with_shadow_sentinel(sentinel);
         }
         if let Some(head) = rl_head {
             agent = agent.with_rl_head(head);
@@ -562,6 +613,10 @@ mod tests {
             resume_token_counter: Arc::new(token_counter),
             provider_pool: Vec::new(),
             provider_config_snapshot: zeph_core::ProviderConfigSnapshot::default(),
+            shadow_sentinel_config: zeph_config::ShadowSentinelConfig::default(),
+            shadow_sentinel_probe_provider: AnyProvider::Mock(
+                zeph_llm::mock::MockProvider::default(),
+            ),
         };
 
         let build_agent = build_agent_factory(deps, session_id.clone(), cid).await;
@@ -643,6 +698,10 @@ mod tests {
                 ..zeph_core::config::ProviderEntry::default()
             }],
             provider_config_snapshot: zeph_core::ProviderConfigSnapshot::default(),
+            shadow_sentinel_config: zeph_config::ShadowSentinelConfig::default(),
+            shadow_sentinel_probe_provider: AnyProvider::Mock(
+                zeph_llm::mock::MockProvider::default(),
+            ),
         };
 
         let build_agent = build_agent_factory(deps, session_id.clone(), cid).await;
@@ -743,6 +802,10 @@ mod tests {
             resume_token_counter: Arc::new(token_counter),
             provider_pool: Vec::new(),
             provider_config_snapshot: zeph_core::ProviderConfigSnapshot::default(),
+            shadow_sentinel_config: zeph_config::ShadowSentinelConfig::default(),
+            shadow_sentinel_probe_provider: AnyProvider::Mock(
+                zeph_llm::mock::MockProvider::default(),
+            ),
         };
 
         let build_agent = build_agent_factory(deps, session_id.clone(), cid).await;
@@ -832,6 +895,10 @@ mod tests {
             resume_token_counter: Arc::new(token_counter),
             provider_pool: Vec::new(),
             provider_config_snapshot: zeph_core::ProviderConfigSnapshot::default(),
+            shadow_sentinel_config: zeph_config::ShadowSentinelConfig::default(),
+            shadow_sentinel_probe_provider: AnyProvider::Mock(
+                zeph_llm::mock::MockProvider::default(),
+            ),
         };
 
         let build_agent = build_agent_factory(deps, session_id.clone(), cid).await;
@@ -920,6 +987,10 @@ mod tests {
             resume_token_counter: Arc::new(token_counter),
             provider_pool: Vec::new(),
             provider_config_snapshot: zeph_core::ProviderConfigSnapshot::default(),
+            shadow_sentinel_config: zeph_config::ShadowSentinelConfig::default(),
+            shadow_sentinel_probe_provider: AnyProvider::Mock(
+                zeph_llm::mock::MockProvider::default(),
+            ),
         };
 
         let build_agent = build_agent_factory(deps, session_id.clone(), cid).await;
@@ -1006,6 +1077,10 @@ mod tests {
             resume_token_counter: Arc::new(token_counter),
             provider_pool: Vec::new(),
             provider_config_snapshot: zeph_core::ProviderConfigSnapshot::default(),
+            shadow_sentinel_config: zeph_config::ShadowSentinelConfig::default(),
+            shadow_sentinel_probe_provider: AnyProvider::Mock(
+                zeph_llm::mock::MockProvider::default(),
+            ),
         };
 
         let build_agent = build_agent_factory(deps, session_id.clone(), cid).await;
