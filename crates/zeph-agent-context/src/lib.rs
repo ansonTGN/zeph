@@ -3,8 +3,14 @@
 
 // The graph-retrieval-strategy dispatch in `helpers::fetch_graph_facts` chains several
 // nested async fns (`run_graph_strategy`, `run_synapse_strategy`, `run_hybrid_strategy`, ...),
-// which pushes the compiler's Future-layout query depth beyond the default limit of 128
-// under the `postgres` feature's larger `DbPool`/`DbTransaction` types.
+// which pushes the compiler's Future-layout query depth beyond the default limit of 128.
+// This only manifests with the `full` feature bundle combined with `postgres` at the
+// *workspace* level (`cargo check --workspace --all-targets --no-default-features
+// --features full,postgres`) — `full` pulls in additional dependent crates (candle, pdf,
+// scheduler, tui, acp, gateway, a2a, otel, prometheus) whose types push the query depth
+// further than `postgres` alone. A crate-scoped build (`-p zeph-agent-context --features
+// postgres`) does NOT reproduce this; always verify against the workspace+full+postgres
+// combination before touching this attribute again.
 #![recursion_limit = "256"]
 
 //! Agent context-assembly service for Zeph.
