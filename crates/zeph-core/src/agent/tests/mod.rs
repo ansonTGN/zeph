@@ -21,6 +21,8 @@ mod flush_orphaned_tests;
 mod inline_tool_loop_tests;
 #[cfg(test)]
 mod mage_signal_mapping_tests;
+#[cfg(all(test, feature = "scheduler"))]
+mod per_task_verify_signal_tests;
 #[cfg(test)]
 mod pre_execution_audit_tests;
 #[cfg(test)]
@@ -35,3 +37,5 @@ mod shutdown_summary_tests;
 mod small_misc_tests;
 #[cfg(test)]
 mod trim_parent_messages_tests;
+#[cfg(all(test, feature = "scheduler"))]
+mod whole_plan_verify_signal_tests;
