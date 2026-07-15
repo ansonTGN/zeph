@@ -570,8 +570,6 @@ fn lsregister_with_timeout(args: &[&str]) -> anyhow::Result<bool> {
 
 #[cfg(target_os = "windows")]
 fn register_windows(exe_str: &str) -> anyhow::Result<()> {
-    use std::io::Write as _;
-
     // Use reg.exe to avoid pulling in the winreg crate for this v1 implementation.
     // The Windows approach for v1 is to shell out to reg.exe (always present on Windows).
     let base = "HKCU\\Software\\Classes\\zeph";

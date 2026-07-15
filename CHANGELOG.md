@@ -14,6 +14,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   targets (e.g. `x86_64-pc-windows-msvc`) saw it as dead code, which the workspace's
   `build.warnings = deny` policy turned into a release-build failure.
 
+- `src/url_scheme/register.rs`: removed an unused `std::io::Write` import from
+  `register_windows` — the `#[cfg(target_os = "windows")]` function never called any
+  `Write` trait method, but the import only compiles under a Windows target, so the
+  resulting dead-code-adjacent `unused_imports` warning was invisible on Unix CI runners
+  and only surfaced (denied by `build.warnings`) on the release build's
+  `x86_64-pc-windows-msvc` target.
+
 ### Security
 
 - Bumped the transitively-pinned `spin` crate off two yanked versions in `Cargo.lock`:
