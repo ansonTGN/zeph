@@ -7,6 +7,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ## [0.22.1] - 2026-07-15
+### Fixed
+
+- `zeph-session`: gated the `LOCK_FILE_NAME` constant behind `#[cfg(unix)]` — it is only
+  referenced from `AdvisoryLock::acquire`'s Unix `flock(2)` implementation, so non-Unix
+  targets (e.g. `x86_64-pc-windows-msvc`) saw it as dead code, which the workspace's
+  `build.warnings = deny` policy turned into a release-build failure.
+
 ### Security
 
 - Bumped the transitively-pinned `spin` crate off two yanked versions in `Cargo.lock`:

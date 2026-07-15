@@ -39,6 +39,7 @@ use crate::error::SessionError;
 use crate::event::{SessionEvent, SessionEventEnvelope};
 
 const EVENTS_FILE_NAME: &str = "events.jsonl";
+#[cfg(unix)]
 const LOCK_FILE_NAME: &str = "events.jsonl.lock";
 
 /// Chunk size for [`SessionEventLog::read_chunked`] (spec §6.2 step 3: "bounded buffer, ≤ 100
