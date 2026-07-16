@@ -430,12 +430,14 @@ fn configured_acp_autostart_transport(config: &Config, cli: &Cli) -> Option<AcpT
 }
 
 #[cfg(feature = "acp")]
+#[allow(clippy::too_many_lines)]
 async fn run_configured_acp_autostart(cli: &Cli, transport: AcpTransport) -> anyhow::Result<()> {
     let config_path = cli.config.clone();
     let vault_backend = cli.vault.clone();
     let vault_key = cli.vault_key.clone();
     let vault_path = cli.vault_path.clone();
     let safe_mode = crate::execution_mode::resolve_safe_mode_flag(cli.safe_mode);
+    let no_mcp_media = cli.no_mcp_media;
 
     match transport {
         AcpTransport::Stdio => {
@@ -448,6 +450,7 @@ async fn run_configured_acp_autostart(cli: &Cli, transport: AcpTransport) -> any
                 Vec::new(),
                 None,
                 safe_mode,
+                no_mcp_media,
             ))
             .await
         }
@@ -461,6 +464,7 @@ async fn run_configured_acp_autostart(cli: &Cli, transport: AcpTransport) -> any
                 None,
                 None,
                 safe_mode,
+                no_mcp_media,
             ))
             .await
         }
@@ -476,6 +480,7 @@ async fn run_configured_acp_autostart(cli: &Cli, transport: AcpTransport) -> any
                     Vec::new(),
                     None,
                     safe_mode,
+                    no_mcp_media,
                 ) => result,
                 result = run_acp_http_server(
                     config_path.as_deref(),
@@ -485,6 +490,7 @@ async fn run_configured_acp_autostart(cli: &Cli, transport: AcpTransport) -> any
                     None,
                     None,
                     safe_mode,
+                    no_mcp_media,
                 ) => result,
             }
         }
@@ -503,6 +509,7 @@ async fn run_configured_acp_autostart(cli: &Cli, transport: AcpTransport) -> any
                 Vec::new(),
                 None,
                 safe_mode,
+                no_mcp_media,
             ))
             .await
         }
@@ -522,6 +529,7 @@ async fn run_configured_acp_autostart(cli: &Cli, transport: AcpTransport) -> any
                 Vec::new(),
                 None,
                 safe_mode,
+                no_mcp_media,
             ))
             .await
         }
@@ -1159,6 +1167,7 @@ pub(crate) async fn run(mut cli: Cli) -> anyhow::Result<()> {
             cli.vault_key.as_deref(),
             cli.vault_path.as_deref(),
             crate::execution_mode::resolve_safe_mode_flag(cli.safe_mode),
+            cli.no_mcp_media,
         ))
         .await;
     }
@@ -1187,6 +1196,7 @@ pub(crate) async fn run(mut cli: Cli) -> anyhow::Result<()> {
             cli.acp_auth_method,
             cli_message_ids,
             crate::execution_mode::resolve_safe_mode_flag(cli.safe_mode),
+            cli.no_mcp_media,
         ))
         .await;
     }
@@ -1201,6 +1211,7 @@ pub(crate) async fn run(mut cli: Cli) -> anyhow::Result<()> {
             cli.acp_http_bind.as_deref(),
             cli.acp_auth_token,
             crate::execution_mode::resolve_safe_mode_flag(cli.safe_mode),
+            cli.no_mcp_media,
         ))
         .await;
     }
@@ -1219,6 +1230,7 @@ pub(crate) async fn run(mut cli: Cli) -> anyhow::Result<()> {
         cli.vault_key.as_deref(),
         cli.vault_path.as_deref(),
         crate::execution_mode::resolve_safe_mode_flag(cli.safe_mode),
+        cli.no_mcp_media,
     )
     .await?;
 
@@ -1583,6 +1595,7 @@ pub(crate) async fn run(mut cli: Cli) -> anyhow::Result<()> {
             with_tool_events,
             exec_mode.bare,
             exec_mode.safe_mode,
+            exec_mode.no_mcp_media,
             runtime_ctx,
             app.age_vault_arc(),
             Some(agent_status_tx.clone()),
@@ -1599,6 +1612,7 @@ pub(crate) async fn run(mut cli: Cli) -> anyhow::Result<()> {
         with_tool_events,
         exec_mode.bare,
         exec_mode.safe_mode,
+        exec_mode.no_mcp_media,
         runtime_ctx,
         app.age_vault_arc(),
         Some(agent_status_tx.clone()),
