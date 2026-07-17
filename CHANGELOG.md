@@ -59,6 +59,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- `.github/workflows/ci.yml`: the `ci-status` gate job did not depend on `detect-changes`
+  and never checked its `result`. GitHub Actions marks every job with
+  `needs: detect-changes` as `skipped` (not `failure`) when `detect-changes` itself fails,
+  and `ci-status`'s check loop already treated `skipped` as an acceptable result — so a
+  hard failure in `detect-changes` (e.g. the `dorny/paths-filter` action erroring) cascaded
+  into an all-`skipped` downstream that `ci-status` reported as "All jobs passed",
+  incorrectly marking the PR mergeable. `detect-changes` is now included in `ci-status`'s
+  `needs` array and `results` check.
 - `zeph-core`: `cached_prompt_tokens` was never recomputed after `rebuild_system_prompt`
   rewrote `messages[0]` with the real, per-turn-filtered system prompt, leaving the counter
   pinned at whatever value it held before the rebuild — on turn 0 this was the
@@ -95,6 +103,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   ABI compatibility with `ollama-rs`'s own `^0.12.28` requirement) from `0.13.4` back to `0.12`,
   which Renovate had bumped past the version `ollama-rs` actually depends on, breaking the
   `rustls-tls` feature name in the process.
+
+- **zeph-llm**: fixed a `full`/`postgres`-only build breakage from the same `rust-minor-patch`
+  bundle (#6324) that the fix above missed — the `gonka` feature (pulled in only by the
+  `full`/`bench` bundles and the postgres workspace check, not the default CI feature set) was
+  never exercised locally before that PR merged. `k256`'s `elliptic-curve` bump to 0.14
+  deprecated `ToEncodedPoint` in favor of `ToSec1Point`, and `build.warnings` denies the
+  resulting deprecation warning; `crates/zeph-llm/src/gonka/signer.rs` now imports and calls
+  `ToSec1Point`/`to_sec1_point` instead.
 
 ### Testing
 
