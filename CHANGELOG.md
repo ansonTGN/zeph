@@ -192,6 +192,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   through the same dump pipeline as top-level calls. Covers both the standalone `/agent`
   spawn path and `/agent resume`, which previously dropped the sink by passing `None` for
   `spawn_context`.
+- `zeph-core`/`zeph-subagent`: sub-agent-executed LLM-call debug dumps (#6391) only received
+  the baseline `scrub_content`/`redact_binary_blobs` pass, skipping the optional extra
+  `PiiFilter.scrub()` layer that top-level dumps get when `[classifiers]`/PII filtering is
+  enabled — an inconsistent PII-redaction posture between top-level and sub-agent-executed
+  dumps, though not a secret-leak risk since baseline scrubbing still applied (#6407). Added
+  `zeph-sanitizer`'s `PiiFilter` (`Clone`, now cheap since compiled `Regex` values are
+  `Arc`-backed) and `zeph-core`'s new `PiiScrubbingDumpSink`, which wraps `DebugDumper` and
+  applies the same `PiiFilter` scrub top-level dumps get before delegating; `build_spawn_context`
+  now threads a cloned `PiiFilter` handle into the sub-agent `DebugDumpSink` this way.
+- `zeph-subagent`/`zeph-core`: `collect_finished_subagents()` determined reapability purely
+  from `status_rx`'s terminal state, so a sub-agent task that exited via a panic inside
+  `run_agent_loop` — without ever publishing a terminal `SubAgentStatus` — left its handle
+  frozen in the last observed `Working` value forever, reproducing the same zombie-sidebar-entry
+  symptom as #6381 through a path #6406 did not close (#6408). Added
+  `zeph_common::task_supervisor::BlockingHandle::is_finished` and
+  `SubAgentManager::is_task_finished`, an independent runtime-level terminal signal now checked
+  alongside `status_rx` state. Also fixed a related bug in `SubAgentManager::collect()`: it
+  early-returned via `?` on a panicked `join_handle`, skipping the fleet `mark_terminal` call and
+  the final `TranscriptMeta` write for panicked tasks; the double-`Result` is now flattened so
+  both still run.
 - `src/channel.rs`: `impl Channel for AppChannel` forwarded most `Channel` trait methods via
   `dispatch_app_channel!` but never overrode `elicit()` or `send_context_estimate()`, so both
   calls fell through to the trait's default methods instead of reaching `AnyChannel`/`TuiChannel`'s
