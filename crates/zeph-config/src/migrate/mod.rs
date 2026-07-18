@@ -16,6 +16,7 @@ mod infra;
 mod llm;
 mod mcp;
 mod memory;
+mod plugins;
 mod serve;
 mod session;
 mod tools;
@@ -36,6 +37,7 @@ pub(crate) use llm::migrate_gonkagate_to_gonka;
 pub use llm::*;
 pub use mcp::*;
 pub use memory::*;
+pub use plugins::migrate_plugins_reputation_config;
 pub use serve::migrate_serve_config;
 pub use session::*;
 pub use tools::*;
@@ -620,18 +622,18 @@ use steps::{
     MigrateOrchestrationIdleTimeout, MigrateOrchestrationPersistence,
     MigrateOrchestrationWholePlanVerifierTimeout, MigrateOrchestratorProvider, MigrateOtelFilter,
     MigrateOverflowMaxPerCallOverride, MigratePiiFilterNames, MigratePlannerModelToProvider,
-    MigratePolicyProviderAndUtilityWindow, MigrateProviderMaxConcurrent, MigrateQdrantApiKey,
-    MigrateQdrantTimeoutSecs, MigrateQualityConfig, MigrateSandboxConfig,
-    MigrateSandboxEgressFilter, MigrateSchedulerDaemon, MigrateSearchConfig,
-    MigrateSecretMaskingConfig, MigrateServeConfig, MigrateSessionPersistProviderOverrides,
-    MigrateSessionPersistenceConfig, MigrateSessionProviderPersistence, MigrateSessionRecapConfig,
-    MigrateSessionResumeConfig, MigrateShadowSentinelConfig, MigrateShellCheckpointsConfig,
-    MigrateShellTransactional, MigrateSkillTrustRequireCheck, MigrateSkillsRegistry,
-    MigrateSttToProvider, MigrateSupervisorConfig, MigrateTelemetryConfig,
-    MigrateToolsCompressionConfig, MigrateTraceMetadata, MigrateTuiDelights, MigrateTuiMouse,
-    MigrateTuiThemeConfig, MigrateTuiThemeDefaults, MigrateUtilityHighGainTools,
-    MigrateVigilConfig, MigrateWorktreeConfig, MigrateWorktreeGitTimeout,
-    MigrateWorktreeQuotaFields,
+    MigratePluginsReputationConfig, MigratePolicyProviderAndUtilityWindow,
+    MigrateProviderMaxConcurrent, MigrateQdrantApiKey, MigrateQdrantTimeoutSecs,
+    MigrateQualityConfig, MigrateSandboxConfig, MigrateSandboxEgressFilter, MigrateSchedulerDaemon,
+    MigrateSearchConfig, MigrateSecretMaskingConfig, MigrateServeConfig,
+    MigrateSessionPersistProviderOverrides, MigrateSessionPersistenceConfig,
+    MigrateSessionProviderPersistence, MigrateSessionRecapConfig, MigrateSessionResumeConfig,
+    MigrateShadowSentinelConfig, MigrateShellCheckpointsConfig, MigrateShellTransactional,
+    MigrateSkillTrustRequireCheck, MigrateSkillsRegistry, MigrateSttToProvider,
+    MigrateSupervisorConfig, MigrateTelemetryConfig, MigrateToolsCompressionConfig,
+    MigrateTraceMetadata, MigrateTuiDelights, MigrateTuiMouse, MigrateTuiThemeConfig,
+    MigrateTuiThemeDefaults, MigrateUtilityHighGainTools, MigrateVigilConfig,
+    MigrateWorktreeConfig, MigrateWorktreeGitTimeout, MigrateWorktreeQuotaFields,
 };
 
 /// Ordered registry of all sequential migration steps (steps 1–95).
@@ -829,6 +831,9 @@ pub static MIGRATIONS: std::sync::LazyLock<Vec<Box<dyn Migration + Send + Sync>>
             // Step 97 — insert active key_id = 0 into an existing [durable] table lacking it
             // (AEAD payload-key rotation, #6447)
             Box::new(MigrateDurableKeyRotation),
+            // Step 98 — add [plugins.reputation] advisory block for the install-time
+            // name-similarity/typosquat check (spec-043, #5864)
+            Box::new(MigratePluginsReputationConfig),
         ]
     });
 
