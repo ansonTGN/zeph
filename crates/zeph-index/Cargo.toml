@@ -20,7 +20,6 @@ notify-debouncer-mini.workspace = true
 schemars.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
-testcontainers = { workspace = true, features = ["watchdog"], optional = true }
 testcontainers-modules = { workspace = true, features = ["postgres"], optional = true }
 thiserror.workspace = true
 tokio = { workspace = true, features = ["fs", "rt"] }
@@ -39,6 +38,15 @@ zeph-db.workspace = true
 zeph-llm.workspace = true
 zeph-memory.workspace = true
 zeph-tools.workspace = true
+
+# testcontainers' `watchdog` feature pulls in signal-hook's `iterator` module,
+# which is not built on Windows (signal-hook gates it `cfg(not(windows))`),
+# breaking builds with `test-utils` enabled on windows-latest CI.
+[target.'cfg(not(windows))'.dependencies]
+testcontainers = { workspace = true, features = ["watchdog"], optional = true }
+
+[target.'cfg(windows)'.dependencies]
+testcontainers = { workspace = true, optional = true }
 
 [dev-dependencies]
 serial_test.workspace = true

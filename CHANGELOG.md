@@ -23,6 +23,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- `zeph-db`/`zeph-index`/`zeph-memory`/`zeph-mcp`/`zeph-orchestration`/`zeph-session`: the
+  `testcontainers` dependency's `watchdog` feature (used to auto-stop leaked containers in
+  Postgres integration tests) pulls in `signal-hook`'s `iterator` module, which `signal-hook`
+  itself gates to `cfg(not(windows))`. Since `watchdog` was enabled unconditionally, this broke
+  `cargo test`/`nextest archive` on `windows-latest` CI (`error[E0432]: unresolved imports
+  signal_hook::consts::SIGQUIT, signal_hook::iterator`) — a dev-dependency in `zeph-memory`,
+  `zeph-orchestration`, and `zeph-mcp` is always compiled for any test build regardless of
+  feature selection. `testcontainers` is now split into `[target.'cfg(not(windows))']` (keeps
+  `watchdog`) and `[target.'cfg(windows)']` (no `watchdog`) dependency tables in all six crates;
+  no source code referenced the watchdog API directly, so behavior is unchanged on non-Windows.
 - `zeph-subagent`: `GrantKind::Tool` capability grants were defined and TTL-tracked identically
   to `GrantKind::Secret` in `PermissionGrants`, but no production call site ever checked one
   before dispatching a tool — a latent trap where the type's documented TTL/revocation contract

@@ -58,11 +58,19 @@ zeph-tools.workspace = true
 
 [dev-dependencies]
 rmcp = { workspace = true, features = ["server"] }
-testcontainers = { workspace = true, features = ["watchdog"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 tracing-test.workspace = true
 wiremock.workspace = true
 zeph-llm = { workspace = true, features = ["testing"] }
+
+# testcontainers' `watchdog` feature pulls in signal-hook's `iterator` module,
+# which is not built on Windows (signal-hook gates it `cfg(not(windows))`),
+# breaking `cargo test`/`nextest archive` on windows-latest CI.
+[target.'cfg(not(windows))'.dev-dependencies]
+testcontainers = { workspace = true, features = ["watchdog"] }
+
+[target.'cfg(windows)'.dev-dependencies]
+testcontainers.workspace = true
 
 [lints]
 workspace = true

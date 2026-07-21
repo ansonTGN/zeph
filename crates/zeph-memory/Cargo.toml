@@ -66,11 +66,19 @@ criterion.workspace = true
 insta.workspace = true
 proptest.workspace = true
 tempfile.workspace = true
-testcontainers = { workspace = true, features = ["watchdog"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 toml.workspace = true
 tracing-test.workspace = true
 zeph-llm = { workspace = true, features = ["testing"] }
+
+# testcontainers' `watchdog` feature pulls in signal-hook's `iterator` module,
+# which is not built on Windows (signal-hook gates it `cfg(not(windows))`),
+# breaking `cargo test`/`nextest archive` on windows-latest CI.
+[target.'cfg(not(windows))'.dev-dependencies]
+testcontainers = { workspace = true, features = ["watchdog"] }
+
+[target.'cfg(windows)'.dev-dependencies]
+testcontainers.workspace = true
 
 [lints]
 workspace = true
