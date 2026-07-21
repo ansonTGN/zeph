@@ -2040,7 +2040,10 @@ impl ShellExecutor {
     /// (`execute_tool_call` -> `resolve_context` -> `spawn_background_with_context`) so the
     /// `allowed_paths` sandbox clamp in `resolve_context` always applies. Gated `#[cfg(test)]`
     /// so a future production caller fails to compile (regression guard for #6217/#6208).
-    #[cfg(test)]
+    /// Also gated `#[cfg(not(target_os = "windows"))]`: every caller is a `sleep`-dependent
+    /// test that is itself excluded on Windows, which otherwise leaves this method fully
+    /// dead code under `-D warnings` on that target (run 29871343200).
+    #[cfg(all(test, not(target_os = "windows")))]
     async fn spawn_background(&self, command: &str) -> Result<RunId, ToolError> {
         let resolved = self.resolve_context(None)?;
         self.spawn_background_with_context(command, &resolved).await

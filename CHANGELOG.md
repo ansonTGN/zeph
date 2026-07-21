@@ -23,6 +23,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- `zeph-tools`: the `windows-latest` `Build and archive tests` job still failed with
+  `error: method `spawn_background` is never used` (run 29871343200) even after the previous
+  fix below gated `supervised_background_run_limit_still_enforced` at the function level —
+  every one of the test-only `ShellExecutor::spawn_background` helper's seven call sites
+  (`spawn_background_cap_enforcement`, `shutdown_terminates_long_running_background`,
+  `background_runs_snapshot_returns_active_run`,
+  `supervised_background_task_is_visible_in_supervisor`,
+  `supervised_background_run_limit_still_enforced`) is individually gated
+  `#[cfg(not(target_os = "windows"))]` or `#[cfg(unix)]`, so the helper itself remained fully
+  dead code on Windows regardless of how any single caller was gated. Added
+  `#[cfg(not(target_os = "windows"))]` to `spawn_background` itself to match its callers.
 - `zeph-tools`: `shell::tests::supervised_background_run_limit_still_enforced` broke the
   `windows-latest` `Build and archive tests` job under `-D warnings` (run 29865904740,
   `error: unused variable: `executor`` / `error: method `spawn_background` is never used`).
