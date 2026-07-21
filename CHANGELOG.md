@@ -23,6 +23,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- `zeph-tools`: `shell::tests::supervised_background_run_limit_still_enforced` broke the
+  `windows-latest` `Build and archive tests` job under `-D warnings` (run 29865904740,
+  `error: unused variable: `executor`` / `error: method `spawn_background` is never used`).
+  Unlike its sibling `supervised_background_task_is_visible_in_supervisor` directly above it,
+  this test only gated its `sleep`-dependent body with an inline
+  `#[cfg(not(target_os = "windows"))] { .. }` block instead of gating the whole `#[tokio::test]`
+  function, leaving the `executor` binding unused on Windows and, since every other caller of
+  the test-only `ShellExecutor::spawn_background` helper is already Windows-gated, making that
+  method fully dead code on that target. Moved the `#[cfg(not(target_os = "windows"))]` to the
+  function level, matching the sibling test's convention.
 - `.github/workflows/ci.yml`: the `coverage` job's `cargo llvm-cov nextest` run intermittently
   crashed with `thread ... has overflowed its stack` /
   `fatal runtime error: stack overflow, aborting` on

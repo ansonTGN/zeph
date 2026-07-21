@@ -3601,6 +3601,7 @@ async fn supervised_background_task_is_visible_in_supervisor() {
     cancel.cancel();
 }
 
+#[cfg(not(target_os = "windows"))]
 #[tokio::test]
 async fn supervised_background_run_limit_still_enforced() {
     let cancel = CancellationToken::new();
@@ -3614,17 +3615,14 @@ async fn supervised_background_run_limit_still_enforced() {
     };
     let executor = ShellExecutor::new(&config).with_task_supervisor(supervisor.clone());
 
-    #[cfg(not(target_os = "windows"))]
-    {
-        // First spawn occupies the single slot.
-        let _id = executor.spawn_background("sleep 10").await.unwrap();
-        // Second spawn must be rejected regardless of supervisor presence.
-        let err = executor.spawn_background("sleep 10").await.unwrap_err();
-        assert!(
-            matches!(err, ToolError::Blocked { .. }),
-            "cap must be enforced with supervisor wired; got: {err:?}"
-        );
-    }
+    // First spawn occupies the single slot.
+    let _id = executor.spawn_background("sleep 10").await.unwrap();
+    // Second spawn must be rejected regardless of supervisor presence.
+    let err = executor.spawn_background("sleep 10").await.unwrap_err();
+    assert!(
+        matches!(err, ToolError::Blocked { .. }),
+        "cap must be enforced with supervisor wired; got: {err:?}"
+    );
 
     cancel.cancel();
 }
