@@ -451,6 +451,15 @@ jobs:
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: "true"
       CARGO_BUILD_WARNINGS: "allow"
+      # -C instrument-coverage inflates per-frame size on top of already-large
+      # Config-heavy async test frames (same root cause as the daemon-startup
+      # stack overflow fixed in #5394); tests that build more than one Agent/
+      # ServeAgentDeps in the same frame (e.g.
+      # build_agent_factory_gates_trust_state_independently_per_session) can
+      # overflow the default per-test thread stack under instrumentation even
+      # though they pass in the non-instrumented `test` job. Give test threads
+      # a larger stack here rather than in every other job.
+      RUST_MIN_STACK: "33554432"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable

@@ -23,6 +23,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- `.github/workflows/ci.yml`: the `coverage` job's `cargo llvm-cov nextest` run intermittently
+  crashed with `thread ... has overflowed its stack` /
+  `fatal runtime error: stack overflow, aborting` on
+  `serve::agent_factory::tests::build_agent_factory_gates_trust_state_independently_per_session`
+  (run 29865713545), failing the job with exit code 100 even though the identical test passes in
+  the non-instrumented `test` shards on the same commit. `-C instrument-coverage` inflates
+  per-frame size on top of an already-large async test frame (this test holds two full
+  `Agent`/`ServeAgentDeps`/executor sets live at once, unlike its single-agent sibling tests) —
+  the same root-cause class as the daemon-startup stack overflow fixed in #5394. Added
+  `RUST_MIN_STACK: "33554432"` (32 MiB) to the `coverage` job's env, scoped to that job only, so
+  the default per-test thread stack size (which the standard Rust test harness reads from this
+  variable) no longer clips overhead-inflated instrumented frames.
 - `zeph-db`/`zeph-index`/`zeph-memory`/`zeph-mcp`/`zeph-orchestration`/`zeph-session`: the
   `testcontainers` dependency's `watchdog` feature (used to auto-stop leaked containers in
   Postgres integration tests) pulls in `signal-hook`'s `iterator` module, which `signal-hook`
