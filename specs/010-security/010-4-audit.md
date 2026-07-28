@@ -2,8 +2,8 @@
 aliases:
   - Audit Trail
   - Security Logging
-  - Cross-Tool Injection Correlation
-  - Env-Var Scrubbing
+  - Tool Execution Audit
+  - Authorization Logging
 tags:
   - sdd
   - spec
@@ -16,365 +16,164 @@ related:
   - "[[010-1-vault]]"
   - "[[010-2-injection-defense]]"
   - "[[010-3-authorization]]"
+  - "[[010-5-egress-logging]]"
 ---
 
 # Spec: Audit Trail & Security Logging
 
-> [!danger] Stale content — 2026-07 audit
-> The `AuditEntry`/`AuditEventType`/`AuditStatus`/`AuditLogger` schema below is fictional — the real
-> `AuditEntry` (`crates/zeph-tools/src/audit.rs`) is tool-execution-centric (`tool`, `command`,
-> `result`, `duration_ms`, `error_category`, `caller_id`, `correlation_id`, `vigil_risk`, ...), not
-> the generic `id`/`agent_id`/`event_type`/`resource`/`action`/`status` shape shown here. See
-> [[010-5-egress-logging]] for the accurate, current `AuditEntry`/`AuditLogger` description. The
-> "Cross-Tool Injection Correlation" section (`InjectionCorrelator`, time-windowed accumulation)
-> directly **contradicts** [[010-security/spec]]'s authoritative `CrossToolCorrelator`, which states
-> cross-turn signal accumulation is NEVER performed and is cleared every turn — do not implement
-> against this section without reconciling that contradiction first. Not corrected in this pass
-> (needs a mechanism-level rewrite, not a text fix).
-
-AgentRFC protocol audit, cross-tool injection correlation, environment variable scrubbing, compliance logging.
+Tool execution auditing, authorization logging, security event correlation, compliance logging.
 
 ## Overview
 
-Zeph maintains an immutable audit trail of all security-relevant events: tool invocations, authorization decisions, IPI detections, vault accesses. This log is used for compliance, incident investigation, and pattern detection (e.g., correlated injection attempts across multiple tools).
+Zeph maintains an immutable audit trail of security-relevant events: tool invocations, authorization decisions, IPI detections, shell command executions. This log is used for compliance, incident investigation, and pattern detection.
 
 ## Key Invariants
 
 **Always:**
-- All tool invocations logged with: tool name, input (sanitized), output (truncated), status, latency
-- All authorization failures logged with: agent, tool, capability, policy check details
-- All IPI detections logged with: confidence, source, content preview, user action
-- All vault accesses logged with: key name (not value), action (get/set), success/failure
-- Audit log persists to disk (SQLite or JSON lines format)
+- All tool invocations logged with: tool name, input (sanitized), output (preview), status, duration
+- All authorization denials logged with: agent/skill, tool, reason, policy rule matched
+- All shell command execution logged with: command (sanitized), exit code, duration
+- All secrets redacted from logs — never log API keys, vault key names, PII
+- Audit log persists immutably to disk
 
 **Never:**
-- Log secret values, API keys, or PII (always sanitize)
-- Truncate or modify audit entries after creation (immutable log)
-- Disable audit logging even in debug mode
+- Log secret values, API keys, or PII directly — always sanitize
+- Truncate or modify audit entries after creation
+- Disable audit logging, even in debug/testing modes
 
-## Audit Entry Schema
+## Tool Execution Audit
+
+Tool executor logs every call to an `AuditEntry`:
 
 ```rust
-#[derive(Serialize, Deserialize, Debug)]
 pub struct AuditEntry {
-    id: String,                    // UUID v4
-    timestamp: i64,                // unix epoch seconds
-    agent_id: String,
-    event_type: AuditEventType,
-    resource: String,              // tool name, endpoint, etc.
-    action: String,                // "invoke", "deny", "detect", "access"
-    status: AuditStatus,           // "success", "denied", "error"
-    details: serde_json::Value,    // event-specific details
-    correlation_id: String,        // trace across related events
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub enum AuditEventType {
-    ToolInvocation,
-    AuthorizationCheck,
-    IpiDetection,
-    VaultAccess,
-    ProtocolError,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub enum AuditStatus {
-    #[serde(rename = "success")]
-    Success,
-    #[serde(rename = "denied")]
-    Denied,
-    #[serde(rename = "error")]
-    Error,
+    pub timestamp: String,           // Unix timestamp (seconds) when invocation started
+    pub tool: ToolName,              // Tool identifier (e.g., "shell", "web_scrape")
+    pub command: String,             // Human-readable command or URL being invoked
+    pub result: AuditResult,         // Outcome of the invocation (success/failure)
+    pub duration_ms: u64,            // Wall-clock duration in milliseconds
+    pub error_category: Option<String>,  // Fine-grained error category label (if failed)
+    pub error_domain: Option<String>,    // High-level error domain for recovery
+    pub error_phase: Option<String>,     // Invocation phase where error occurred
+    pub claim_source: Option<ClaimSource>,  // Provenance of tool result
+    pub mcp_server_id: Option<String>,  // MCP server ID (if routed through McpToolExecutor)
+    pub injection_flagged: bool,     // Tool output flagged by regex injection detection
+    pub embedding_anomalous: bool,   // Tool output flagged by embedding guard anomaly
+    pub cross_boundary_mcp_to_acp: bool,  // Tool result crossed MCP-to-ACP trust boundary
+    pub adversarial_policy_decision: Option<String>,  // Adversarial policy decision
+    pub exit_code: Option<i32>,      // Process exit code for shell executions
+    pub truncated: bool,             // Whether output was truncated before storage
+    pub caller_id: Option<String>,   // Caller identity that initiated this call
+    pub policy_match: Option<String>,    // Policy rule trace that matched
+    pub correlation_id: Option<String>,  // Correlation ID shared with associated EgressEvent
+    pub vigil_risk: Option<VigilRiskLevel>,  // VIGIL risk level when gate flagged output
 }
 ```
 
-## Tool Invocation Audit
+Sanitization before logging:
+- Input/output truncated before storage if oversized
+- Known secret keys redacted: `api_key`, `token`, `password`, `secret`, `auth`, `key`
+- Vault-resolved secrets never logged
+- PII scrubbed via `[security.pii_filter]` regex patterns (SSN, credit card, email)
 
-Log every tool execution:
-
-```rust
-async fn audit_tool_invocation(
-    logger: &AuditLogger,
-    tool_name: &str,
-    input: &Value,
-    output: &Value,
-    status: ExecutionStatus,
-    latency_ms: u64,
-) -> Result<()> {
-    let entry = AuditEntry {
-        id: uuid::Uuid::new_v4().to_string(),
-        timestamp: now(),
-        agent_id: "primary".to_string(),
-        event_type: AuditEventType::ToolInvocation,
-        resource: tool_name.to_string(),
-        action: "invoke".to_string(),
-        status: match status {
-            ExecutionStatus::Success => AuditStatus::Success,
-            ExecutionStatus::Error => AuditStatus::Error,
-        },
-        details: json!({
-            "input": sanitize_for_logging(input),
-            "output_preview": truncate_output(output, 200),
-            "latency_ms": latency_ms,
-            "status_code": 200,  // if HTTP
-        }),
-        correlation_id: correlation_context::get_trace_id(),
-    };
-    
-    logger.log(entry).await?;
-    Ok(())
-}
-
-fn sanitize_for_logging(value: &Value) -> Value {
-    // Redact keys known to contain secrets
-    match value {
-        Value::Object(map) => {
-            let mut sanitized = map.clone();
-            for key in ["api_key", "password", "token", "secret", "auth"] {
-                if sanitized.contains_key(key) {
-                    sanitized.insert(
-                        key.to_string(),
-                        Value::String("[REDACTED]".to_string()),
-                    );
-                }
-            }
-            Value::Object(sanitized)
-        }
-        _ => value.clone(),
-    }
-}
+**Configuration** (`[tools.audit]`):
+```toml
+[tools.audit]
+enabled = true                     # Enable audit logging (default: true)
+destination = "stdout"             # Log destination: "stdout", "stderr", or file path
+# tool_risk_summary = false        # Log per-tool risk summary at startup (default: false)
 ```
 
-## Authorization Audit
+## Authorization & Shell Execution Details
 
-Log all permission checks:
+Authorization denials and shell execution details are captured within the unified `AuditEntry` structure:
+- **Authorization**: `AuditEntry.policy_match` contains the matched policy rule; `AuditEntry.adversarial_policy_decision` records the decision (`allow`/`deny:<reason>`/`error:<message>`)
+- **Shell execution**: `AuditEntry.command` is the sanitized shell command; `AuditEntry.exit_code` is the process exit code; `AuditEntry.duration_ms` is wall-clock execution time
 
-```rust
-async fn audit_authorization(
-    logger: &AuditLogger,
-    agent_id: &str,
-    tool_name: &str,
-    capability: &str,
-    allowed: bool,
-) -> Result<()> {
-    let entry = AuditEntry {
-        id: uuid::Uuid::new_v4().to_string(),
-        timestamp: now(),
-        agent_id: agent_id.to_string(),
-        event_type: AuditEventType::AuthorizationCheck,
-        resource: tool_name.to_string(),
-        action: "check".to_string(),
-        status: if allowed {
-            AuditStatus::Success
-        } else {
-            AuditStatus::Denied
-        },
-        details: json!({
-            "required_capability": capability,
-            "decision": if allowed { "allow" } else { "deny" },
-        }),
-        correlation_id: correlation_context::get_trace_id(),
-    };
-    
-    logger.log(entry).await?;
-    Ok(())
-}
-```
+All command text is sanitized before logging: `sudo`, passwords, and secret env vars are redacted from the `command` field.
 
 ## IPI Detection Audit
 
-Log all injection attempts:
+Injection detection results logged via `AuditSignal`:
 
 ```rust
-async fn audit_ipi_detection(
-    logger: &AuditLogger,
-    source: &str,                // "web_fetch", "mcp_output", etc.
-    confidence: f32,
-    pattern_matched: &str,
-    user_action: &str,           // "approved", "rejected", "blocked"
-) -> Result<()> {
-    let entry = AuditEntry {
-        id: uuid::Uuid::new_v4().to_string(),
-        timestamp: now(),
-        agent_id: "security".to_string(),
-        event_type: AuditEventType::IpiDetection,
-        resource: source.to_string(),
-        action: "detect".to_string(),
-        status: match user_action {
-            "approved" => AuditStatus::Success,
-            _ => AuditStatus::Denied,
-        },
-        details: json!({
-            "confidence": format!("{:.2}%", confidence * 100.0),
-            "pattern": pattern_matched,
-            "user_action": user_action,
-        }),
-        correlation_id: correlation_context::get_trace_id(),
-    };
-    
-    logger.log(entry).await?;
-    Ok(())
+pub enum AuditSignalType {
+    PolicyViolation,                // Tool blocked by policy
+    PromptInjectionPattern,         // Regex pattern matched
+    ToolChainAnomaly,               // Unexpected tool sequence
+    ConfidenceDrop,                 // LLM confidence dropped
+}
+
+pub enum Severity {
+    Low,      // Minor concern
+    Medium,   // Warrants tracking
+    High,     // Strong indicator
+}
+
+pub struct AuditSignal {
+    pub signal_type: AuditSignalType,
+    pub severity: Severity,
 }
 ```
 
-## Cross-Tool Injection Correlation
+> [!warning] Architectural gap
+> `TrajectoryRiskAccumulator` maintains a **per-session, cross-turn risk score with exponential decay** and makes **hard-blocking tool-execution decisions** when risk exceeds a threshold. This appears to violate or at least is not addressed by the parent spec's NEVER rule, which forbids cross-turn accumulation "for injection-confirmation decisions." The spec carves out an exception for `TrajectorySentinel` (advisory-only, reversible decay), but does not discuss `TrajectoryRiskAccumulator` at all. Whether this system should be governed by the NEVER rule or falls outside its scope (because its decisions are general safety-gating, not injection-confirmation) is an open architectural question that needs resolution.
 
-Detect patterns across multiple tool invocations:
+## Turn Boundary Isolation & Signal Accumulation
+
+One signal-processing system operates at the session scope:
+
+**`TrajectoryRiskAccumulator`** — accumulates signals **per-session, across turn boundaries** with exponential decay:
 
 ```rust
-pub struct InjectionCorrelator {
-    recent_detections: Arc<Mutex<VecDeque<IpiDetection>>>,
-    correlation_window: Duration,
+pub struct TrajectoryRiskAccumulator {
+    // Maintains trajectory_risk: [0.0, 1.0]
+    // Decays exponentially between turns
+    // Makes hard-blocking decisions when risk >= threshold
 }
 
-impl InjectionCorrelator {
-    async fn check_correlation(
-        &self,
-        new_detection: &IpiDetection,
-    ) -> Result<Option<InjectionCluster>> {
-        let mut detections = self.recent_detections.lock().await;
-        
-        // Remove stale detections
-        let cutoff = now() - self.correlation_window.as_secs();
-        while !detections.is_empty() && detections.front().unwrap().timestamp < cutoff {
-            detections.pop_front();
-        }
-        
-        // Check for patterns
-        let same_pattern_count = detections
-            .iter()
-            .filter(|d| d.pattern_matched == new_detection.pattern_matched)
-            .count();
-        
-        if same_pattern_count >= 3 {
-            // Same injection pattern detected 3+ times recently
-            return Ok(Some(InjectionCluster {
-                pattern: new_detection.pattern_matched.clone(),
-                count: same_pattern_count + 1,
-                sources: detections
-                    .iter()
-                    .map(|d| d.source.clone())
-                    .collect(),
-            }));
-        }
-        
-        detections.push_back(new_detection.clone());
-        Ok(None)
-    }
+impl TrajectoryRiskAccumulator {
+    pub fn is_blocked(&self) -> bool;  // Hard block: risk >= threshold
+    pub fn ingest(&mut self, signal: &AuditSignal);  // Cross-turn accumulation
+    pub fn advance_turn(&mut self);  // Apply exponential decay at turn boundary
 }
 ```
 
-## Environment Variable Scrubbing
+**Status**: Not explicitly addressed in parent spec's NEVER rule. Whether this system's cross-turn, hard-blocking behavior is intended carve-out (like `TrajectorySentinel`) or an overlooked violation remains unresolved.
 
-Remove secrets from subprocess environment:
+## Audit Log Storage & Serialization
 
-```rust
-fn scrub_environment(env: &HashMap<String, String>) -> HashMap<String, String> {
-    let secret_prefixes = vec![
-        "ZEPH_",
-        "OPENAI_API",
-        "ANTHROPIC_API",
-        "AWS_",
-        "GCP_",
-        "GITHUB_TOKEN",
-        "SLACK_",
-        "TELEGRAM_",
-        "DATABASE_PASSWORD",
-    ];
-    
-    let mut scrubbed = HashMap::new();
-    
-    for (key, value) in env {
-        let is_secret = secret_prefixes
-            .iter()
-            .any(|prefix| key.to_uppercase().starts_with(prefix));
-        
-        if is_secret {
-            log::debug!("Scrubbing env var: {}", key);
-            // Don't include in subprocess environment
-            continue;
-        }
-        
-        scrubbed.insert(key.clone(), value.clone());
-    }
-    
-    scrubbed
-}
-```
-
-## Audit Log Storage
-
-Immutable persistence:
+Immutable persistence via `AuditLogger` (`crates/zeph-tools/src/audit.rs:110`), which serializes entries as flat JSON objects (newline-terminated JSONL format):
 
 ```rust
-pub struct AuditLogger {
-    db: Arc<sqlx::SqlitePool>,  // immutable log table
-}
+pub struct AuditLogger { /* destination: AuditDestination */ }
 
 impl AuditLogger {
-    async fn log(&self, entry: AuditEntry) -> Result<()> {
-        sqlx::query(
-            "INSERT INTO audit_log (
-                id, timestamp, agent_id, event_type, resource,
-                action, status, details, correlation_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
-        )
-        .bind(&entry.id)
-        .bind(entry.timestamp)
-        .bind(&entry.agent_id)
-        .bind(format!("{:?}", entry.event_type))
-        .bind(&entry.resource)
-        .bind(&entry.action)
-        .bind(format!("{:?}", entry.status))
-        .bind(serde_json::to_string(&entry.details)?)
-        .bind(&entry.correlation_id)
-        .execute(&*self.db)
-        .await?;
-        
-        Ok(())
-    }
-    
-    async fn query_by_correlation(
-        &self,
-        correlation_id: &str,
-    ) -> Result<Vec<AuditEntry>> {
-        sqlx::query_as::<_, AuditEntry>(
-            "SELECT * FROM audit_log WHERE correlation_id = ? ORDER BY timestamp"
-        )
-        .bind(correlation_id)
-        .fetch_all(&*self.db)
-        .await
-        .context("audit query failed")
-    }
+    /// Log a single audit entry asynchronously.
+    pub async fn log(&self, entry: &AuditEntry);
 }
 ```
 
-## Configuration
+**Destination types** (`AuditDestination`):
+- **Stdout** (default): entries written to standard output, one JSON line per entry
+- **Stderr**: entries written to standard error
+- **File**: entries written to a file path (created with `0o600` permissions on Unix)
 
-```toml
-[security.audit]
-enabled = true
-log_level = "info"              # "debug", "info", "warn"
-backend = "sqlite"              # or "jsonl"
-path = ".local/audit.db"
+All entries are serialized as compact JSON objects (newline-terminated JSONL). Optional fields are omitted to keep entries compact.
 
-# Retention
-retention_days = 90             # after which entries can be archived
-archive_path = ".local/audit.archive.jsonl"
+## Vault Access Logging
 
-# Sampling (reduce volume in production)
-sample_rate = 1.0               # log all events; set < 1.0 to sample
-```
+Vault reads/writes are NOT logged to audit trail (to prevent metadata leakage), but are tracked via in-memory metrics. Failed vault lookups are logged with redacted key names.
 
 ## Integration Points
 
-- [[006-tools/spec]] — Tool execution audited here
-- [[010-1-vault]] — Vault accesses audited
-- [[010-2-injection-defense]] — IPI detections audited
-- [[010-3-authorization]] — Authorization checks audited
+- [[006-tools/spec]] — Tool execution audited
+- [[010-1-vault]] — Credential access tracked (metadata-safe)
+- [[010-2-injection-defense]] — IPI `AuditSignal` ingested by trajectory accumulator
+- [[010-3-authorization]] — Authorization violations logged
+- [[010-5-egress-logging]] — HTTP/webhook egress events logged
 
 ## See Also
 
-- [[010-security/spec]] — Parent
-- [[010-2-injection-defense]] — IPI detection events
-- [[010-3-authorization]] — Authorization check events
+- [[010-security/spec]] — Parent; cross-turn NEVER rule for hard decisions
+- [[010-5-egress-logging]] — HTTP egress audit (`EgressEvent`)

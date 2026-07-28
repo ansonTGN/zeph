@@ -23,16 +23,6 @@ related:
 
 # Spec: Authorization & Capability-Based Access Control
 
-> [!danger] Stale content — 2026-07 audit
-> `AuthPolicy`, `ShellSandbox`, `SsrfValidator` below are fictional — zero matches in the codebase —
-> and were not corrected in this pass (rewrite, not a text fix). The code samples also chain
-> `.unwrap()` on `Regex::new(...)`, which directly violates
-> [[001-system-invariants/spec#11. Error Handling Contract]] ("NEVER use `panic!()`... no `unwrap()`
-> in production paths") — do not copy that pattern. Real mechanisms live in the shell blocklist
-> (`crates/zeph-tools/src/filter/security.rs` and the shell executor's `PermissionPolicy` gate) and
-> the SSRF `validate_url` path referenced correctly in [[010-security/spec]] and
-> [[010-5-egress-logging]] — treat those as authoritative over this file.
-
 Permission policy enforcement, shell sandbox blocklist, SSRF protection, tool authorization.
 
 ## Overview
@@ -42,234 +32,150 @@ Zeph's authorization layer enforces what operations the agent is allowed to perf
 ## Key Invariants
 
 **Always:**
-- All tool execution requires authorization check against policy
-- Shell commands checked against blocklist before execution
-- HTTP requests checked for SSRF patterns (localhost, private ranges)
-- Authorization failures logged with full context
+- All tool execution checked against `PolicyEnforcer` deny/allow rules before execution
+- Shell commands checked against the blocklist unconditionally — **before** `PermissionPolicy` evaluation
+- HTTP requests validated via `validate_url()` — private IP ranges blocked by default
+- Authorization failures logged to audit trail with full context
 
 **Never:**
-- Bypass authorization checks for "trusted" tools
+- Bypass blocklist checks for "trusted" tools — blocklist is unconditional
 - Allow shell execution without sandbox validation
-- Make HTTP requests to private IP ranges without explicit allow-list
+- Make HTTP requests to private IP ranges without explicit allowlist
 
-## Capability-Based Access Control
+## Declarative Policy Compiler
 
-Policies define which agents can execute which tools:
+`PolicyEnforcer` (`crates/zeph-tools/src/policy.rs`) evaluates TOML-based access-control rules with deny-first semantics:
 
 ```rust
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Capability {
-    ToolRead,           // read-only tools
-    ToolWrite,          // file write, API modify
-    ShellExecute,       // shell commands
-    HttpRequest,        // HTTP/HTTPS requests
-    NetworkListen,      // open ports
-    ProcessManage,      // spawn/kill processes
+pub struct PolicyEnforcer { /* ... */ }
+
+#[non_exhaustive]
+pub enum PolicyDecision {
+    Allow { trace: String },   // Rule matched; execution allowed
+    Deny { trace: String },    // Rule matched; execution denied
 }
 
-pub struct AuthPolicy {
-    // agent_id → capabilities
-    grants: HashMap<String, HashSet<Capability>>,
-    // capability → individual tool allows
-    tool_overrides: HashMap<String, HashSet<String>>,
-}
-
-impl AuthPolicy {
-    async fn check_authorization(
+impl PolicyEnforcer {
+    /// Evaluate policy rules against tool call context.
+    ///
+    /// Deny rules checked first. If a deny rule matches, returns `Deny`.
+    /// Otherwise, checks allow rules. If no rule matches, uses `default_effect`.
+    pub fn evaluate(
         &self,
-        agent_id: &str,
         tool_name: &str,
-        required_capability: Capability,
-    ) -> Result<()> {
-        // 1. Check if agent has capability
-        let capabilities = self.grants
-            .get(agent_id)
-            .ok_or_else(|| anyhow!("Agent {} not in policy", agent_id))?;
-        
-        if !capabilities.contains(&required_capability) {
-            return Err(anyhow!(
-                "Agent {} lacks capability {:?}",
-                agent_id,
-                required_capability
-            ));
-        }
-        
-        // 2. Check tool-level override (e.g., "shell_execute" allowed but "rm -rf" blocked)
-        if let Some(allowed_tools) = self.tool_overrides.get(tool_name) {
-            if !allowed_tools.contains(agent_id) {
-                return Err(anyhow!(
-                    "Tool '{}' not in allow-list for agent {}",
-                    tool_name,
-                    agent_id
-                ));
-            }
-        }
-        
-        Ok(())
-    }
+        params: &serde_json::Map<String, serde_json::Value>,
+        context: &PolicyContext,
+    ) -> PolicyDecision { /* ... */ }
+}
+
+pub struct PolicyContext {
+    pub trust_level: SkillTrustLevel,
+    pub env: std::collections::HashMap<String, String>,
 }
 ```
 
-## Shell Sandbox
+**Rule matching** (all conditions are AND'd):
+- `effect`: `"allow"` or `"deny"`
+- `tool`: glob pattern matching tool name (e.g., `"read_*"`, `"rm"`)
+- `paths`: glob patterns matched against path-like parameters; rule fires if ANY matches
+- `env`: environment variable names that must ALL be present for rule to apply
+- `trust_level`: minimum required trust level (`Trusted` > `Neutral` > `Untrusted`)
+- `args_match`: regex matched against individual string parameter values
+- `capabilities`: named capabilities associated with this rule (for auditing/metadata)
 
-Blocklist of dangerous commands:
+**Semantics**: deny rules are evaluated first; matching deny → `Deny`. If no deny matches, evaluate allow rules; matching allow → `Allow`. If no rule matches, use `default_effect` (typically `Deny`).
 
-```rust
-pub struct ShellSandbox {
-    blocklist: Vec<ShellPattern>,
-}
+**Config example**:
+```toml
+[[tools.policy]]
+effect = "deny"
+tool = "rm"                      # Glob pattern
+# Blocks all rm invocations (handled specially by shell blocklist anyway)
 
-#[derive(Clone)]
-pub struct ShellPattern {
-    pattern: Regex,
-    reason: &'static str,
-}
-
-impl ShellSandbox {
-    fn new() -> Self {
-        Self {
-            blocklist: vec![
-                // Destructive commands
-                ShellPattern {
-                    pattern: Regex::new(r"^\s*(rm|rmdir|dd)\s+-rf").unwrap(),
-                    reason: "recursive deletion blocked",
-                },
-                ShellPattern {
-                    pattern: Regex::new(r":(){ :|:|");").unwrap(),
-                    reason: "fork bomb detected",
-                },
-                // Privilege escalation
-                ShellPattern {
-                    pattern: Regex::new(r"^sudo\s+|/etc/sudoers").unwrap(),
-                    reason: "privilege escalation blocked",
-                },
-                // System modification
-                ShellPattern {
-                    pattern: Regex::new(r"^\s*(chmod|chown|passwd|usermod)").unwrap(),
-                    reason: "system modification blocked",
-                },
-            ],
-        }
-    }
-    
-    fn validate_command(&self, cmd: &str) -> Result<()> {
-        for pattern in &self.blocklist {
-            if pattern.pattern.is_match(cmd) {
-                return Err(anyhow!("{}", pattern.reason));
-            }
-        }
-        Ok(())
-    }
-}
+[[tools.policy]]
+effect = "allow"
+tool = "read_file"
+paths = ["/home/*/documents/*"]  # Glob patterns on paths
+trust_level = "trusted"          # Only for trusted skill callers
 ```
+
+## Shell Sandbox Blocklist
+
+`ShellExecutor` enforces an unconditional blocklist before spawning shell commands. The blocklist runs **before** PermissionPolicy evaluation:
+
+**Hardcoded blocklist** (`crates/zeph-tools/src/shell/mod.rs`):
+```
+sudo, mkfs, dd if=, curl, wget, nc, ncat, netcat, shutdown, reboot, halt
+```
+
+Any invocation containing one of these patterns (case-sensitive, as a substring or token) is blocked unconditionally.
+
+**Special handling for `rm`**:
+- `rm -rf` is **allowed** only when all three conditions are met:
+  - Operating on relative paths (e.g., `rm -rf ./tempdir`)
+  - NOT on `.git/worktrees`, root, or `$HOME`
+  - NOT on absolute paths
+- Example: `rm -rf /` is blocked; `rm -rf ./temp` is allowed (subject to policy checks)
+
+**Limitations** (documented in code):
+- Bypass via indirect invocation: `bash -c "rm ..."` — the `-c` argument is not scanned for blocked patterns
+- Bypass via variable indirection: `cmd=rm; $cmd file` — the shell variable is not expanded for scanning
+- The blocklist is a **first-pass defense**, not comprehensive; it mitigates common attacks but does not prevent all privilege escalation attempts
+
+Blocklist validation is unconditional; all other shell commands then pass through `PolicyEnforcer` for fine-grained access control.
 
 ## SSRF Protection
 
-Prevent requests to internal services:
+`validate_url()` (`crates/zeph-tools/src/net.rs`) blocks requests to private IP ranges and loopback addresses:
 
 ```rust
-pub struct SsrfValidator {
-    blocked_ranges: Vec<IpNetwork>,
-    allow_list: Vec<String>,  // explicit allowed domains
-}
+/// Validate a URL for SSRF attacks.
+///
+/// Blocks all private IP ranges, localhost, link-local, and non-HTTPS schemes:
+/// - IPv4: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 127.0.0.0/8, 0.0.0.0, 255.255.255.255
+/// - IPv6: ::1, fc00::/7, fe80::/10
+/// - Schemes: only `https://` allowed; `http://`, `file://`, `ftp://`, `data://`, `javascript://` blocked
+pub fn validate_url(raw: &str) -> Result<Url, ToolError>;
+```
 
-impl SsrfValidator {
-    fn new() -> Self {
-        Self {
-            blocked_ranges: vec![
-                // Private IPv4
-                "127.0.0.0/8".parse().unwrap(),      // loopback
-                "169.254.0.0/16".parse().unwrap(),   // link-local
-                "10.0.0.0/8".parse().unwrap(),       // private
-                "172.16.0.0/12".parse().unwrap(),    // private
-                "192.168.0.0/16".parse().unwrap(),   // private
-                // IPv6
-                "::1/128".parse().unwrap(),           // loopback
-                "fc00::/7".parse().unwrap(),          // private
-                "fe80::/10".parse().unwrap(),         // link-local
-            ],
-            allow_list: vec![],
-        }
-    }
-    
-    async fn validate_url(&self, url: &str) -> Result<()> {
-        let parsed = url::Url::parse(url)?;
-        
-        // 1. Check allow-list first
-        if let Some(domain) = parsed.domain() {
-            if self.allow_list.contains(&domain.to_string()) {
-                return Ok(());
-            }
-        }
-        
-        // 2. Resolve hostname
-        let addr = tokio::net::lookup_host(
-            format!("{}:{}", parsed.host_str().ok_or("no host")?, 
-                            parsed.port().unwrap_or(443))
-        ).await?
-            .next()
-            .ok_or("hostname resolution failed")?;
-        
-        // 3. Check IP against blocked ranges
-        for range in &self.blocked_ranges {
-            if range.contains(addr.ip()) {
-                return Err(anyhow!(
-                    "SSRF blocked: {} resolves to private IP {}",
-                    parsed.host_str().unwrap_or("?"),
-                    addr.ip()
-                ));
-            }
-        }
-        
-        Ok(())
-    }
+**Redirect handling**: each redirect target is validated independently — a redirect chain where any hop points to a private IP fails at that hop.
+
+**Applied to**:
+- `WebScrapeExecutor` (`scrape` tool) — validates URLs before fetching; validates each redirect target
+- Redirect chains: all hops must pass validation; a 302 to `http://localhost/` is caught and fails
+
+**Allowlist**: no allowlist exists for SSRF validation; the deny-all private-IP policy is not configurable.
+
+## Credential Environment Variable Scrubbing
+
+`ShellExecutor` filters environment variables via a configurable `env_blocklist` before spawning subprocess commands:
+
+```rust
+pub struct ShellExecutor {
+    env_blocklist: Vec<String>,  // Env var names to strip from subprocess (prefix match)
 }
 ```
 
-## Configuration
+The blocklist is applied inline during command construction:
+1. User provides extra env vars (e.g., API keys for a script)
+2. ShellExecutor constructs subprocess env by filtering the parent's env + extra vars
+3. Any env var matching a prefix in `env_blocklist` is stripped
 
-```toml
-[security.authorization]
-# Capability grants per agent
-[[security.authorization.agents]]
-id = "primary_agent"
-capabilities = ["ToolRead", "ToolWrite", "HttpRequest"]
+**Default blocklist** (from config `[tools.shell].env_blocklist`):
+- Typically includes: `ZEPH_*`, `AWS_*`, `GITHUB_*`, `OPENAI_*`, `ANTHROPIC_*`, etc.
 
-[[security.authorization.agents]]
-id = "sandbox_agent"
-capabilities = ["ToolRead"]
-
-# Tool allow-lists (tool → allowed agents)
-[security.authorization.tool_overrides]
-shell_execute = ["primary_agent"]
-file_delete = ["primary_agent"]
-network_listen = []
-
-# Shell sandbox
-[security.sandbox]
-enabled = true
-blocklist = [
-  "^\\s*(rm|rmdir)\\s+-rf",
-  ":(){ :|:|;",
-  "^sudo\\s+",
-]
-
-# SSRF protection
-[security.ssrf]
-enabled = true
-blocked_ranges = ["127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
-allow_list = ["api.example.com", "internal.trusted.service"]
-```
+Blocklist filtering is unconditional and applied at subprocess spawn time, not at config time. MCP stdio servers inherit the same env filtering policy.
 
 ## Integration Points
 
-- [[006-tools/spec]] — Tool execution calls authorization check
-- [[008-3-security]] — OAP authorization for MCP tools
-- [[010-4-audit]] — Authorization failures logged
+- [[008-mcp/spec]] — MCP tool allowlist + policy enforcement
+- [[006-tools/spec]] — tool registry + authorization binding
+- [[010-4-audit]] — authorization violations logged to audit trail
+- Web executor — SSRF validation on all HTTP requests
+- MCP OAuth — OAuth flows validated via `validate_oauth_metadata_urls()`
 
 ## See Also
 
-- [[010-security/spec]] — Parent
-- [[006-tools/spec]] — ToolExecutor enforces authorization
-- [[008-3-security]] — OAP authorization for MCP
-- [[010-4-audit]] — Audit trail of authorization checks
+- [[010-security/spec]] — Parent; shell blocklist and SSRF noted as unconditional
+- [[010-2-injection-defense]] — guardrail filtering runs before tool dispatch
+- [[008-3-security]] — MCP tool allowlist enforcement
