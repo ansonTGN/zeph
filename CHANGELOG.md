@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- `release.yml`: added `aarch64-pc-windows-msvc` to the `build-binaries` matrix, built natively
+  on GitHub's hosted `windows-11-arm` runner (generally available for public repositories since
+  August 2025). This replaces the previous cross-compilation attempt from Linux, which failed
+  because crypto crates (`ring`, `aws-lc-sys`) require Windows ARM64 SDK headers unavailable in
+  cross containers — the native runner ships the real MSVC ARM64 toolchain and SDK, so the
+  problem no longer applies.
+
+### Changed
+
+- `release.yml`: removed `Swatinem/rust-cache` and `sccache` from the `build-binaries` job.
+  Release builds only run on `v*` tag push, infrequently enough that any cache entry written
+  by the previous release has almost certainly been evicted from the shared 10 GiB GHA cache
+  (LRU + 7-day unused-entry eviction) by the time the next release runs, making the cache a
+  cold miss anyway — while still costing multi-GB writes against the shared cache quota that
+  `ci.yml` depends on for its frequent, cache-effective runs.
+
 ## [0.22.4] - 2026-08-16
 
 ### Added
